@@ -55,7 +55,7 @@ import { promisify } from "node:util";
 
 // service/browser.ts
 import { execFile, spawn } from "node:child_process";
-import { promises as fs2 } from "node:fs";
+import { existsSync, promises as fs2 } from "node:fs";
 import { tmpdir } from "node:os";
 import path2 from "node:path";
 
@@ -1054,7 +1054,27 @@ var ArtifactContexts = class {
 };
 
 // service/browser.ts
-var CHROME_PATH = process.env.DS_CHROME_PATH ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+function resolveChromePath() {
+  const envOverride = process.env.DS_CHROME_PATH;
+  if (envOverride) return envOverride;
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA ?? "";
+    const probes = [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      localAppData ? path2.join(localAppData, "Google", "Chrome", "Application", "chrome.exe") : ""
+    ];
+    for (const candidate of probes) {
+      if (candidate && existsSync(candidate)) return candidate;
+    }
+    return "chrome";
+  }
+  if (process.platform === "darwin") {
+    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  }
+  return "chrome";
+}
+var CHROME_PATH = resolveChromePath();
 var VIEWPORT_WIDTH = 1280;
 var VIEWPORT_HEIGHT = 800;
 var CDP_TIMEOUT_MS = 3e4;
@@ -1671,6 +1691,10 @@ function validCameraZoom(value) {
 }
 async function reapOrphanChrome() {
   const prefix = path2.join(tmpdir(), "ds-chrome-");
+  if (process.platform === "win32") {
+    await reapOrphanChromeWin32(prefix);
+    return;
+  }
   let stdout;
   try {
     ({ stdout } = await new Promise((resolve, reject) => {
@@ -1699,6 +1723,50 @@ async function reapOrphanChrome() {
   for (const pid of pids) {
     try {
       process.kill(pid, "SIGKILL");
+    } catch {
+    }
+  }
+  for (const profile of profiles) {
+    await fs2.rm(profile, { recursive: true, force: true }).catch(() => {
+    });
+  }
+}
+async function reapOrphanChromeWin32(prefix) {
+  let stdout;
+  try {
+    const script = `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*ds-chrome-*' } | ForEach-Object { $_.ProcessId.ToString() + "\`t" + $_.CommandLine }`;
+    ({ stdout } = await new Promise((resolve, reject) => {
+      execFile(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", script],
+        { maxBuffer: 8 * 1024 * 1024 },
+        (error, out) => {
+          if (error) reject(error);
+          else resolve({ stdout: String(out) });
+        }
+      );
+    }));
+  } catch {
+    return;
+  }
+  const pids = [];
+  const profiles = /* @__PURE__ */ new Set();
+  for (const line of stdout.split(/\r?\n/)) {
+    const tab = line.indexOf("	");
+    if (tab <= 0) continue;
+    const pid = Number(line.slice(0, tab).trim());
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    pids.push(pid);
+    const dirMatch = line.slice(tab + 1).match(/--user-data-dir=(\S+)/);
+    if (dirMatch && dirMatch[1] && path2.resolve(dirMatch[1]).startsWith(prefix)) {
+      profiles.add(dirMatch[1]);
+    }
+  }
+  for (const pid of pids) {
+    try {
+      await new Promise((resolve) => {
+        execFile("taskkill", ["/PID", String(pid), "/F", "/T"], () => resolve());
+      });
     } catch {
     }
   }
@@ -2752,7 +2820,10 @@ async function readServerRecord(dir) {
       pid: typeof record.pid === "number" && record.pid > 0 ? record.pid : record.pgid,
       port: typeof record.port === "number" && Number.isFinite(record.port) ? record.port : null,
       startedAt: typeof record.startedAt === "number" ? record.startedAt : 0,
-      identity: typeof record.identity === "string" && record.identity.trim() !== "" ? record.identity : void 0
+      identity: typeof record.identity === "string" && record.identity.trim() !== "" ? record.identity : void 0,
+      // FORK-WIN: a record only acts as win32 when it says so; legacy/POSIX
+      // records (no platform field) keep the exact original semantics.
+      platform: record.platform === "win32" || record.platform === "posix" ? record.platform : void 0
     };
   } catch {
     return null;
@@ -2836,6 +2907,57 @@ function groupAlive(pgid) {
   }
 }
 var execFileAsync = promisify(execFile2);
+async function win32PidAlive(pid) {
+  try {
+    const { stdout } = await execFileAsync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"]);
+    return stdout.split(/\r?\n/).some((line) => {
+      const cols = line.split(",");
+      return Number(cols[1]?.replace(/"/g, "") ?? NaN) === pid;
+    });
+  } catch {
+    return true;
+  }
+}
+async function recordGroupAlive(record) {
+  if (record.platform === "win32") return win32PidAlive(record.pid);
+  return groupAlive(record.pgid);
+}
+async function win32PortOwnerPid(port) {
+  try {
+    const { stdout } = await execFileAsync("netstat", ["-ano"]);
+    const needle = `:${port}`;
+    for (const line of stdout.split(/\r?\n/)) {
+      const columns = line.trim().split(/\s+/);
+      if (columns.length < 5 || columns[0] !== "TCP") continue;
+      const local = columns[1] ?? "";
+      const state = columns[3];
+      const pid = Number(columns[4]);
+      if (!local.endsWith(needle) || state !== "LISTENING") continue;
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+async function win32PidInTree(pid, ancestor, maxDepth = 24) {
+  if (pid === ancestor) return true;
+  try {
+    const script = `$a=${ancestor}; $p=${pid}; for ($i = 0; $i -lt ${maxDepth}; $i++) { if ($p -eq $a) { exit 0 }; $c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $p) -ErrorAction SilentlyContinue; if ($null -eq $c) { exit 1 }; $p = [int]$c.ParentProcessId; if ($p -le 0) { exit 1 } }; exit 1`;
+    await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function win32WaitPidGone(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!await win32PidAlive(pid)) return true;
+    await delay2(STOP_POLL_MS);
+  }
+  return !await win32PidAlive(pid);
+}
 async function readProcessIdentity(pid) {
   try {
     const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "lstart="]);
@@ -2846,6 +2968,7 @@ async function readProcessIdentity(pid) {
   }
 }
 async function verifyRecordIdentity(record) {
+  if (record.platform === "win32") return verifyRecordIdentityWin32(record);
   if (!record.identity) {
     return { verified: false, reason: `the recorded server (pid ${record.pid}) cannot be verified as ours` };
   }
@@ -2854,6 +2977,17 @@ async function verifyRecordIdentity(record) {
     return { verified: false, reason: `the recorded server (pid ${record.pid}) cannot be verified as ours` };
   }
   return { verified: true };
+}
+async function verifyRecordIdentityWin32(record) {
+  if (record.port === null) return { verified: false, reason: `the recorded server (pid ${record.pid}) cannot be verified as ours on win32 (no port recorded)` };
+  const owner = await win32PortOwnerPid(record.port);
+  if (owner !== null && (owner === record.pid || await win32PidInTree(owner, record.pid))) {
+    return { verified: true };
+  }
+  return {
+    verified: false,
+    reason: owner === null ? `the recorded server (pid ${record.pid}) cannot be verified as ours on win32 (nothing is listening on port ${record.port})` : `the recorded server (pid ${record.pid}) cannot be verified as ours on win32 (port ${record.port} is owned by pid ${owner})`
+  };
 }
 function signalGroup(pgid, signal) {
   try {
@@ -2883,6 +3017,7 @@ async function stopDevServer(dir) {
   const key = path3.resolve(dir);
   const record = serverRecords.get(key) ?? await readServerRecord(key);
   if (!record) return { stopped: false };
+  if (record.platform === "win32") return stopDevServerWin32(key, record);
   const stoppedPgid = record.pgid;
   if (groupAlive(stoppedPgid)) {
     const check = await verifyRecordIdentity(record);
@@ -2907,6 +3042,37 @@ async function stopDevServer(dir) {
   await clearRecordIfSame(key, stoppedPgid);
   return { stopped: true };
 }
+async function stopDevServerWin32(key, record) {
+  const pid = record.pid;
+  if (await win32PidAlive(pid)) {
+    const check = await verifyRecordIdentityWin32(record);
+    if (!check.verified) return { stopped: false, error: `${check.reason}; not stopping it` };
+    let killed = false;
+    try {
+      await execFileAsync("taskkill", ["/PID", String(pid), "/T", "/F"]);
+      killed = true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/not found/i.test(message)) {
+        return { stopped: false, error: `taskkill could not stop pid ${pid}: ${message}` };
+      }
+    }
+    if (killed && !await win32WaitPidGone(pid, STOP_KILL_WAIT_MS)) {
+      return {
+        stopped: false,
+        error: `the dev server (pid ${pid}) is still alive after taskkill`
+      };
+    }
+  }
+  if (record.port !== null && !await waitForPortFree(record.port, PORT_FREE_WAIT_MS)) {
+    return {
+      stopped: false,
+      error: `port ${record.port} remains in use after the dev server stopped`
+    };
+  }
+  await clearRecordIfSame(key, pid);
+  return { stopped: true };
+}
 async function getDevServerStatus(dir) {
   const key = path3.resolve(dir);
   const record = serverRecords.get(key) ?? await readServerRecord(key);
@@ -2922,7 +3088,7 @@ async function getDevServerStatus(dir) {
     }
     return { up: false, port: null };
   }
-  if (!groupAlive(record.pgid)) {
+  if (!await recordGroupAlive(record)) {
     await clearRecordIfSame(key, record.pgid);
     if (record.port !== null && !await canBindPort(record.port)) {
       return {
@@ -2993,7 +3159,7 @@ async function ensureDevServer(url, options = {}) {
       }
       const pinnedPort2 = portFromUrl(url);
       const existing2 = serverRecords.get(key) ?? await readServerRecord(key);
-      if (existing2 && pinnedPort2 !== null && existing2.port === pinnedPort2 && groupAlive(existing2.pgid)) {
+      if (existing2 && pinnedPort2 !== null && existing2.port === pinnedPort2 && await recordGroupAlive(existing2)) {
         const check = await verifyRecordIdentity(existing2);
         if (check.verified) return finish({ started: false, up: true });
       }
@@ -3005,7 +3171,7 @@ async function ensureDevServer(url, options = {}) {
     }
     const pinnedPort = portFromUrl(url);
     const existing = serverRecords.get(key) ?? await readServerRecord(key);
-    if (existing && pinnedPort !== null && existing.port !== null && existing.port !== pinnedPort && groupAlive(existing.pgid)) {
+    if (existing && pinnedPort !== null && existing.port !== null && existing.port !== pinnedPort && await recordGroupAlive(existing)) {
       const check = await verifyRecordIdentity(existing);
       if (check.verified) {
         return finish({
@@ -3020,7 +3186,7 @@ async function ensureDevServer(url, options = {}) {
         error: `${check.reason} \u2014 not overwriting its record`
       });
     }
-    if (existing && pinnedPort !== null && existing.port === pinnedPort && !await canBindPort(pinnedPort) && groupAlive(existing.pgid)) {
+    if (existing && pinnedPort !== null && existing.port === pinnedPort && !await canBindPort(pinnedPort) && await recordGroupAlive(existing)) {
       const check = await verifyRecordIdentity(existing);
       if (check.verified) return finish({ started: false, up: true });
     }
@@ -3064,18 +3230,28 @@ async function startAndWait(command, dir, url, timeoutMs) {
   leader = typeof child.pid === "number" ? child.pid : null;
   const pid = child.pid;
   if (typeof pid === "number") {
-    let identity = await readProcessIdentity(pid);
-    if (identity === null) {
-      await delay2(50);
-      identity = await readProcessIdentity(pid);
+    if (process.platform === "win32") {
+      await writeServerRecord(path3.resolve(dir), {
+        pgid: pid,
+        pid,
+        port: portFromUrl(url),
+        startedAt: Date.now(),
+        platform: "win32"
+      });
+    } else {
+      let identity = await readProcessIdentity(pid);
+      if (identity === null) {
+        await delay2(50);
+        identity = await readProcessIdentity(pid);
+      }
+      await writeServerRecord(path3.resolve(dir), {
+        pgid: pid,
+        pid,
+        port: portFromUrl(url),
+        startedAt: Date.now(),
+        ...identity ? { identity } : {}
+      });
     }
-    await writeServerRecord(path3.resolve(dir), {
-      pgid: pid,
-      pid,
-      port: portFromUrl(url),
-      startedAt: Date.now(),
-      ...identity ? { identity } : {}
-    });
   }
   child.on("error", (error) => {
     if (failure === null) failure = `could not start "${command}": ${error.message}`;
@@ -6791,7 +6967,8 @@ async function runNpmInstall(dir) {
     };
     let child;
     try {
-      child = spawn3("npm", ["install", "--no-audit", "--no-fund"], { cwd: dir, shell: false });
+      const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+      child = spawn3(npm, ["install", "--no-audit", "--no-fund"], { cwd: dir, shell: false });
     } catch (error) {
       finish({ ok: false, error: `could not run npm install: ${error instanceof Error ? error.message : String(error)}` });
       return;

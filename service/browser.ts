@@ -12,7 +12,7 @@
 // mode: the window IS the live view. The agent still gets deterministic PNG
 // stills through `capture()`.
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { promises as fs } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -25,8 +25,33 @@ import { ArtifactContexts } from './artifact-context.ts';
 import type { ShellAuthority, DefaultContext } from './artifact-context.ts';
 import type { ViewerPage } from './viewer-ui.ts';
 
-const CHROME_PATH =
-  process.env.DS_CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+// FORK-WIN: `DS_CHROME_PATH` always wins; without it, standard Windows install
+// locations are probed, macOS keeps its bundle default, and Linux falls back to
+// `chrome` on PATH. (A later multi-frame phase rewrites this file — keep
+// FORK-WIN changes surgical and clearly commented for that pass.)
+function resolveChromePath(): string {
+  const envOverride = process.env.DS_CHROME_PATH;
+  if (envOverride) return envOverride;
+  if (process.platform === 'win32') {
+    // FORK-WIN: probe the usual Chrome install locations before falling back.
+    const localAppData = process.env.LOCALAPPDATA ?? '';
+    const probes = [
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      localAppData ? path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe') : '',
+    ];
+    for (const candidate of probes) {
+      if (candidate && existsSync(candidate)) return candidate;
+    }
+    return 'chrome';
+  }
+  if (process.platform === 'darwin') {
+    return '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  }
+  return 'chrome';
+}
+
+const CHROME_PATH = resolveChromePath();
 
 const VIEWPORT_WIDTH = 1280;
 const VIEWPORT_HEIGHT = 800;
@@ -815,6 +840,13 @@ function validCameraZoom(value:Record<string,unknown>):boolean{
  */
 export async function reapOrphanChrome(): Promise<void> {
   const prefix = path.join(tmpdir(), 'ds-chrome-');
+  // FORK-WIN: Windows has no `ps`; enumerate orphan Chrome processes through
+  // PowerShell's process table instead and kill with taskkill. When PowerShell
+  // is unavailable, reaping is skipped silently — never thrown.
+  if (process.platform === 'win32') {
+    await reapOrphanChromeWin32(prefix);
+    return;
+  }
   let stdout: string;
   try {
     ({ stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
@@ -846,6 +878,68 @@ export async function reapOrphanChrome(): Promise<void> {
   for (const pid of pids) {
     try {
       process.kill(pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+  }
+  for (const profile of profiles) {
+    await fs.rm(profile, { recursive: true, force: true }).catch(() => {
+      /* best effort */
+    });
+  }
+}
+
+// FORK-WIN (Phase 0 — G): the win32 half of `reapOrphanChrome`. Only processes
+// whose command line carries the `ds-chrome-` marker are touched (the same
+// throwaway-profile convention the POSIX path uses), killed via
+// `taskkill /PID <pid> /F /T`. Every failure — PowerShell missing in
+// particular — skips reaping silently; the caller (/close) must never throw.
+async function reapOrphanChromeWin32(prefix: string): Promise<void> {
+  let stdout: string;
+  try {
+    // FORK-WIN: filter on the command-line marker ALONE, exactly like the
+    // POSIX path (a stand-in orphan may be any executable, not just
+    // chrome.exe). Backtick-t is a real tab inside PowerShell's double quotes.
+    const script =
+      "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " +
+      "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | " +
+      "Where-Object { $_.CommandLine -like '*ds-chrome-*' } | " +
+      'ForEach-Object { $_.ProcessId.ToString() + "`t" + $_.CommandLine }';
+    ({ stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', script],
+        { maxBuffer: 8 * 1024 * 1024 },
+        (error, out) => {
+          if (error) reject(error);
+          else resolve({ stdout: String(out) });
+        },
+      );
+    }));
+  } catch {
+    return; // powershell unavailable: nothing we can safely enumerate on win32
+  }
+
+  const pids: number[] = [];
+  const profiles = new Set<string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const tab = line.indexOf('\t');
+    if (tab <= 0) continue;
+    const pid = Number(line.slice(0, tab).trim());
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    pids.push(pid);
+    // Only profile dirs under the temp dir's ds-chrome- prefix are removed.
+    const dirMatch = line.slice(tab + 1).match(/--user-data-dir=(\S+)/);
+    if (dirMatch && dirMatch[1] && path.resolve(dirMatch[1]).startsWith(prefix)) {
+      profiles.add(dirMatch[1]);
+    }
+  }
+
+  for (const pid of pids) {
+    try {
+      await new Promise<void>((resolve) => {
+        execFile('taskkill', ['/PID', String(pid), '/F', '/T'], () => resolve());
+      });
     } catch {
       /* already gone */
     }

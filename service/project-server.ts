@@ -78,6 +78,13 @@ export type DevServerRecord = {
    * cannot be verified as ours and is refused.
    */
   identity?: string;
+  /**
+   * FORK-WIN: which lifetime scheme this record uses. `'win32'` records carry
+   * no ps-based identity (unavailable on Windows); they are re-verified
+   * through the port owner (`netstat -ano`) and stopped with
+   * `taskkill /PID <pid> /T /F`. Absent = the POSIX process-group scheme.
+   */
+  platform?: 'win32' | 'posix';
 };
 
 /** What `stopDevServer` reports: whether the recorded server was stopped. */
@@ -142,6 +149,7 @@ export async function readServerRecord(dir: string): Promise<DevServerRecord | n
       port?: unknown;
       startedAt?: unknown;
       identity?: unknown;
+      platform?: unknown;
     };
     if (typeof record.pgid !== 'number' || !Number.isFinite(record.pgid) || record.pgid <= 0) return null;
     return {
@@ -151,6 +159,9 @@ export async function readServerRecord(dir: string): Promise<DevServerRecord | n
       startedAt: typeof record.startedAt === 'number' ? record.startedAt : 0,
       identity:
         typeof record.identity === 'string' && record.identity.trim() !== '' ? record.identity : undefined,
+      // FORK-WIN: a record only acts as win32 when it says so; legacy/POSIX
+      // records (no platform field) keep the exact original semantics.
+      platform: record.platform === 'win32' || record.platform === 'posix' ? record.platform : undefined,
     };
   } catch {
     return null;
@@ -268,6 +279,102 @@ function groupAlive(pgid: number): boolean {
 
 const execFileAsync = promisify(execFile);
 
+// ---------------------------------------------------------------------------
+// FORK-WIN: Windows has no POSIX process groups, so dev-server lifetime is
+// verified against the OS process table (`tasklist` / `netstat -ano`) and
+// stopped with `taskkill /PID <pid> /T /F` — only after the recorded pid
+// re-verifies as the port's owner. The POSIX helpers above and below these
+// are unchanged.
+// ---------------------------------------------------------------------------
+
+/**
+ * FORK-WIN: true while `pid` is alive, per `tasklist /FI "PID eq <pid>"`.
+ * Conservatively true when the query itself fails (tasklist missing): an
+ * unknown state must not free up a kill, and the kill path re-verifies the
+ * port owner before acting anyway.
+ */
+async function win32PidAlive(pid: number): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
+    return stdout.split(/\r?\n/).some((line) => {
+      const cols = line.split(',');
+      return Number(cols[1]?.replace(/"/g, '') ?? NaN) === pid;
+    });
+  } catch {
+    return true; // unknown → assume alive; never report dead without proof
+  }
+}
+
+/**
+ * FORK-WIN: alive per the record's own scheme — pgid for the POSIX records,
+ * tasklist for win32 records. Call sites that used `groupAlive(pgid)` use
+ * this so both platforms share the exact same decision-tree code.
+ */
+async function recordGroupAlive(record: DevServerRecord): Promise<boolean> {
+  if (record.platform === 'win32') return win32PidAlive(record.pid);
+  return groupAlive(record.pgid);
+}
+
+/**
+ * FORK-WIN: the pid LISTENING on a port, per `netstat -ano`. Lines read
+ * `TCP    127.0.0.1:5321    0.0.0.0:0    LISTENING    1234`: the local
+ * address column ends with `:<port>` for `127.0.0.1`, `0.0.0.0` and `[::]`
+ * binds alike. Null when nothing listens or netstat is unusable.
+ */
+async function win32PortOwnerPid(port: number): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync('netstat', ['-ano']);
+    const needle = `:${port}`;
+    for (const line of stdout.split(/\r?\n/)) {
+      const columns = line.trim().split(/\s+/);
+      if (columns.length < 5 || columns[0] !== 'TCP') continue;
+      const local = columns[1] ?? '';
+      const state = columns[3];
+      const pid = Number(columns[4]);
+      if (!local.endsWith(needle) || state !== 'LISTENING') continue;
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * FORK-WIN: true when `pid` equals `ancestor` or is a descendant of it,
+ * walking the ParentProcessId chain via PowerShell. Needed because a
+ * `shell:true` spawn records the SHELL's pid while the listener (the real
+ * node/vite process) is its child. Falls back to plain pid equality — the
+ * caller checks that first — whenever PowerShell or the chain is unusable;
+ * verification then refuses instead of guessing "ours".
+ */
+async function win32PidInTree(pid: number, ancestor: number, maxDepth = 24): Promise<boolean> {
+  if (pid === ancestor) return true;
+  try {
+    const script =
+      `$a=${ancestor}; $p=${pid}; ` +
+      `for ($i = 0; $i -lt ${maxDepth}; $i++) { ` +
+      `if ($p -eq $a) { exit 0 }; ` +
+      `$c = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $p) -ErrorAction SilentlyContinue; ` +
+      `if ($null -eq $c) { exit 1 }; ` +
+      `$p = [int]$c.ParentProcessId; if ($p -le 0) { exit 1 } }; exit 1`;
+    await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+    return true; // execFileAsync only resolves on exit code 0 (in the tree)
+  } catch {
+    return false; // PowerShell unavailable or not in the chain: never guess
+  }
+}
+
+/** FORK-WIN: poll until the pid disappears, or the budget runs out. */
+async function win32WaitPidGone(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await win32PidAlive(pid))) return true;
+    await delay(STOP_POLL_MS);
+  }
+  return !(await win32PidAlive(pid));
+}
+
 /**
  * Fingerprint of a live process: the `ps -o lstart=` line the OS reports for
  * it. Taken once when the service spawns a dev server and re-checked before
@@ -289,6 +396,10 @@ export async function readProcessIdentity(pid: number): Promise<string | null> {
 type IdentityCheck = { verified: boolean; reason?: string };
 
 async function verifyRecordIdentity(record: DevServerRecord): Promise<IdentityCheck> {
+  // FORK-WIN: win32 records carry no ps fingerprint — they verify through the
+  // recorded port's owner instead (pid equality, or the owner being a child of
+  // the recorded shell pid).
+  if (record.platform === 'win32') return verifyRecordIdentityWin32(record);
   if (!record.identity) {
     return { verified: false, reason: `the recorded server (pid ${record.pid}) cannot be verified as ours` };
   }
@@ -297,6 +408,28 @@ async function verifyRecordIdentity(record: DevServerRecord): Promise<IdentityCh
     return { verified: false, reason: `the recorded server (pid ${record.pid}) cannot be verified as ours` };
   }
   return { verified: true };
+}
+
+/**
+ * FORK-WIN: verification for win32 records. Whatever listens on the recorded
+ * port right now must be the recorded pid (or its descendant, covering the
+ * shell a `shell:true` spawn wrapped the command in). Anything else — nothing
+ * listening, or a foreign owner — refuses, and no kill is ever attempted.
+ */
+async function verifyRecordIdentityWin32(record: DevServerRecord): Promise<IdentityCheck> {
+  if (record.port === null) return { verified: false, reason: `the recorded server (pid ${record.pid}) cannot be verified as ours on win32 (no port recorded)` };
+
+  const owner = await win32PortOwnerPid(record.port);
+  if (owner !== null && (owner === record.pid || (await win32PidInTree(owner, record.pid)))) {
+    return { verified: true };
+  }
+  return {
+    verified: false,
+    reason:
+      owner === null
+        ? `the recorded server (pid ${record.pid}) cannot be verified as ours on win32 (nothing is listening on port ${record.port})`
+        : `the recorded server (pid ${record.pid}) cannot be verified as ours on win32 (port ${record.port} is owned by pid ${owner})`,
+  };
 }
 
 /** Send a signal to a whole process group; false when it is already gone. */
@@ -355,6 +488,11 @@ export async function stopDevServer(dir: string): Promise<StopDevServerResult> {
   const record = serverRecords.get(key) ?? (await readServerRecord(key));
   if (!record) return { stopped: false };
 
+  // FORK-WIN: no process groups on Windows — dispatch to the taskkill-based
+  // stop (same contract: verify before kill, port must free, record kept on
+  // failure).
+  if (record.platform === 'win32') return stopDevServerWin32(key, record);
+
   const stoppedPgid = record.pgid;
 
   if (groupAlive(stoppedPgid)) {
@@ -389,6 +527,58 @@ export async function stopDevServer(dir: string): Promise<StopDevServerResult> {
   // Clear only when the record still names the group that was stopped: a
   // concurrent start may have written a newer record while we were killing.
   await clearRecordIfSame(key, stoppedPgid);
+  return { stopped: true };
+}
+
+/**
+ * FORK-WIN: the win32 stop, mirroring the POSIX `stopDevServer` contract:
+ * · never kill an unverifiable pid — the recorded pid (or a descendant) must
+ *   own the recorded port right now (`netstat -ano`), else refuse and keep
+ *   the record;
+ * · kill with `taskkill /PID <pid> /T /F` — `/T` takes the whole tree, which
+ *   covers the shell and node/vite children of a `shell:true` spawn;
+ * · `stopped:true` only when the pid is verifiably gone AND (no port or the
+ *   port was freed); the record is cleared only while it still names this pid.
+ */
+async function stopDevServerWin32(key: string, record: DevServerRecord): Promise<StopDevServerResult> {
+  const pid = record.pid;
+  if (await win32PidAlive(pid)) {
+    // The process exists — make sure it is still the one this service started
+    // (it still owns the recorded port) before killing anything.
+    const check = await verifyRecordIdentityWin32(record);
+    if (!check.verified) return { stopped: false, error: `${check.reason}; not stopping it` };
+
+    let killed = false;
+    try {
+      await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F']);
+      killed = true;
+    } catch (error) {
+      // taskkill reports a vanished pid as an error: a pid that died meanwhile
+      // is still a successful stop, not a reason to keep the record.
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/not found/i.test(message)) {
+        return { stopped: false, error: `taskkill could not stop pid ${pid}: ${message}` };
+      }
+    }
+    if (killed && !(await win32WaitPidGone(pid, STOP_KILL_WAIT_MS))) {
+      return {
+        stopped: false,
+        error: `the dev server (pid ${pid}) is still alive after taskkill`,
+      };
+    }
+  }
+
+  // The process is gone (or never was). A stop is only honest when it also
+  // freed the port: if something still holds it, keep the record and say so.
+  if (record.port !== null && !(await waitForPortFree(record.port, PORT_FREE_WAIT_MS))) {
+    return {
+      stopped: false,
+      error: `port ${record.port} remains in use after the dev server stopped`,
+    };
+  }
+
+  // Clear only when the record still names the pid that was stopped.
+  await clearRecordIfSame(key, pid);
   return { stopped: true };
 }
 
@@ -428,7 +618,7 @@ export async function getDevServerStatus(dir: string): Promise<DevServerStatus> 
     }
     return { up: false, port: null };
   }
-  if (!groupAlive(record.pgid)) {
+  if (!(await recordGroupAlive(record))) {
     // Clear only while the record still names this dead group: a concurrent
     // start may have written a newer record while this status ran.
     await clearRecordIfSame(key, record.pgid);
@@ -549,7 +739,7 @@ export async function ensureDevServer(
         existing &&
         pinnedPort !== null &&
         existing.port === pinnedPort &&
-        groupAlive(existing.pgid)
+        (await recordGroupAlive(existing))
       ) {
         const check = await verifyRecordIdentity(existing);
         if (check.verified) return finish({ started: false, up: true });
@@ -576,7 +766,7 @@ export async function ensureDevServer(
       pinnedPort !== null &&
       existing.port !== null &&
       existing.port !== pinnedPort &&
-      groupAlive(existing.pgid)
+      (await recordGroupAlive(existing))
     ) {
       const check = await verifyRecordIdentity(existing);
       if (check.verified) {
@@ -604,7 +794,7 @@ export async function ensureDevServer(
       pinnedPort !== null &&
       existing.port === pinnedPort &&
       !(await canBindPort(pinnedPort)) &&
-      groupAlive(existing.pgid)
+      (await recordGroupAlive(existing))
     ) {
       const check = await verifyRecordIdentity(existing);
       if (check.verified) return finish({ started: false, up: true });
@@ -667,22 +857,35 @@ async function startAndWait(
   leader = typeof child.pid === 'number' ? child.pid : null;
   const pid = child.pid;
   if (typeof pid === 'number') {
-    // A detached child is its own process-group leader, so its pid IS the group
-    // id. Record pid, pgid, the URL's port and a fingerprint of the leader, so
-    // a later stop can verify the group is still ours before killing it.
-    let identity = await readProcessIdentity(pid);
-    if (identity === null) {
-      // A just-spawned child is visible to ps; retry once in case of a race.
-      await delay(50);
-      identity = await readProcessIdentity(pid);
+    if (process.platform === 'win32') {
+      // FORK-WIN: no ps-based identity on Windows. Record {pid, port,
+      // startedAt, platform:'win32'}; the stop/status paths re-verify such a
+      // record through its port owner (netstat) and stop with taskkill.
+      await writeServerRecord(path.resolve(dir), {
+        pgid: pid,
+        pid,
+        port: portFromUrl(url),
+        startedAt: Date.now(),
+        platform: 'win32',
+      });
+    } else {
+      // A detached child is its own process-group leader, so its pid IS the group
+      // id. Record pid, pgid, the URL's port and a fingerprint of the leader, so
+      // a later stop can verify the group is still ours before killing it.
+      let identity = await readProcessIdentity(pid);
+      if (identity === null) {
+        // A just-spawned child is visible to ps; retry once in case of a race.
+        await delay(50);
+        identity = await readProcessIdentity(pid);
+      }
+      await writeServerRecord(path.resolve(dir), {
+        pgid: pid,
+        pid,
+        port: portFromUrl(url),
+        startedAt: Date.now(),
+        ...(identity ? { identity } : {}),
+      });
     }
-    await writeServerRecord(path.resolve(dir), {
-      pgid: pid,
-      pid,
-      port: portFromUrl(url),
-      startedAt: Date.now(),
-      ...(identity ? { identity } : {}),
-    });
   }
 
   child.on('error', (error) => {

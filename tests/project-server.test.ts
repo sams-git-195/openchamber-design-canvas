@@ -179,6 +179,12 @@ test('a command that starts but never serves times out with an actionable error'
   const pidFile = path.join(dir, 'sleeper.pid');
   const port = await freePort();
   const url = `http://127.0.0.1:${port}/`;
+  // FORK-MERGE (Phase 0/Windows): single-quoted commands are not quoted by
+  // cmd.exe — node -e receives one string literal and exits 0 at once, so this
+  // test needs double-quote (cross-shell) syntax or a .cjs sleeper file. The
+  // immediate win32 record write in project-server.ts now lets the early-exit
+  // handler catch this (baseline passed only because its failed `ps` probes
+  // delayed the listener past the exit).
   const command = `node -e 'require("fs").writeFileSync("${pidFile}",""+process.pid);setTimeout(function(){},60000)'`;
   await writeConfig(dir, { version: 1, url, command });
 

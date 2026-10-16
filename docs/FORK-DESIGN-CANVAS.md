@@ -95,7 +95,7 @@ Rule: **no Windows-only branch.** POSIX paths stay intact as darwin/linux behavi
 | Dev-server identity/stop: POSIX pgid+`ps lstart`+group-kill branch intact; win32 record `{pid,port,startedAt,platform:'win32'}`, verify port owner via `netstat -ano` PID column before `taskkill /T /F`; never kill unverified | project-server.ts identity/stop/alive helpers |
 | `spawn('npm',{shell:false})` → win32 `npm.cmd`; POSIX unchanged | scaffold.ts install spawn |
 | `TMPDIR ?? '/tmp'` → `os.tmpdir()` | scripts/build-viewer.mjs |
-| Test script glob → `node --test --test-concurrency=1 tests` | package.json |
+| Test script glob: single quotes break under cmd → `node --test --test-concurrency=1 \"tests/*.test.ts\"` (DOUBLE-quoted glob — Node expands internally; a bare `tests` dir arg throws MODULE_NOT_FOUND on Node 24.21, P0 verified) | package.json |
 | Workspace root probe (`%ONEDRIVE%\Documents` → `%USERPROFILE%\Documents` → homedir) implemented service-side; POSIX unaffected | new workspace-root helper (P1-screens, used by /workspaces + /scaffold) |
 | Home dirs via `os.homedir()`; `ComSpec` reads win32-guarded; signals comment | all fork code |
 CI: ubuntu workflow (typecheck+build+test, Chrome-dependent tests excluded upstream-style) stays green — the automated macOS/Linux-side gate.
@@ -124,6 +124,12 @@ README.md (fork purpose, Claude-canvas parity, OS matrix, disable-original guida
 | P5 ship | commit, changelog, handoff | orchestrator | — |
 
 Agent rules: (1) branch `canvas-fork`, workdir `C:\Users\samhe\Documents\github\openchamber-design-studio`, npm install done; (2) touch ONLY your §H/phase files — outside changes only as `FORK-MERGE:` comment + report; (3) rebuild bundles after edits (`npm run build`; shell phase also `npm run build:viewer`); (4) typecheck your files; run tests you own; report baseline-vs-new failures honestly; (5) no new deps without flagging; (6) resolve code by SYMBOL, not line numbers; (7) all code cross-platform via explicit `process.platform` branches.
+
+## P0 handoff notes (committed with P0)
+- Bundles on this branch had PRE-EXISTING source→bundle drift (stale pick-bridge in panel/main.js); P0's rebuild re-synced. P5 must rebuild everything one final time before shipping.
+- Win32 helpers in project-server.ts are module-private (`win32PortOwnerPid`, `win32PidAlive`, …). If P1-browser/P1-screens need them, PROMOTE deliberately — never duplicate.
+- `stopDevServerWin32` descendant check needs PowerShell; plain pid equality remains the fallback gate (refuses, never guesses).
+- Known pre-existing Windows test failures remain for P2: project-server (POSIX shell quoting in test bodies), reference-path (URL.pathname join), stock-nova (`C:\C:\`), window tests (Git-Bash `ps`), Chrome-open flakiness class.
 
 ## Acceptance
 1. `design-canvas` installs beside `design-studio` without rail/command clashes; `/canvas` works in a chat with NO registered project. (Agent-`browser.*` arbitration between two installed providers is documented, not guaranteed — README tells users to disable the original.)
