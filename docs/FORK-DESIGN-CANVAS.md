@@ -1,127 +1,136 @@
-# Fork spec — "Design Canvas": a project-free, multi-screen canvas for OpenChamber
+# Fork spec v2 — "Design Canvas": a project-free, multi-screen canvas for OpenChamber
 
 Fork of `openchamber-design-studio` (branch `canvas-fork`). Goal: behave like Claude's design tool inside OpenChamber —
 any chat can start a design without registering a project; one scrollable/zoomable canvas shows MULTIPLE screens as
 artboards; edit mode picks elements into the chat; play mode makes click-throughs work.
 
+v2 = v1 + the Qwen adversarial audit (20 amendments folded in). Line refs were pinned to commit `0c3c2c7`;
+**all agents resolve code by symbol name (function/const), not by line number** — P0 shifts lines in browser.ts /
+project-server.ts / scaffold.ts / main.ts as it lands.
+
 ## Product decisions (locked)
 
 | # | Decision |
 |---|----------|
-| 1 | Identity: extension id `design-canvas`, name **Design Canvas**, command `/canvas`, statusSection title "Canvas", `providerId: 'design-canvas'` everywhere (panel/mode.ts:279,299,425; panel/attach-dialog.ts:25; panel/main.ts:575). Both extensions can coexist with the original. |
-| 2 | **No project dependence.** `statusSection.requiresProject` → false. All registered-project gates are replaced by a workspace model (D3). `host.startSession` is called WITHOUT `projectId`. Design-work list scans workspaces on disk (below), not `host.listSessions(projectId)`. |
-| 3 | **Workspace model.** Design files live under `~/Documents/Design Canvas/<slug>` (override: env `DS_WORKSPACE_ROOT`). Never scaffold into OpenChamber's chats folder. Each design session keeps its workspace dir in panel host storage: `ws/<sessionId>` = `{dir, name}` (panel/main.ts storage helpers next to mode/<id> keys at main.ts:388-422). Slug: kebab of the brief/title + short session id, sanitized. |
-| 4 | **Harness via chips, not plugins.** Drop `.opencode/plugin` writes for fork v1 (plugin discovery is project-scoped; canvas sessions aren't in the workspace dir). `buildModeChip` text (panel/mode.ts:410-435) must embed `harnessRulesText()` (shared/harness-text.ts:171-190) + the screens list; rewrite `DESIGN_WORKSPACE_NOTE` to describe the canvas workspace instead. |
-| 5 | **Screens are real HTML pages.** A workspace is a Vite multi-page app (dev server per workspace, same port machinery). A screen = `{id, file, title, width, height}`. New `screens.json` at workspace root is the registry; the agent adds a screen by writing `<file>.html` + updating `screens.json`; each screen URL = `<config.url><file>`. Inter-screen links are plain `<a href="other.html">` (work in play mode). |
-| 6 | **Canvas = real Chrome window, N artboards.** Extend the existing viewer shell (service/viewer-ui.ts + viewer-client/src/canvas-controller.js): one `#camera` containing N `<section data-screen><header…><iframe data-ds-screen=ID></section>` artboards laid out in an auto grid, each scaled like today, whole camera pannable/zoomable (wheel/Ctrl+wheel/space/H/arrows all already exist in canvas-controller.js:89-146). Fit-all button + per-screen focus/zoom. |
-| 7 | **Modes.** `edit` (default when Design Mode on): iframes get `pointer-events:none`; per-artboard header shows title+size; a Ctrl/Cmd-click (or plain click in edit) on an artboard picks the element under the point → existing pick→`host.attach` chip path (panel/main.ts:3066-3086,829-836). `play`: pointer-events auto, headers dim; clicks and in-app links drive the screen itself; a screen navigating updates its artboard (reuse `changed` event, browser.ts:1063-1082,1256-1268). |
-| 8 | **Cross-platform runtime** (must work on Windows, macOS, and Linux; dev host is Win11): every OS-specific behavior gets a per-platform branch — nothing POSIX-only may remain un-branched and nothing Windows-only may break macOS/Linux. `DS_CHROME_PATH` env override kept; auto-discovery per OS (see G). |
-| 9 | Verify gates per screen: deferred to integration phase; fork v1 keeps single-active-screen verify via `browser.getProbe(screen?)`. |
-| 10 | Out of scope v1: connectors/flow arrows between artboards, mini-chat bridge, VSCode/mobile, per-screen verify history. |
+| 1 | Identity: extension id `design-canvas`, name **Design Canvas**, command `/canvas`, statusSection title "Canvas", page/panel titles. Rename `providerId: 'design-studio'` → `'design-canvas'` at: panel/mode.ts (`projectReferenceChip`, `fileReferenceChip`, `buildModeChip`), panel/attach-dialog.ts (`buildAttachPayload`), panel/main.ts (`startDesignSession` host.startSession call), **service/browser-control.ts (`source:'design-studio'` literal)**, service/main.ts log-prefix strings. Manifest: `panel.id`, `commands[].name`, `statusSection.title`, `page.title`. Version `0.2.0`. **Do NOT rename**: `.design-studio.json` filename, `.design-studio/` state dir, `HARNESS_PLUGIN_*` strings, storage key prefixes `mode/`, `design/`. |
+| 2 | **No project dependence.** `statusSection.requiresProject` → false. Registered-project gates replaced by the workspace model (#3). `host.startSession` called WITHOUT `projectId`/`worktree` (contract has no `directory` field — session lands in the chat's own dir; see #4 for how the agent still writes into the workspace). Design-work list = workspaces on disk via `GET /workspaces`, not `host.listSessions(projectId)`. |
+| 3 | **Workspace model.** Design files live under `<Documents>/Design Canvas/<slug>` — root probe order: `%ONEDRIVE%\Documents` if it exists → `%USERPROFILE%\Documents` → `os.homedir()/Documents`; env `DS_WORKSPACE_ROOT` overrides. **The service resolves the root and returns it in `GET /workspaces`; the panel NEVER constructs the path itself** — single source of truth. Each session stores `ws/<sessionId>` = `{dir, name}` in panel host storage (next to the mode/ design/ key helpers in panel/main.ts). Slug: kebab of brief/title + short session id, sanitized (`[a-z0-9-]`, ≤40 chars). Never scaffold into OpenChamber's chats folder. |
+| 4 | **Agent-cwd strategy (audit #1, critical).** The canvas session runs OUTSIDE the workspace dir. Therefore: (a) `buildModeChip` text and `designSessionPrompt` MUST state the absolute workspace path as "the ONLY place design files are written" and instruct every edit/write/bash call to use that absolute path; (b) the first `/canvas <brief>` flow toasts a one-time heads-up that the agent will ask permission for out-of-folder edits — approve them; (c) documented upgrade path for zero-prompt operation: if the user registers `<root>/Design Canvas` as an OpenChamber project once, `host.startSession({projectId})` puts the chat IN the workspace (keep `pageTarget`-style detection for this case and pass projectId when a matching registered project exists). Acceptance test 7 below proves out-of-cwd writes work. |
+| 5 | **Harness via chips, not plugins.** Fork v1 does not write `.opencode/plugin/*` (plugin discovery is project-scoped; canvas sessions aren't in the workspace dir) — skip the `writeHarnessPlugin` call inside `scaffoldProject` (keep module dead for future). `buildModeChip` embeds a TRIMMED ruleset (see chip budget, §F). Rewrite `DESIGN_WORKSPACE_NOTE` (shared/harness-text.ts) to describe the canvas workspace (absolute-path instruction, screens.json protocol). |
+| 6 | **Screens are real HTML pages.** Workspace = Vite multi-page app (root `*.html` files work with `vite dev` with zero config — verified). Screen = `{id, file, title, width, height}`; registry `screens.json` at workspace root; agent adds a screen by writing `<file>.html` + updating `screens.json`; screen URL join = `url.replace(/\/+$/,'') + '/' + file`. Inter-screen links are plain `<a href="other.html">`. |
+| 7 | **Canvas = real Chrome window, N artboards.** Extend the viewer shell (service/viewer-ui.ts `CANVAS_MARKUP` + viewer-client/src/canvas-controller.js): `#camera` contains N `<section class="ds-artboard" data-screen=ID>` blocks (header + iframe) in a CSS grid (gap 48px, array order); camera keeps its `translate+scale` transform model — **artboards are laid out at NATURAL px inside camera space; scale is transform-only, never baked into sizes**. Panning/zooming all axes comes from the existing camera (wheel/drag/space/H/arrows/Ctrl+wheel). `fitAll()` = min scale that fits the grid bounding box (within existing zoom clamp 0.1–3). |
+| 8 | **Modes.** `edit` (default when Design Mode on): iframes `pointer-events:none`; clicking inside an artboard's area sends `{type:'screen-pick',screen,x,y}` → service runs `__dsPickAt(x,y)` in that frame → pick → `host.attach` chip (existing row-poll path). `play`: pointer-events auto; real clicks/links drive the screen; in-frame navigation updates that artboard's recorded URL/title (reuse `changed` flow). Frames carry `sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-pointer-lock"` — NO `allow-top-navigation`, so a screen's JS can never navigate/destroy the shell. Residual accepted risk: same-origin screens may rename sibling frames' `window.name` (local dev content). |
+| 9 | **Cross-platform runtime** (Windows + macOS + Linux; dev host Win11): every OS-specific behavior is a `process.platform` branch — nothing POSIX-only un-branched, nothing win32-only that breaks darwin/linux; unchanged POSIX paths stay byte-identical. `DS_CHROME_PATH` env wins on all OSes; auto-discovery per OS (§G). |
+| 10 | **Coexistence with the original extension**: no ids/commands/rails collide (design-canvas vs design-studio). BUT both manifests declare `service.provides:["browser"]`, and host arbitration between two browser providers is out of our control — v1 guidance: recommend disabling the original in Settings → Extensions while using the canvas (README says so). Port bands 5200–5999 overlap by design; `--strictPort` + random-offset scan makes collisions recoverable. |
+| 11 | Verify gates per screen: DEFERRED — `service/verify.ts` + `service/verify-routes.ts` stay v1-compatible (zero-arg call sites keep working against the ACTIVE screen default). Owned by P2. |
+| 12 | Out of scope v1: flow-connector arrows between artboards, mini-chat pick bridge, VSCode/mobile, per-screen verify history, per-screen concurrent layout. |
 
 ## Architecture contracts
 
-### A. `screens.json` schema (new, at workspace root)
+### A. `screens.json` schema (new, workspace root)
 ```json
 { "version": 1,
-  "screens": [ { "id": "home", "file": "home.html", "title": "Home",
-                 "width": 1280, "height": 800 } ] }
+  "screens": [ { "id": "home", "file": "home.html", "title": "Home", "width": 1280, "height": 800 } ] }
 ```
-- `id`: `^[a-z0-9][a-z0-9-]{0,30}$`, unique. `file`: relative path, `.html`, inside the workspace root (no `..`). width/height: 200–8192, default 1280×800 (reuse viewer-ui viewport clamp).
-- Read API normalizes silently (bad entries dropped, ids deduped); at least one valid screen required else `[]`.
-- Seed on scaffold: `home.html` + registry entry `{id:"home",file:"home.html",title:"Home",1280,800}`.
+- `id`: `^[a-z0-9][a-z0-9-]{0,30}$`, unique. `file`: relative, ends `.html`, must resolve inside workspace root (no `..`, no absolute). width/height clamp **200–8192 in service/screens.ts** — do NOT reuse viewer-ui's 100–8192 camera clamp; that stays for the camera.
+- Reader normalizes silently (drop bad entries, dedupe ids); empty/missing → `{version:1,screens:[]}`.
+- Scaffold seeds `home.html` + entry `{id:"home",file:"home.html",title:"Home",1280,800}`.
 
-### B. New/changed service HTTP (service/main.ts route table; bearer auth unchanged)
-| Route | Shape |
-|---|---|
-| `GET /screens?dir=` | → `{config:{version,screens}}` normalized, `200` (missing file → `{version:1,screens:[]}`) |
-| `PUT /screens?dir=` | body = full `{version,screens}` JSON → validates + writes, `200 {path}` / `400 {error}` |
-| `GET /workspaces` | → `{root, workspaces:[{dir,name,screens?,url?}]}` — lists `DS_WORKSPACE_ROOT` children that contain `.design-studio.json` (read via studio-config resolver). Powers the page list without projects. |
-| `POST /open` | extended: `{url, dir?}` → also accepts `{dir, screen?}`; resolves screens+config from dir, opens/refreshes canvas shell with ALL screens; `screen` id selects the active/focused one. Response adds `{screens}`. |
-| `POST /mode` | `{mode:'edit'|'play'}` → shell-wide mode, echoed in `/state`. |
-| `GET /state` | extends BrowserState: `{…, mode, screens:[{id,title,url,active}], activeScreen}`. |
-
-### C. Shell config + `window.__dsCanvas.*` bridge (the ONLY shared surface between the shell rebuild and browser.ts — both sides code against this)
-Viewer config (viewer-server capability URL) becomes:
-```js
-{ screens: [{id,url,width,height,title}], viewport: {width,height}, mode: 'edit' }
+### B. Service HTTP (service/main.ts; bearer auth unchanged) + the Browser class contract
+NEW routes: `GET /screens?dir=` → normalized registry; `PUT /screens?dir=` → validate+write full registry (`200 {path}`/`400 {error}`); `GET /workspaces` → `{root, workspaces:[{dir,name,url?,screens?}]}` (children of workspace root containing `.design-studio.json`).
+CHANGED: `POST /open` accepts `{dir, screen?}` (config's `url` still authoritative) → resolves screens → cold browser: bake screens into ViewerConfig at launch; warm browser: **push `setScreens`, no shell restart, no new capability URL** (one capability URL per launch). `POST /mode {mode:'edit'|'play'}` → push + in-memory echo. `GET /state` extends BrowserState with `{mode, screens:[{id,title,url,width,height,active}], activeScreen}`.
+**Browser class public surface — `service/main.ts` may ONLY use these (audit #2/#3, the inter-agent contract):**
+```ts
+class Browser {
+  openWorkspace(cfg: { screens: Screen[]; baseUrl: string; mode: 'edit'|'play' }): Promise<void>
+  setScreens(screens: Screen[]): Promise<void>          // push into live shell
+  setMode(m: 'edit'|'play'): Promise<void>
+  setActive(id: string): Promise<void>
+  getMode(): 'edit'|'play'
+  getState(): /* existing BrowserState + mode/screens/activeScreen */
+  navigate(screen: string|undefined, url: string): Promise<void>  // undefined = active
+  pick(): (PickedElement & { screen: string }) | null
+  input(screen: string|undefined, events: unknown[]): Promise<void>
+  capture(screen?: string): Promise<...>
+  getProbe(screen?: string): Promise<ProbeReport>       // zero-arg = active (verify.ts keeps compiling)
+  focus(): void; close(): void
+}
 ```
-Controller API (canvas-controller.js keeps old names where semantics survive):
-- `setScreens(screens)` — full replacement; lays out the artboard grid (CSS grid, gap 48px, order = array order; artboard width = its own width × current camera scale).
-- `setActive(id)` / `getActive()`.
-- `setMode('edit'|'play')` — toggles `[data-mode]` on `#canvas` (CSS: `#canvas[data-mode=edit] iframe {pointer-events:none}` etc), updates headers.
-- `fitAll()`, `focusScreen(id)` (zoom camera to a screen), `zoomToScreen(id)` alias.
-- keep: `setViewport, setLayout, setStatus, zoomCamera, getCamera, restoreCamera, dismissMenu, handleCanvasInput, begin/normalize/endCapture` — capture now operates on the ACTIVE screen's iframe (beginCapture takes optional screen id).
-- Send-to-service (via `__dsCanvasSend` binding): `{type:'ready'}`, `{type:'viewport'|'page'|'retry'|'layout'|'fit-size', …}` unchanged; NEW: `{type:'screen-pick', screen, x, y}` (click in edit mode; x/y = CSS px inside that frame, computed from scaled rect like browser.ts:1072-1079), `{type:'screen-activate', screen}` (header click / double-click on frame).
-- Shell DOM: each artboard = `<section class="ds-artboard" data-screen=ID>` with `<button class="ds-ab-title">` + `<span class="ds-ab-size">` + `<iframe id="ds-frame-<ID>" data-ds-screen=ID name="__dsArtifact:<ID>" referrerpolicy="no-referrer">`. Frame names carry the screen id (replaces the single `__dsArtifact` gate).
+Service keeps `lastWorkspace: {dir, screens, mode, activeScreen}` in memory after `/open`; `browser-control.ts` uses it as the `dir` fallback when the host request's `context.directory` holds no config.
+
+### C. Shell config + `window.__dsCanvas.*` bridge (the ONLY shell↔service surface)
+Viewer config (baked at `startViewerServer`): `{ screens: [{id,url,width,height,title}], viewport:{width,height}, mode:'edit' }`.
+Shell→service (`__dsCanvasSend`): keep `{type:'ready'|'viewport'|'page'|'retry'|'layout'|'fit-size'}` — **each of `viewport`/`page`/`retry` gains `screen`** (default active; per-screen layout/reconcile machinery is v1 = active-screen-only). NEW: `{type:'screen-pick', screen, x, y}` (x/y = CSS px inside the frame, mapped from scaled rect) and `{type:'screen-activate', screen}`.
+Service→shell (`shellEval` of `Runtime.evaluate` into shell context): `__dsCanvas.setScreens(list)`, `__dsCanvas.setMode(m)`, `__dsCanvas.setActive(id)`, `__dsCanvas.setScreenState(id, {state:'loading'|'ready'|'error', message})`, `__dsCanvas.fitAll()`, plus retained `setPage/setViewport/setStatus/zoomCamera/getCamera/restoreCamera/dismissMenu/handleCanvasInput/begin|normalize|endCapture` (capture+page-height operate on ACTIVE screen; beginCapture accepts optional screen id).
+Geometry (audit #7): artboards at natural px in camera space; `setScreens` recomputes `view.width/height` = grid bounding box; camera-extent clamps widened to **64–65536** (`setLayout`/`restoreCamera` validators, restoreCamera validation in browser.ts) while per-screen sizes stay 200–8192; `fitAll` clamps by the existing zoom range 0.1–3.
+Status (audit #8): global `#state` overlay ONLY for "zero screens" (empty workspace); one dead screen = per-artboard error, never blanks the grid.
+Shell DOM per artboard: `<section class="ds-artboard" data-screen=ID>` + `<button class="ds-ab-title">` + `<span class="ds-ab-size">` + `<iframe id="ds-frame-<ID>" data-ds-screen=ID name="__dsArtifact:<ID>" referrerpolicy="no-referrer" sandbox="...">`.
+CSP/OOPIF (audit #20): viewer-server CSP `frame-src http: https:` already permits N dev-server origins — **no CSP edits needed**; same-origin child frames may or may not be OOPIFs — `ArtifactContexts` already handles both (`childSessions`, per-session `enable()`); **do not add fetch-based discovery**.
 
 ### D. Multi-frame authority (service/artifact-context.ts + browser.ts)
-- `ArtifactContexts`: replace single `artifactFrame`/`artifact()` with `artifacts(): Map<screenId, DefaultContext>` populated by discovering every child frame whose owner element has `data-ds-screen` (generalize discover() loop at artifact-context.ts:107-117 — it currently returns after first `id==='preview'` match). `artifact(id?)` → active or named. Trust gate for injected scripts: frame name prefix `__dsArtifact:` OR per-frame id match (replace browser.ts:771-777 single-name gate; PICK_SCRIPT installs in every frame already — browser.ts:659-687).
-- Pick path: `__dsPick` binding → accept from ANY trusted artifact context; map `executionContextId → screenId` (Map like browser.ts:1059-1061 check generalized). `lastPick` gains `screen`. Shell-side picks (edit mode) arrive as `{type:'screen-pick',screen,x,y}` → run `__dsPickAt(x,y)` in THAT frame's context.
-- `input(action)` / `capture` / `highlight` / `getProbe` / navigate: gain optional leading `screen` param (default active). Navigate per screen: `Page.navigate` on that frame's session (generalize browser.ts:1312-1321).
-- `refreshArtifact` generalized to per-screen URL/title tracking; `changed` events tagged by context→screen.
-- browser-control.ts: every action handler accepts optional `screen`; `dir` fallback = the last-opened workspace the service recorded (service keeps `state.dir` after /open) when host `context.directory` doesn't contain a config (browser-control.ts:126-130).
+- `ArtifactContexts`: replace single `artifactFrame`/`artifact()` with `artifacts(): Map<screenId, DefaultContext>`, populated in `discover()` for EVERY child frame whose `DOM.getFrameOwner` element has `data-ds-screen` (today it returns after the first `id==='preview'` match). `artifact(id?)` = named-or-active. Trust gate IN-FRAME: `window.name.startsWith('__dsArtifact:')` ONLY — the `name` attribute is static markup so it exists at document start (this also closes the historical injection-race workaround; delete the post-load naming loop and its comments). frameId↔screenId mapping lives service-side (cross-origin frames can't read their own frameElement).
+- **Every `getElementById('preview')` site becomes `ds-frame-<screen>` (active default)** — enumerate by symbol (audit #4): SHELL_BRIDGE frame-naming (now deleted), camera-zoom/wheel coordinate remaps in the artifact-event handler, `input()` rect mapping, keyboard `focus()` before key/insertText, `viewer-ui.ts` markup, `canvas-controller.js` refs, pan-layer pick mapping. Picks accepted from ANY trusted artifact context: generalize the bindingCalled artifact-context check into an `executionContextId → screenId` map; `lastPick` gains `screen`.
+- `refreshArtifact` per-screen (URL/title/`changed` tagged by screen); `highlight`, `getProbe`, `capture`, navigate gain screen param; `browser-control.ts` handlers accept optional `screen` and use `lastWorkspace.dir` fallback.
 
 ### E. Scaffold changes (service/scaffold.ts)
-- Multi-page Vite skeleton: `home.html` (+ per-type extra pages optional: keep ONE seed page v1), `tokens.css`, `styles.css`, shared `app.js` nav snippet; `.design-studio.json` gains `pagesRoot: "."`; write `screens.json` (A). `command` stays `npm run dev`.
-- Config resolver (service/studio-config.ts): add `screens.json` reader/writer module `service/screens.ts` here.
-- No harness-plugin write (D4): skip `writeHarnessPlugin` call at scaffold.ts:499-505 behind fork flag; keep module dead for future.
+- Multi-page Vite skeleton: seed `home.html` **plus `index.html` meta-refresh redirect to home.html** (keeps `vite build` default entry valid; `command` stays `npm run dev`), `tokens.css`, `styles.css`, `app.js` nav snippet; `.design-studio.json` gains `pagesRoot: "."`; write `screens.json` (A).
+- New module `service/screens.ts` (read/write/normalize per A), used by `/screens`, `/open`, `/workspaces`.
+- No harness-plugin write (#5): skip that step in `scaffoldProject`.
+- **Scaffold confinement**: creating a NEW directory during scaffold is allowed only inside the resolved workspace root; an existing dir elsewhere is accepted (user's own project). Panel always passes workspace-root dirs.
 
 ### F. Panel changes (panel/*)
-- Replace project gates: `resolveDesignTarget` → `resolveCanvasTarget` (pure, panel/api.ts:490-522): target = current session workspace if `ws/<sessionId>` exists (kind `workspace`), else `new` (brief required → create slug → mkdir → scaffold → store `ws/` key). Delete NEEDS_PROJECT refusals at main.ts:523-528,739,794; `projectReady` → `wsReady = Boolean(config?.url)`.
-- `/canvas on`: ensure workspace (scaffold via `/scaffold`), `POST /open {dir}` (all screens), mode ON chip = `buildModeChip` (now includes rulebook + screens), focus row polls `/state` for mode/screens/active/picks unchanged.
-- `/canvas play` / `/canvas edit`: `POST /mode` shortcut (nice-to-have; also a toggle on the row).
-- Row (surface 'status'): Start/Stop + edit/play toggle + active screen dropdown (from /state.screens) + Focus. Hidden gates on NO_PROJECT_CONFIG_MESSAGE now: never hide — Start creates the workspace on first use.
-- Page: creation home keeps type/direction/fidelity/brief + design-system picker; "Your design work" list = `GET /workspaces` rows (open = focus existing chat if `ws/<sessionId>` match, else open a new session with brief text).
-- Pick chip payload (panel/attach-dialog.ts): include `Screen: <id>` line + the screen url.
-- Keep dead files dead (panel/compose.ts, settings.ts, tokens.ts unused).
+- `resolveDesignTarget` → `resolveCanvasTarget` (pure, panel/api.ts): target kinds `workspace` (ws/<sessionId> set) | `new` (brief required → `GET /workspaces` to avoid slug clash → create via `/scaffold` → store `ws/` key). Remove NEEDS_PROJECT refusals in `resolveDesignCommand`, `scaffoldCurrentProject`, `startNewDesign`; delete-branch behavior for list rendering. `wsReady = Boolean(config?.url)` AND keep `isLoopbackUrl(url)` gating the auto dev-server start (row Start control). **Path compare normalizes separators (`\`→`/`) and drive-letter case** before matching `ws/<sessionId>` dirs to session dirs (audit #11).
+- `/canvas on`: ensure workspace → `POST /open {dir}` (all screens) → mode chip; `/canvas play|edit`: `POST /mode`; row keeps Start/Stop + play/edit toggle + active-screen dropdown + Focus, all sourced from `/state`. The row NEVER falls back to "not set up" — absent workspace shows Start ("create canvas").
+- Page "Your design work" = `GET /workspaces` rows joined against a CACHED `ws/` storage scan (single `host.storage.keys()` pass per refresh, one map dir→sessionId; audit #19). Open a workspace: reuse its session via `host.openSession` when mapped, else start a new session titled with the workspace name (carrying the brief).
+- Chip budget (audit #16): `buildModeChip` text is capped at 16000 (`GUEST_ATTACH_TEXT_MAX`); order: mode state → workspace path + screens protocol → screens id/URL list (cap 40) → TRIMMED rules (IDENTITY + design-system authority + VERIFY_PROTOCOL; drop the full craft-rulebook dump from the chip — the rulebook ships via `designSessionPrompt` on session start instead).
+- Pick chip payload (panel/attach-dialog.ts): adds `Screen: <id>` + that screen's URL.
+- Dead panel files stay dead (compose/settings/tokens unused).
 
-### G. Cross-platform portability (Phase 0 — before D/E work)
-Rule: **no branch may be Windows-only.** Existing POSIX code paths stay intact and become the darwin/linux behavior; win32 gets an equivalent; Linux must be explicitly handled everywhere OS detection appears.
-| Fix | Where |
+### G. Cross-platform portability (P0 — symbol-owned files: browser.ts chrome/reaper, project-server.ts, scaffold.ts spawn, scripts/build-viewer.mjs, package.json test script)
+Rule: **no Windows-only branch.** POSIX paths stay intact as darwin/linux behavior; win32 gets equivalents; Linux explicit everywhere.
+| Fix | Where (symbols) |
 |---|---|
-| Chrome default per OS: `DS_CHROME_PATH` env wins on all platforms; win32 probes `C:\Program Files\Google\Chrome\Application\chrome.exe`, `(x86)`, `%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`; darwin keeps `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`; linux probes `/usr/bin/google-chrome`, `/usr/bin/google-chrome-stable`, `/usr/bin/chromium`, `/usr/bin/chromium-browser`, `/snap/bin/chromium`, then bare `google-chrome` | browser.ts:28-29 |
-| Orphan reaper: POSIX `ps -ax` branch stays for darwin/linux (must not throw if `ps` missing); win32 branch enumerates via `Get-CimInstance` (powershell) matching `ds-chrome-` profile dirs, kills via `taskkill /PID x /F /T`; if neither works, skip reaping silently | browser.ts:816-858 |
-| Dev-server identity/stop: POSIX pgid + `ps lstart` + SIGTERM/SIGKILL group-kill branch stays; win32 records `{pid, port, startedAt, platform:'win32'}`, verifies port owner via `netstat -ano` before `taskkill /T /F`; never kill unverified pids | project-server.ts:258-311, 278-300, 333-393 |
-| `spawn('npm', {shell:false})` → win32 uses `npm.cmd`, POSIX unchanged | scaffold.ts:544 |
-| `process.env.TMPDIR ?? '/tmp'` → `os.tmpdir()` (correct on all three OSes) | scripts/build-viewer.mjs:14 |
-| `node --test 'tests/*.test.ts'` single-quote glob breaks under cmd → `node --test --test-concurrency=1 tests` (dir arg; Node 24 type-stripping finds *.test.ts) | package.json test script |
-| SIGTERM/SIGINT handlers: POSIX branch unchanged; win32 relies on host kill (document inline) | main.ts:596-613 (leave) |
-| Home paths use `os.homedir()` (never `$HOME`); `ComSpec` reads guarded win32-only; window geometry default `80,80` (macOS comment) stays harmless elsewhere | all new/edited code |
-CI: `.github/workflows/ci.yml` (ubuntu) runs typecheck+build+test — fork must not introduce OS-specific assumptions in included tests; Chrome-dependent tests stay excluded from CI as upstream does.
+| Chrome default per OS: `DS_CHROME_PATH` env wins; win32 probes Program Files, Program Files (x86), %LOCALAPPDATA% Google\Chrome\Application\chrome.exe; darwin keeps the .app bundle path; linux probes /usr/bin/google-chrome, google-chrome-stable, chromium, chromium-browser, /snap/bin/chromium, then PATH `google-chrome` | browser.ts `CHROME_PATH` |
+| Orphan reaper: `ps -ax` branch intact for darwin/linux (tolerate missing `ps` silently); win32 via `Get-CimInstance Win32_Process` (powershell -NoProfile) matching `ds-chrome-` profiles, kill `taskkill /PID x /F /T`; unavailable → skip silently | browser.ts `reapOrphanChrome` |
+| Dev-server identity/stop: POSIX pgid+`ps lstart`+group-kill branch intact; win32 record `{pid,port,startedAt,platform:'win32'}`, verify port owner via `netstat -ano` PID column before `taskkill /T /F`; never kill unverified | project-server.ts identity/stop/alive helpers |
+| `spawn('npm',{shell:false})` → win32 `npm.cmd`; POSIX unchanged | scaffold.ts install spawn |
+| `TMPDIR ?? '/tmp'` → `os.tmpdir()` | scripts/build-viewer.mjs |
+| Test script glob → `node --test --test-concurrency=1 tests` | package.json |
+| Workspace root probe (`%ONEDRIVE%\Documents` → `%USERPROFILE%\Documents` → homedir) implemented service-side; POSIX unaffected | new workspace-root helper (P1-screens, used by /workspaces + /scaffold) |
+| Home dirs via `os.homedir()`; `ComSpec` reads win32-guarded; signals comment | all fork code |
+CI: ubuntu workflow (typecheck+build+test, Chrome-dependent tests excluded upstream-style) stays green — the automated macOS/Linux-side gate.
 
-### H. Copy/branding
-README.md, docs/, tests/manifest.test.ts (pins ids/copy — update expectations), statusSection title, page title, command description. Version → `0.2.0`.
+### H. Copy/branding + tests ownership
+README.md (fork purpose, Claude-canvas parity, OS matrix, disable-original guidance), docs/. Test files pinned to old behavior — owners by phase:
+- **P0**: tests/project-server, server-stop, reference-path (the `new URL(...).pathname` Windows case)
+- **P1-panel**: tests/manifest, mode, attach-dialog, mode-open, panel-open, root-workspace-breaker, provider, reference-*, adversarial/design-work-* (providerId/copy/`/canvas` renames)
+- **P1-screens**: tests/scaffold, service (new routes), studio-config
+- **P1-shell**: tests/viewer-ui, viewer-server, stock-controller
+- **P1-browser**: tests/browser, artifact-context, live-canvas-browser, canvas-zoom-routing, fit-page-browser, fit-page-breaker, nova-canvas-breaker
 
-## Phase plan & agent assignment (Alibaba models per AGENTS.md)
+## Phase plan (Alibaba models per AGENTS.md)
 
-| Phase | Scope | Files (ownership: only these agents touch these in this phase) | Model |
+| Phase | Scope | Model | State |
 |---|---|---|---|
-| **P0 Cross-OS** | G | service/browser.ts (reaper/chrome-path only), service/project-server.ts, service/scaffold.ts (spawn line), scripts/build-viewer.mjs, package.json (test script) | deepseek-v4-pro-0813#max |
-| **P0.5 Spec audit** | critique this spec vs code, list contradictions | read-only | qwen3.8-flash#xhigh |
-| P1 panel | F, H(panel bits) | package.json manifest+contributes, panel/*.ts, tests/manifest+panel-open+mode-open | deepseek-v4-pro-0813#max |
-| P1 screens+scaffold | A, B (routes), E | service/screens.ts (new), service/main.ts, service/studio-config.ts, service/scaffold.ts, tests/scaffold+service | deepseek-v4-pro-0813#max |
-| P1 shell | C | service/viewer-ui.ts, service/viewer-server.ts (config type), viewer-client/src/*, tests/stock-controller | qwen3.8-flash#xhigh |
-| P1 browser | D | service/browser.ts, service/artifact-context.ts, service/browser-control.ts, tests/live-canvas+canvas-zoom+nova-canvas | qwen3.8-flash#xhigh |
-| P2 integration | build+typecheck+tests green; per-screen verify (D9); cross-phase fixes | anything | deepseek-v4-pro#max |
-| P3 review | adversarial code review vs this spec; findings→fix list; apply approved fixes | anything | qwen3.8-flash#xhigh (review) |
-| P4 smoke | real Chrome via installed extension; canvas with 2 screens, edit pick, play click-through; spot-check macOS/Linux logic by reading branches (no macOS/Linux hosts available — review-only for those OSes) | — | flash agent + orchestrator browser tools |
-| P5 ship | commit on canvas-fork, install path handoff to user | — | orchestrator |
+| P0 cross-OS | §G (+§H test rows) | deepseek-v4-pro-0813#max | RUNNING |
+| P0.5 spec audit | done — 20 amendments folded into this v2 | qwen3.8-flash#xhigh | DONE |
+| P1-panel | §F, identity §1, harness §5 (shared/harness-text.ts), README/docs, its §H tests | deepseek-v4-pro-0813#max | after P0 |
+| P1-screens | §A/§B-routes/§E + workspace-root helper | deepseek-v4-pro-0813#max | after P0 |
+| P1-shell | §C (+ its §H tests) | qwen3.8-flash#xhigh | unblocked by §B Browser contract + §C v2 |
+| P1-browser | §D (+ §B Browser methods on browser.ts, its §H tests) | qwen3.8-flash#xhigh | after P0 (browser.ts handoff) |
+| P2 integration | make typecheck+build+tests green across phases; verify.ts active-screen defaults; cross-file seams | deepseek-v4-pro#max | after P1 |
+| P3 review | adversarial review vs this spec; per-platform branch audit (win/mac/linux); fix round | qwen3.8-flash#xhigh | after P2 |
+| P4 smoke | real Chrome on Windows; install in OpenChamber; acceptance below | flash + orchestrator | after P3 |
+| P5 ship | commit, changelog, handoff | orchestrator | — |
 
-OS caveat: development and runtime verification happen on Windows; macOS/Linux correctness is enforced through (a) per-platform branch review in P3, (b) unchanged POSIX paths kept byte-identical, and (c) ubuntu CI for the non-Chrome test suite.
+Agent rules: (1) branch `canvas-fork`, workdir `C:\Users\samhe\Documents\github\openchamber-design-studio`, npm install done; (2) touch ONLY your §H/phase files — outside changes only as `FORK-MERGE:` comment + report; (3) rebuild bundles after edits (`npm run build`; shell phase also `npm run build:viewer`); (4) typecheck your files; run tests you own; report baseline-vs-new failures honestly; (5) no new deps without flagging; (6) resolve code by SYMBOL, not line numbers; (7) all code cross-platform via explicit `process.platform` branches.
 
-Rules for all agents:
-1. Work in `C:\Users\samhe\Documents\github\openchamber-design-studio` on branch `canvas-fork`. `npm install` first if node_modules missing.
-2. Only edit files in your assigned scope; if a change outside it is REQUIRED, leave a `FORK-MERGE:` comment line at the site and report it.
-3. Source of truth is the `.ts`/`.js` sources; ALWAYS rerun `npm run build` (and `npm run build:viewer` when shell touched) and keep bundles in sync — the host loads built files.
-4. Run `npm run typecheck` + `npm run test` where your scope allows; report failures honestly.
-5. No new npm dependencies without noting it in the report (viewer build needs Tailwind CLI already present).
-6. All new/edited code must be cross-platform (spec §G rule): platform behavior via explicit `process.platform` branches, no POSIX-only or win32-only assumptions.
-
-## Acceptance (what "done" looks like)
-1. Original `design-studio` and fork `design-canvas` both installed, no rail/command clashes; `/canvas` works in THIS scratch chat with no project registered.
-2. First `/canvas <brief>` creates `~/Documents/Design Canvas/<slug>`, scaffolds, starts dev server, opens a Chrome canvas window with 1 artboard; agent adds a second screen (file + screens.json) → artboard appears (row refresh or re-/open).
-3. Canvas: wheel-drag pans both axes, Ctrl+wheel zooms, Fit-all frames every artboard, header shows title + device size, double-click an artboard = zoom to ~100%.
-4. Edit mode: click element in artboard → chip appears in THIS chat's composer with selector/styles + screen id. Play mode: buttons/links inside screens work, navigation stays inside its artboard frame, URL/title of that artboard updates.
-5. Everything survives OpenChamber restart: mode chips, workspace list, reopening canvas (`/canvas on` in the same chat reopens, no re-scaffold).
-6. `npm run check` green on Windows AND the ubuntu CI path (typecheck+build+tests, no Chrome); POSIX code paths reviewed byte-identical or properly branched.
+## Acceptance
+1. `design-canvas` installs beside `design-studio` without rail/command clashes; `/canvas` works in a chat with NO registered project. (Agent-`browser.*` arbitration between two installed providers is documented, not guaranteed — README tells users to disable the original.)
+2. `/canvas <brief>` in a scratch chat → creates `<Documents>/Design Canvas/<slug>`, scaffolds (home.html+index redirect+tokens+screens.json), dev server up, Chrome canvas opens with 1 artboard.
+3. Agent adds `checkout.html` + screens.json entry → artboard appears after re-open/`setScreens` push.
+4. Canvas: drag/wheel pans BOTH axes, Ctrl+wheel zooms, fitAll frames all artboards, headers show title+size, double-click artboard → focus/zoom ≈100%.
+5. Edit mode: click element in artboard B → chip in THIS chat's composer carries selector/styles + `Screen: B` + B's URL. Play mode: in-screen buttons/links work; navigation stays inside the artboard (sandbox); top-navigation attempts are refused by Chrome.
+6. `/canvas off` → `on` restores same workspace, no re-scaffold; OpenChamber restart preserves ws/mode/design keys and reopens cleanly.
+7. **Out-of-cwd writes**: from a chat whose dir ≠ workspace, the agent successfully creates home.html/checkout.html at the workspace path (permission prompts approved per decision #4).
+8. `npm run check` green on Windows; ubuntu CI gate green (typecheck+build+non-Chrome tests); POSIX branches reviewed byte-compatible (P3).
