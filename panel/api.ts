@@ -1,14 +1,17 @@
-// Thin, typed seam over the two things the panel is allowed to do: talk to the
-// host (attach references to the chat) and reach its own local service through
-// `serviceRequest`. Everything that can fail in a way the UI must explain is
-// normalized to either `ServiceUnavailable` or a plain Error.
+// Design Canvas panel seam: the thin, typed surface over the two things the
+// panel is allowed to do — talk to the host (attach references to the chat,
+// start sessions) and reach its own local service through `serviceRequest`.
+// Everything that can fail in a way the UI must explain is normalized to either
+// `ServiceUnavailable` or a plain Error.
 //
-// The live view is a real headful Chrome window the service owns; the panel
-// only opens/navigates it (`/open`), raises it without reloading (`/focus`) and
-// reads its state (`/state`). Picking is a Cmd/Ctrl-click gesture in the live
-// window itself, not a route. There is no rendered surface to size.
+// The canvas is a real headful Chrome window the service owns; the panel only
+// opens/navigates it (`POST /open {dir, screen?}`), raises it without reloading
+// (`/focus`), switches edit/play (`POST /mode`), sets the active screen
+// (`POST /open {dir, screen}` — in-memory activation, no shell restart) and
+// reads its state (`/state`). Workspaces live on disk under the service-resolved
+// root (`GET /workspaces`); the panel NEVER constructs the Documents path itself.
 import { connectHost, HostRequestError } from '@openchamber/sdk';
-import type { GuestProjectsSnapshot, GuestSessionRecord, GuestSessionsSnapshot } from '@openchamber/sdk';
+import type { GuestProjectsSnapshot, GuestSessionRecord } from '@openchamber/sdk';
 import type { VerifyConfig } from '../shared/verify-types.ts';
 
 export const host = connectHost();
@@ -62,7 +65,17 @@ export type PickPayload = {
   rect: { x: number; y: number; width: number; height: number };
 };
 
-/** The real window the service drives: its page and last pick. */
+/** One screen as the canvas shell reports it (spec §B `GET /state`). */
+export type CanvasScreenState = {
+  id: string;
+  title: string;
+  url: string;
+  width: number;
+  height: number;
+  active: boolean;
+};
+
+/** The real window the service drives: its page, mode, screens and last pick. */
 export type LiveState = {
   url: string;
   title: string;
@@ -70,10 +83,18 @@ export type LiveState = {
   pickSeq: number;
   windowOpen: boolean;
   /**
-   * Another panel (the hidden pane `/design` mounts inside a chat window) is
+   * Another panel (the hidden pane `/canvas` mounts inside a chat window) is
    * the pick→chat bridge right now: this panel must not attach picks too.
    */
   bridgeActive?: boolean;
+  /** The canvas mode (`edit` | `play`), from `GET /state` (spec §B). */
+  mode?: 'edit' | 'play';
+  /** The workspace's screens, activation included (spec §B). */
+  screens?: CanvasScreenState[];
+  /** The active screen id, when a workspace is open. */
+  activeScreen?: string;
+  /** The screen the LAST pick landed on (spec §B pick() gains `screen`). */
+  lastPickScreen?: string;
 };
 
 /** What `POST /open` answers after opening/navigating the real window. */
@@ -92,17 +113,28 @@ export type OpenResult = {
 export const OPENING_STATUS = 'Starting dev server…';
 
 /**
- * Open (or navigate) the real Chrome window to `url`. When `dir` is given, the
- * service first makes sure the project's dev server is running and answers a
- * failed start instead of opening a window on a dead page.
+ * Open the workspace's canvas window. Spec §B: `POST /open` accepts
+ * `{dir, screen?}` — the config's `.design-studio.json` url is authoritative,
+ * the service resolves the screens itself. A warm window gets an in-memory
+ * activation (`setActive`/`setScreens`), never a shell restart.
+ */
+export function openWorkspace(input: { dir: string; screen?: string }): Promise<OpenResult> {
+  const payload = input.screen !== undefined ? { dir: input.dir, screen: input.screen } : { dir: input.dir };
+  return callService<OpenResult>('/open', undefined, 'POST', JSON.stringify(payload));
+}
+
+/**
+ * Legacy helper retained for the raw-url flow (shared by server-stop paths):
+ * open (or navigate) the real window to `url`, sending `dir` so the service can
+ * start the workspace's dev server when the url is loopback.
  */
 export function openLive(url: string, dir?: string): Promise<OpenResult> {
   return callService<OpenResult>('/open', undefined, 'POST', JSON.stringify(dir ? { url, dir } : { url }));
 }
 
 /**
- * Close the live Chrome window and quit Chrome (Design Mode going OFF). The
- * service removes the throwaway profile, so a later `openLive` relaunches fresh.
+ * Close the live Chrome window and quit Chrome. The service removes the
+ * throwaway profile, so a later open relaunches fresh.
  */
 export function closeLive(): Promise<{ ok: boolean }> {
   return callService<{ ok: boolean }>('/close', undefined, 'POST');
@@ -112,7 +144,7 @@ export function closeLive(): Promise<{ ok: boolean }> {
 export type ServerStopResult = { ok: boolean; stopped?: boolean; error?: string };
 
 /**
- * Stop the project's dev server. The service only kills a process group it
+ * Stop the workspace's dev server. The service only kills a process group it
  * started for `dir`; an unknown dir is a safe no-op (`ok:true, stopped:false`).
  * This is the raw escape hatch — callers decide WHEN to call it (the smart stop
  * on Design Mode OFF, or the manual Stop preview action).
@@ -126,7 +158,7 @@ export type ServerStartResult = { ok: boolean; started?: boolean; up?: boolean; 
 
 /**
  * Start (or confirm) the dev server for `dir`. When `url` is omitted the
- * service reads the project's `.design-studio.json` url. The service only
+ * service reads the workspace's `.design-studio.json` url. The service only
  * attempts to start loopback addresses; a non-loopback url is a 400.
  */
 export function startDevServer(dir: string, url?: string): Promise<ServerStartResult> {
@@ -142,19 +174,27 @@ export function startDevServer(dir: string, url?: string): Promise<ServerStartRe
  */
 export type ServerStatus = { up: boolean; port: number | null; pid?: number; error?: string };
 
-/** The recorded dev-server status for a project dir (never starts one). */
+/** The recorded dev-server status for a workspace dir (never starts one). */
 export function getServerStatus(dir: string): Promise<ServerStatus> {
   return callService<ServerStatus>('/server/status', { dir });
 }
 
-/** Live window state: current page, pick mode, window open/closed. */
+/** Live window state: current page, mode, screens, window open/closed. */
 export function getState(): Promise<LiveState> {
   return callService<LiveState>('/state');
 }
 
 /**
+ * Switch the canvas mode (spec §B: `POST /mode` → push + in-memory echo). The
+ * answer carries the mode the service now holds.
+ */
+export function setMode(mode: 'edit' | 'play'): Promise<{ ok: boolean; mode?: 'edit' | 'play'; error?: string }> {
+  return callService<{ ok: boolean; mode?: 'edit' | 'play'; error?: string }>('/mode', undefined, 'POST', JSON.stringify({ mode }));
+}
+
+/**
  * Claim (or heartbeat) the exclusive pick→chat bridge. Called by the hidden
- * pane `/design` mounts inside a chat window: while it holds a warm claim,
+ * pane `/canvas` mounts inside a chat window: while it holds a warm claim,
  * every OTHER panel stands down, so each Cmd/Ctrl-click becomes exactly one
  * chip in the window that owns the bridge. `token` renews an existing claim;
  * omit it to take ownership.
@@ -170,8 +210,7 @@ export function releasePickBridge(token: string): Promise<{ ok: boolean; bridgeA
 
 /**
  * Raise the live Chrome window (POST /focus) without navigating or reloading
- * it, so the user can see the page they are about to Cmd-click. Safe with no
- * window open.
+ * it, so the user can see the page they are about to Cmd-click.
  */
 export function focusLive(): Promise<{ ok: boolean }> {
   return callService<{ ok: boolean }>('/focus', undefined, 'POST');
@@ -179,9 +218,7 @@ export function focusLive(): Promise<{ ok: boolean }> {
 
 /**
  * Flash a picked element in the live preview window: `POST /highlight` with its
- * selector. The ~600 ms flash is done service-side, so hover is fire-and-forget
- * and a failure is never surfaced to the user. `Highlight in preview` uses the
- * same route.
+ * selector. Best-effort and fire-and-forget from the caller.
  */
 export function highlightElement(selector: string): Promise<{ ok: boolean }> {
   return callService<{ ok: boolean }>('/highlight', undefined, 'POST', JSON.stringify({ selector }));
@@ -196,9 +233,10 @@ export type StudioConfig = {
   entry?: string;
   harness?: { direction?: string; fidelity?: string; critiquePolicy?: string; verify?: VerifyConfig };
   pick?: Record<string, unknown>;
+  pagesRoot?: string;
 };
 
-/** The project's `.design-studio.json`, resolved by the service in a fixed order. */
+/** The workspace's `.design-studio.json`, resolved by the service in a fixed order. */
 export function getConfig(dir: string): Promise<{ config: StudioConfig | null; path: string | null }> {
   return callService('/config', { dir });
 }
@@ -208,32 +246,67 @@ export function validateReferencePath(dir: string, path: string): Promise<{ path
   return callService('/reference', undefined, 'POST', JSON.stringify({ dir, path }));
 }
 
-/** What `POST /harness` answers after writing/refreshing the in-session plugin. */
-export type HarnessResult = {
-  path: string;
-  created: boolean;
-  updated: boolean;
-  changed: boolean;
+// ---- workspaces (spec §B `GET /workspaces` + §A screens.json) ----
+
+/** A screen registry entry (spec §A): file is workspace-relative and ends .html. */
+export type ScreenInfo = {
+  id: string;
+  file: string;
+  title: string;
+  width: number;
+  height: number;
+};
+
+/** The `screens.json` registry shape the service reads/writes (spec §A). */
+export type ScreensRegistry = {
+  version: number;
+  screens: ScreenInfo[];
+};
+
+/** One workspace on disk, as `GET /workspaces` reports it (spec §B). */
+export type WorkspaceRow = {
+  dir: string;
+  name: string;
+  url?: string;
+  screens?: ScreenInfo[];
+};
+
+/** What `GET /workspaces` answers: the resolved root plus every workspace. */
+export type WorkspacesResult = {
+  root: string;
+  workspaces: WorkspaceRow[];
 };
 
 /**
- * Ask the service to write the project-local OpenCode v2 plugin that runs the
- * Design Studio harness (craft rules + verification mandate) inside agent
- * sessions. Called when Design Mode turns ON for a ready project. Best-effort
- * from the caller: a design session still works without it.
+ * All workspaces on disk — the page's "Your design work" list (decision 2).
+ * The service resolves the workspace root (`%ONEDRIVE%\Documents` etc.); the
+ * panel never constructs that path itself (decision 3).
  */
-export function ensureHarness(dir: string): Promise<HarnessResult> {
-  return callService<HarnessResult>('/harness', undefined, 'POST', JSON.stringify({ dir }));
+export function getWorkspaces(): Promise<WorkspacesResult> {
+  return callService<WorkspacesResult>('/workspaces');
 }
 
-/** Recognize legacy moved sessions so their existing targets remain usable. */
-export function isDesignWorkspaceDir(dir: string | null | undefined): boolean {
-  return /(^|[\\/])designs([\\/]|$)/.test(String(dir ?? ''));
+/** The normalized screens.json registry for a workspace dir (spec §B). */
+export function getScreens(dir: string): Promise<ScreensRegistry> {
+  return callService<ScreensRegistry>('/screens', { dir });
 }
 
-// ---- scaffolding (immediate project initialization) ----
+/** Validate and write the full registry (spec §B). The panel offers this so a
+ * row action can repair a registry; the agent normally writes screens.json. */
+export function putScreens(dir: string, registry: ScreensRegistry): Promise<{ path: string }> {
+  return callService<{ path: string }>('/screens', { dir }, 'PUT', JSON.stringify(registry));
+}
 
-/** What `POST /scaffold` is asked to build: the project dir plus the brief. */
+/** What the workspaces list should show, derived from a `GET /workspaces` read. */
+export type WorkspacesView =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'empty' }
+  | { kind: 'list'; rows: WorkspaceWorkRow[] };
+
+// ---- scaffolding (immediate workspace initialization) ----
+
+/** What `POST /scaffold` is asked to build: the workspace dir plus the brief. */
 export type ScaffoldSpec = {
   type: string;
   direction?: string;
@@ -241,8 +314,7 @@ export type ScaffoldSpec = {
   brief?: string;
   /**
    * The chosen design-system preset id (shared/design-systems.ts), when the user
-   * picked one. The service lane reads it to seed the project's DESIGN.md /
-   * tokens.css; omitted for "No design system".
+   * picked one. Omitted for "No design system".
    */
   designSystemId?: string;
 };
@@ -253,290 +325,179 @@ export type ScaffoldResult =
   | { ok: false; error: string };
 
 /**
- * Scaffold the project at `dir` from the design spec (the service writes
- * `.design-studio.json` and the starter files). Called when a design flow starts
- * in a project that has no config yet. A non-200 answer throws `ServiceUnavailable`;
- * a business failure comes back as `{ ok: false, error }`.
+ * Scaffold the workspace at `dir` from the design spec (the service writes
+ * `.design-studio.json`, the multi-page skeleton and `screens.json`). The dir
+ * must live inside the service-resolved workspace root — the panel derives it
+ * from the `GET /workspaces` answer (decision 3), never from Documents itself.
  */
 export function scaffoldProject(dir: string, spec: ScaffoldSpec): Promise<ScaffoldResult> {
   return callService<ScaffoldResult>('/scaffold', undefined, 'POST', JSON.stringify({ dir, ...spec }));
 }
 
-// The service's `/files` route stays (tests/service coverage), but the panel no
-// longer lists project files: the `+` references a file by DROP or a PASTED
-// path, which needs no listing (see `fileReferenceChip` in mode.ts).
+// ---- cross-platform path compares (spec §F, audit #11 / §G rule 2) ----
+//
+// Workspace dirs come from the service (native separators) and are compared
+// against `ws/<sessionId>` dirs and registered-project dirs from the host.
+// Normalize separators (`\`→`/`) and drive-letter case before any compare;
+// trailing separators are trimmed. POSIX paths are unaffected (no backslashes,
+// no drive letters — byte-identical).
 
-// ---- project list (pure) ----
-
-/** One registered project as the wizard and the page render it. */
-export type ProjectRow = {
-  id: string;
-  name: string;
-  directory: string;
-  /** Its readable `.design-studio.json`, or null when there is none / it failed. */
-  config: StudioConfig | null;
-  /** The service error when the config read failed, else null. Never hides the row. */
-  configError: string | null;
-};
-
-/** The per-project outcome of reading its `.design-studio.json`. */
-export type ProjectConfigRead = { config: StudioConfig | null; error: string | null };
-
-/**
- * What the Projects list should show, derived purely from the workspace snapshot
- * and the per-project config reads. `loading` and `error` are the snapshot's own
- * states. A project is a DESIGN project only when it HAS a design file: a config
- * read that succeeded and found nothing (`config` null, no `error`) drops the
- * project. A read that FAILED keeps the row (config null + `configError`), so a
- * broken service never silently hides a project. The true empty state is thus a
- * ready snapshot whose projects all have no design file (or none at all).
- */
-export type ProjectsView =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'empty' }
-  | { kind: 'list'; rows: ProjectRow[] };
-
-/** The snapshot a project list is built from. */
-export type ProjectsSnapshot = Pick<GuestProjectsSnapshot, 'state' | 'projects'>;
-
-/**
- * Map the host's projects snapshot and the per-project config reads onto what the
- * list renders. Pure, so the wizard and the page share one rule and a test can
- * pin every state. `configs` is keyed by project directory.
- */
-export function projectRows(
-  snapshot: ProjectsSnapshot,
-  configs: Record<string, ProjectConfigRead> = {},
-): ProjectsView {
-  if (snapshot.state === 'loading') return { kind: 'loading' };
-  if (snapshot.state === 'error') return { kind: 'error', message: 'Could not load projects.' };
-  const rows: ProjectRow[] = [];
-  for (const project of snapshot.projects) {
-    const read = configs[project.directory];
-    // A read that SUCCEEDED and found no config means this project has no design
-    // file, so it is not a design project and drops out of the list. A read that
-    // FAILED still keeps the row (configError), so a broken service cannot hide a
-    // project. An unread project (no entry) is kept as well.
-    if (read && read.config === null && !read.error) continue;
-    rows.push({
-      id: project.id,
-      name: project.name,
-      directory: project.directory,
-      config: read?.config ?? null,
-      configError: read?.error ?? null,
-    });
-  }
-  if (rows.length === 0) return { kind: 'empty' };
-  return { kind: 'list', rows };
+/** One path, normalized for compare: separators, drive-letter case, trailing slash. */
+export function normalizeDirPath(dir: string): string {
+  const text = String(dir).trim().replace(/\\/g, '/');
+  const drive = /^([a-zA-Z]):\/(.)/.exec(text);
+  const base = drive ? `${drive[1]!.toLowerCase()}:${text.slice(2)}` : text;
+  let end = base.length;
+  while (end > 1 && base[end - 1] === '/') end -= 1;
+  return base.slice(0, end).replace(/\/+$/, () => base.slice(0, end) === '/' ? '/' : '');
 }
 
-// ---- design projects & design chats (pure) ----
+/** Whether two dirs are the same path, separators and drive-case aside. */
+export function sameDirPath(a: string, b: string): boolean {
+  return normalizeDirPath(a) === normalizeDirPath(b);
+}
 
-/** The badge a design project row shows when its `.design-studio.json` is readable. */
-export const DESIGN_READY_BADGE = 'Design ready';
-/** The badge a project row shows when there is no usable `.design-studio.json` (or the read failed). */
-export const NO_CONFIG_BADGE = 'No config yet';
-/**
- * The merged list's true empty state: a ready project snapshot with no design
- * project AND no design chat. One line, since projects and chats share one list.
- */
-export const NO_DESIGN_WORK_MESSAGE = 'No design work yet. Create one above.';
-/**
- * The rail panel surface's whole content: a calm pointer to the sidebar page,
- * since the rail panel itself is intentionally empty. One line, no controls.
- */
-export const PANEL_SIDEBAR_HINT = 'Design Studio opens from the sidebar.';
+/** Whether `base` is `dir` or an ancestor of it (normalized, separator-aware). */
+export function pathContains(root: string, dir: string): boolean {
+  const rb = normalizeDirPath(root);
+  const rd = normalizeDirPath(dir);
+  return rd === rb || rd.startsWith(`${rb}/`);
+}
 
-/**
- * The inverse of `modeStorageKey` (mode.ts): the session id a `mode/<id>` host
- * storage key refers to, or null for any other key. Kept DOM-free so the chats
- * list can parse the keys `host.storage.keys()` returns. A test pins it against
- * `modeStorageKey` so the `mode/` prefix cannot drift.
- */
-export function modeSessionIdFromKey(key: string): string | null {
-  const prefix = 'mode/';
+// ---- the canvas target (pure) ----
+
+/** The per-session workspace record stored under `ws/<sessionId>` (decision 3). */
+export type WorkspaceRecord = { dir: string; name: string };
+
+/** The inverse of the `ws/` storage key: the session id, or null for any other key. */
+export function wsSessionIdFromKey(key: string): string | null {
+  const prefix = 'ws/';
   return key.startsWith(prefix) && key.length > prefix.length ? key.slice(prefix.length) : null;
 }
 
-/** The human label for a design chat row: the session title, else a short id. */
-export function designChatLabel(session: { id: string; title?: string }): string {
-  const title = session.title?.trim();
-  return title ? title : session.id.slice(0, 8);
+/** Whether a stored value is a workspace record (a dir and a name). */
+export function isWorkspaceRecord(value: unknown): value is WorkspaceRecord {
+  return Boolean(
+    value && typeof value === 'object' &&
+    typeof (value as WorkspaceRecord).dir === 'string' && (value as WorkspaceRecord).dir.trim() !== '',
+  );
 }
 
-/**
- * The meta line under a project row: `<type> · <url>` for a readable config, the
- * configured type alone when the config has no url, and the directory otherwise.
- */
-export function projectMeta(row: ProjectRow): string {
-  if (!row.config) return row.directory;
-  const type = row.config.type?.trim() || 'custom';
-  const url = row.config.url?.trim();
-  return url ? `${type} · ${url}` : type;
-}
-
-/**
- * The meta line under a design-chat row: `<type> · <url>` for the chat's OWN
- * readable config, the configured type alone when it has no url, and the chat's
- * own directory otherwise. Pure, so the row and a test share one rule.
- */
-export function designChatMeta(row: DesignChatRow): string {
-  if (!row.config) return row.directory || row.projectName;
-  const type = row.config.type?.trim() || 'custom';
-  const url = row.config.url?.trim();
-  return url ? `${type} · ${url}` : type;
-}
-
-/** One registered project's sessions snapshot, as the design-chats list reads it. */
-export type ProjectSessions = {
-  projectId: string;
-  projectName: string;
-  snapshot: GuestSessionsSnapshot;
-};
-
-/** A design chat: a session whose per-session Design Mode is ON. */
-export type DesignChatRow = {
-  sessionId: string;
-  projectId: string;
-  projectName: string;
-  title: string;
-  /**
-   * The session's OWN working directory (the `listSessions` record's
-   * `directory`). For an isolated chat this is `<project>/designs/<slug>`, where
-   * its own `.design-studio.json` lives — NOT the project root. The dev-server
-   * and config actions resolve against this, not the project root.
-   */
-  directory: string;
-  /** The chat directory's readable `.design-studio.json`, or null when there is none. */
-  config?: StudioConfig | null;
-  /** The service error when the chat directory's config read failed, else null. */
-  configError?: string | null;
-  /** The session's last-updated time; the merged list orders chats by it. */
-  updatedAt: number;
-};
-
-/**
- * What the design-chats list should show, derived from each project's sessions
- * snapshot and the set of session ids whose Design Mode is ON. A project whose
- * snapshot failed is counted, never allowed to hide the rows the readable
- * projects contribute: the error state appears only when no row survives.
- * `loading` anywhere keeps the list loading; the true empty state is only for a
- * ready, non-empty set of projects with no ON session. Pure, so the page and a
- * test share one rule.
- */
-export type DesignChatsView =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'empty' }
-  | { kind: 'list'; rows: DesignChatRow[] };
-
-/**
- * Every registered project a scan or a target resolution needs, from a workspace
- * snapshot. Chats are listed REGARDLESS of `.design-studio.json`: a project with
- * no config never hides the design sessions inside it, so this list is
- * deliberately NOT the config-filtered `projectRows`. The `directory` is what
- * target resolution matches the frame's current directory against. Pure.
- */
+/** Every registered project a scan or a target resolution needs, from a workspace snapshot. */
 export type RegisteredProject = { id: string; name: string; directory: string };
 
-export function allProjectsFromSnapshot(snapshot: ProjectsSnapshot): RegisteredProject[] {
+export function allProjectsFromSnapshot(snapshot: Pick<GuestProjectsSnapshot, 'state' | 'projects'>): RegisteredProject[] {
   if (snapshot.state !== 'ready') return [];
   return snapshot.projects.map((project) => ({ id: project.id, name: project.name, directory: project.directory }));
 }
 
-// ---- the creation flow's target (pure) ----
-
 /**
- * The actionable refusal when the current directory belongs to NO registered
- * project. The composer must not scaffold/start there: a session without a
- * registered `projectId` lands in the frame's own (unregistered) directory,
- * where the chats scan never looks — and scaffolding there once wrote a design
- * project into OpenChamber's own chats folder. Pure copy, shared with a test.
+ * Where a canvas flow targets (spec §F, pure). A `workspace` target means the
+ * session already has a `ws/<sessionId>` record: reuse its dir/name, carrying
+ * the registered project id when the user registered the workspace root (the
+ * decision #4c upgrade path — only then does `startSession` pass `projectId`).
+ * Otherwise the target is `new`: the brief drives slug + scaffold.
  */
-export const NEEDS_PROJECT_MESSAGE =
-  'Add this folder to OpenChamber as a project first — design sessions live in registered projects.';
+export type CanvasTarget =
+  | { kind: 'workspace'; dir: string; name: string; projectId?: string }
+  | { kind: 'new'; brief: string };
 
-/**
- * Where a creation flow targets. A `project` target is a REGISTERED project:
- * its directory, its registered id (sent as the session's `projectId`, so the
- * new chat lands where the chats scan can see it) and the config already read
- * for that directory (null when it has none, or the read failed). A
- * `needs-project` target means the current directory belongs to no registered
- * project: the composer refuses — it never scaffolds into an unregistered
- * directory.
- */
-export type DesignTarget =
-  | { kind: 'project'; dir: string; projectId: string; config: StudioConfig | null }
-  | { kind: 'needs-project'; dir: string | null };
-
-/**
- * Whether `dir` lies inside `root` (or IS it). A plain prefix match on the
- * absolute paths the host reports, separated by `/` — no normalization, no
- * case folding: both strings come from the same host.
- */
-export function pathContains(root: string, dir: string): boolean {
-  return dir === root || dir.startsWith(`${root}/`);
-}
-
-/**
- * Resolve what a creation flow targets. A project picked in the working-directory
- * selector wins. Otherwise the frame's current directory is matched against the
- * REGISTERED projects (`allProjectsFromSnapshot`, not the config-filtered rows):
- * the exact directory first, else the deepest registered project that contains
- * it. Nothing matching is a `needs-project` target, which the composer refuses
- * on. Pure, so the page and a test share one rule.
- */
-export function resolveDesignTarget(input: {
-  directory: string | null;
-  selectedProjectId: string | null;
+export function resolveCanvasTarget(input: {
+  workspace: WorkspaceRecord | null;
+  brief: string;
   projects: RegisteredProject[];
-  rows: ProjectRow[];
-}): DesignTarget {
-  const picked = input.selectedProjectId
-    ? input.projects.find((project) => project.id === input.selectedProjectId)
-    : undefined;
-  if (picked) return projectTarget(picked, input.rows);
-  if (input.directory) {
-    const exact = input.projects.find((project) => project.directory === input.directory);
-    if (exact) return projectTarget(exact, input.rows);
-    let containing: RegisteredProject | undefined;
-    for (const project of input.projects) {
-      // The DEEPEST containing project wins when registered projects nest.
-      if (pathContains(project.directory, input.directory) && (!containing || project.directory.length > containing.directory.length)) {
-        containing = project;
-      }
-    }
-    if (containing) {
-      // An isolated per-chat workspace (`<project>/designs/<slug>`) is its OWN
-      // design target: the chat's `.design-studio.json` lives IN it, not at the
-      // project root, so the scaffold/open actions must resolve against this
-      // directory while the containing project still supplies the registered id.
-      if (isDesignWorkspaceDir(input.directory)) {
-        return { kind: 'project', dir: input.directory, projectId: containing.id, config: configForDir(input.rows, input.directory) };
-      }
-      return projectTarget(containing, input.rows);
-    }
+}): CanvasTarget {
+  const ws = input.workspace;
+  if (ws && ws.dir.trim() !== '') {
+    const registered = input.projects.find((candidate) => sameDirPath(candidate.directory, ws.dir) || pathContains(candidate.directory, ws.dir));
+    const base: { kind: 'workspace'; dir: string; name: string } = { kind: 'workspace', dir: ws.dir, name: ws.name || ws.dir };
+    return registered ? { ...base, projectId: registered.id } : base;
   }
-  return { kind: 'needs-project', dir: input.directory };
+  return { kind: 'new', brief: input.brief.trim() };
 }
 
-function projectTarget(project: RegisteredProject, rows: ProjectRow[]): DesignTarget {
-  const row = rows.find((candidate) => candidate.directory === project.directory);
-  return { kind: 'project', dir: project.directory, projectId: project.id, config: row?.config ?? null };
+// ---- slug creation (spec §F: kebab brief/session, sanitized, ≤40, no clash) ----
+
+/** The longest a slug may be (spec decision 3: ≤40 chars, `[a-z0-9-]`). */
+export const WORKSPACE_SLUG_LIMIT = 40;
+
+/** Kebab of the brief's first words plus the session id's tail, sanitized. */
+export function canvasSlug(brief: string, seed: string): string {
+  const words = brief.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).slice(0, 4).join('-');
+  // The seed is a session id like `ses_3f2ad8` or `new-design:123`: keep the
+  // last segment — the part that actually distinguishes the id — sanitized.
+  const segments = seed.toLowerCase().replace(/[^a-z0-9-]+/g, '-').split('-').filter(Boolean);
+  const tail = (segments[segments.length - 1] ?? seed.toLowerCase().replace(/[^a-z0-9]+/g, '')).slice(0, 8);
+  const base = words ? `${words}-${tail}` : `canvas-${tail}`;
+  const cleaned = base.replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+  return (cleaned || 'canvas').slice(0, WORKSPACE_SLUG_LIMIT);
 }
 
-/** The readable config a row recorded for `dir`, or null when none row matches. */
-function configForDir(rows: ProjectRow[], dir: string): StudioConfig | null {
-  return rows.find((row) => row.directory === dir)?.config ?? null;
+/**
+ * A slug no existing workspace uses: compare against the basenames of the
+ * dirs `GET /workspaces` returned, splatting `-2`, `-3`, … on clashes.
+ */
+export function uniqueCanvasSlug(brief: string, seed: string, existingDirs: string[]): string {
+  const taken = new Set(existingDirs.map((dir) => normalizeDirPath(dir).split('/').pop() ?? ''));
+  const first = canvasSlug(brief, seed);
+  if (!taken.has(first)) return first;
+  for (let i = 2; ; i += 1) {
+    const candidate = `${first.slice(0, Math.max(1, WORKSPACE_SLUG_LIMIT - String(i).length - 1))}-${i}`;
+    if (!taken.has(candidate)) return candidate;
+  }
 }
+
+/**
+ * Join the SERVICE-provided workspace root with a slug. The panel never builds
+ * the Documents path itself (decision 3): the root comes from `GET /workspaces`,
+ * and its separator style (win32 `\` vs POSIX `/`) decides the join.
+ */
+export function joinWorkspaceDir(root: string, slug: string): string {
+  const trimmed = root.replace(/[\\/]+$/, '');
+  const sep = trimmed.includes('\\') && !trimmed.startsWith('/') ? '\\' : '/';
+  return `${trimmed}${sep}${slug}`;
+}
+
+/** The screen url for a workspace-relative file, on a workspace base url (decision 6). */
+export function screenUrl(baseUrl: string, file: string): string {
+  return `${baseUrl.replace(/\/+$/, '')}/${file}`;
+}
+
+// ---- the workspaces design-work list (pure, decision 2 + audit #19) ----
+
+/** A workspace row joined against the cached `ws/` scan. */
+export type WorkspaceWorkRow = WorkspaceRow & { sessionId: string | null };
+
+/**
+ * Join `GET /workspaces` rows against the CACHED `ws/` storage scan — one map
+ * of normalized dir → session id, built from a single `host.storage.keys()`
+ * pass per refresh (audit #19). The dirs match after separator/drive-case
+ * normalization (audit #11). A row NEVER drops out: an unmapped workspace is a
+ * plain `sessionId: null` row the page opens by starting a new session.
+ */
+export function joinWorkspaceSessions(rows: WorkspaceRow[], wsSessionMap: ReadonlyMap<string, string>): WorkspaceWorkRow[] {
+  return rows.map((row) => ({ ...row, sessionId: wsSessionMap.get(normalizeDirPath(row.dir)) ?? null }));
+}
+
+/** The meta line under a workspace row: its served url, else its directory. */
+export function workspaceMeta(row: WorkspaceRow): string {
+  const url = row.url?.trim();
+  return url ? url : row.dir;
+}
+
+/** A workspace is "ready" when its `.design-studio.json` carries a non-empty url. */
+export function workspaceReady(url: string | null | undefined): boolean {
+  return Boolean(url?.trim());
+}
+
+// ---- session detection (pure) ----
 
 /**
  * Whether a single attached item's `data` is this package's Design Mode chip.
  * `buildModeChip` (mode.ts) writes `data.mode = { on: true, … }`, and the
  * session record echoes every attached chip's `data` back to us (SDK
  * `GuestSessionRecord.items[].data`). Kept loose on purpose: only `mode.on` is
- * load-bearing, so any other mode fields can change without breaking detection.
+ * load-bearing.
  */
 export function isModeChipData(data: unknown): boolean {
   if (!data || typeof data !== 'object') return false;
@@ -546,185 +507,36 @@ export function isModeChipData(data: unknown): boolean {
 
 /**
  * Whether a session snapshot itself shows Design Mode was ON: at least one of
- * its attached items carries our mode chip. This is the PRIMARY signal — it
- * survives on any machine, since the chip is part of the session, while our own
- * `mode/<id>` storage key is per-device and only a fallback.
+ * its attached items carries our mode chip — the cross-device signal.
  */
 export function sessionShowsDesignMode(session: Pick<GuestSessionRecord, 'items'>): boolean {
   return Array.isArray(session.items) && session.items.some((item) => isModeChipData(item.data));
 }
 
-/**
- * Whether a session is a design chat. Four signals, any one is enough:
- *  · the snapshot shows our mode chip (`sessionShowsDesignMode`), the cross-device one;
- *  · the live `mode/<id>` key says ON (`onSessionIds`), the per-device fallback;
- *  · the persistent `design/<id>` marker exists (`markerSessionIds`), which survives
- *    the mode being switched off, so a finished design chat stays listed;
- *  · a `mode/<id>` key merely EXISTS (`modeKeySessionIds`, regardless of its `on`
- *    value), which is written the first time Design Mode is used and covers a
- *    history that predates the marker, so an older design chat is still listed.
- * Pure, so the page and a test share one rule.
- */
-export function isDesignSession(
-  session: Pick<GuestSessionRecord, 'id' | 'items'>,
-  onSessionIds: ReadonlySet<string>,
-  markerSessionIds?: ReadonlySet<string>,
-  modeKeySessionIds?: ReadonlySet<string>,
-): boolean {
-  return (
-    sessionShowsDesignMode(session) ||
-    onSessionIds.has(session.id) ||
-    Boolean(markerSessionIds?.has(session.id)) ||
-    Boolean(modeKeySessionIds?.has(session.id))
-  );
-}
-
-export function designChatRows(
-  listings: ProjectSessions[],
-  onSessionIds: ReadonlySet<string>,
-  markerSessionIds?: ReadonlySet<string>,
-  modeKeySessionIds?: ReadonlySet<string>,
-): DesignChatsView {
-  if (listings.length === 0) return { kind: 'empty' };
-  const failed: string[] = [];
-  const rows: DesignChatRow[] = [];
-  let loading = false;
-  for (const listing of listings) {
-    if (listing.snapshot.state === 'error') {
-      failed.push(listing.projectName);
-      continue;
-    }
-    if (listing.snapshot.state === 'loading') {
-      loading = true;
-      continue;
-    }
-    for (const session of listing.snapshot.sessions) {
-      if (session.archivedAt) continue;
-      if (!isDesignSession(session, onSessionIds, markerSessionIds, modeKeySessionIds)) continue;
-      rows.push({
-        sessionId: session.id,
-        projectId: listing.projectId,
-        projectName: listing.projectName,
-        title: designChatLabel(session),
-        // The chat resolves its config from its OWN directory, so an isolated
-        // `designs/<slug>` chat still reads as a design chat with its config.
-        directory: session.directory ?? '',
-        config: null,
-        configError: null,
-        updatedAt: session.updatedAt,
-      });
-    }
-  }
-  if (loading) return { kind: 'loading' };
-  if (rows.length === 0 && failed.length > 0) {
-    return { kind: 'error', message: `Could not load design chats for ${failed.join(', ')}.` };
-  }
-  if (rows.length === 0) return { kind: 'empty' };
-  return { kind: 'list', rows };
-}
-
-// ---- the merged design-work list (pure) ----
-
-/**
- * One row of the merged list below the composer: a registered design project or
- * a design chat (a session whose Design Mode is ON). The `kind` marker is what
- * lets the renderer give each its own leading type icon and action while the
- * list itself stays one list.
- */
-export type DesignWorkRow =
-  | { kind: 'project'; project: ProjectRow }
-  | { kind: 'chat'; chat: DesignChatRow };
-
-/**
- * What the single merged list should show. Same snapshot states as its two
- * sources, collapsed to one: `loading` while either source is loading, `error`
- * when a source failed (the project snapshot's message first, then the chats'),
- * `empty` only when both are ready with nothing to show, and otherwise `list`.
- */
-export type DesignWorkView =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'empty' }
-  | { kind: 'list'; rows: DesignWorkRow[] };
-
-/**
- * Merge the projects view and the design-chats view into one ordered list.
- * Ordering is predictable and stable: every PROJECT first, in the order the
- * workspace reports it; then every CHAT, most recently updated first. Projects
- * lead because a project is the durable thing the user made, while a chat is a
- * working session on it. No filters, no tabs — the two sources simply share one
- * array, each row tagged with its `kind`.
- */
-/**
- * Options for `designWorkRows`.
- */
-export type DesignWorkOptions = {
-  /**
-   * Project ids whose chats are omitted from the merged list: the project row
-   * already reaches its sessions through "Open sessions", so repeating each of
-   * its chats as a top-level row duplicates the project. Chats of projects NOT
-   * in this set stay — a config-less/legacy project drops out of the project
-   * rows but must keep its chats visible. Omitted only in the unfiltered view:
-   * the "Open sessions" filter needs those rows (see `renderDesignSection`).
-   */
-  omitChatProjectIds?: ReadonlySet<string>;
-};
-
-export function designWorkRows(
-  projects: ProjectsView,
-  chats: DesignChatsView,
-  options: DesignWorkOptions = {},
-): DesignWorkView {
-  if (projects.kind === 'loading' || chats.kind === 'loading') return { kind: 'loading' };
-  if (projects.kind === 'error') return { kind: 'error', message: projects.message };
-  if (chats.kind === 'error') return { kind: 'error', message: chats.message };
-  const omit = options.omitChatProjectIds ?? null;
-  const rows: DesignWorkRow[] = [];
-  if (projects.kind === 'list') for (const project of projects.rows) rows.push({ kind: 'project', project });
-  if (chats.kind === 'list') {
-    const ordered = [...chats.rows].sort((a, b) => b.updatedAt - a.updatedAt);
-    for (const chat of ordered) {
-      // Exact-id match only: a missing ('') or foreign projectId never collides
-      // with a listed project id.
-      if (omit?.has(chat.projectId)) continue;
-      rows.push({ kind: 'chat', chat });
-    }
-  }
-  if (rows.length === 0) return { kind: 'empty' };
-  return { kind: 'list', rows };
-}
-
 // ---- pure helpers (kept DOM-free so they can be unit-tested) ----
 
 /**
- * The status row's compact pick gesture hint. A reference is added by holding
- * Cmd (macOS) or Ctrl and clicking an element in the live window — there is no
- * pick-mode toggle. One short line in the row.
+ * The row's compact pick gesture hint. A reference is added by holding Cmd
+ * (macOS) or Ctrl and clicking an element in the live window.
  */
 export const PICK_HINT = '⌘-click an element to add a reference';
 
 /**
- * The hint is ACTIVE only while the live window is open; with no window there is
- * nothing to Cmd-click, so the status row shows it dimmed. Pure so the row and a
- * test share one rule.
+ * The hint is ACTIVE only while the live window is open; with no window there
+ * is nothing to Cmd-click.
  */
 export function pickHintActive(state: Pick<LiveState, 'windowOpen'>): boolean {
   return state.windowOpen;
 }
 
-/**
- * One-line summary of the real window for the status row.
- */
+/** One-line summary of the real window for the status row. */
 export function formatWindowStatus(state: Pick<LiveState, 'windowOpen' | 'url' | 'title'>): string {
   if (!state.windowOpen) return 'Window closed';
   const where = state.url && state.url !== 'about:blank' ? state.url : 'no page open';
   return state.title ? `Window open · ${where} — ${state.title}` : `Window open · ${where}`;
 }
 
-/**
- * One line describing the outcome of an open, for the status row. A failed open
- * carries the service's actionable error rather than a dead window.
- */
+/** One line describing the outcome of an open, for the status row. */
 export function formatOpenStatus(result: OpenResult): string {
   if (result.ok) return result.started ? 'Dev server started · window open' : 'Window open';
   return result.error ?? 'Could not open the window';
@@ -736,16 +548,16 @@ export function formatOpenStatus(result: OpenResult): string {
 export type StopDevServerDecision = {
   /** The current session's live `SessionSnapshot.busy`. */
   busy: boolean;
-  /** How many OTHER design sessions in the same project dir are not idle. */
+  /** How many OTHER design sessions in the same dir are not idle. */
   otherActiveDesignSessions: number;
   /** Whether THIS panel started the dev server (never stop one we did not). */
   startedByUs: boolean;
 };
 
 /**
- * Whether Design Mode OFF may stop the project's dev server. All three must
+ * Whether Design Mode OFF may stop the workspace's dev server. All three must
  * hold: we started it, our session is idle, and no other design session in the
- * same project dir is active. Pure, so the panel and a test share one rule.
+ * same dir is active.
  */
 export function shouldStopDevServer(input: StopDevServerDecision): boolean {
   return input.startedByUs && !input.busy && input.otherActiveDesignSessions === 0;
@@ -754,7 +566,7 @@ export function shouldStopDevServer(input: StopDevServerDecision): boolean {
 /**
  * Count the design sessions OTHER than `currentSessionId` that are still active
  * (activity not `idle`) in one sessions snapshot. A session counts as a design
- * session when it carries our mode chip or a persistent design marker. Pure.
+ * session when it carries our mode chip or a persistent design marker.
  */
 export function countOtherActiveDesignSessions(
   sessions: ReadonlyArray<Pick<GuestSessionRecord, 'id' | 'items' | 'activity'>>,
@@ -770,44 +582,46 @@ export function countOtherActiveDesignSessions(
   return count;
 }
 
+/** URL labels and copy shared by the row and the page. English only. */
+
+/** The badge a workspace row shows when its `.design-studio.json` has a url. */
+export const DESIGN_READY_BADGE = 'Canvas ready';
+/** The badge a workspace row shows when there is no usable url yet. */
+export const NO_CONFIG_BADGE = 'No dev server yet';
+/** The workspaces list's true empty state. */
+export const NO_DESIGN_WORK_MESSAGE = 'No canvas workspaces yet — /canvas creates one.';
+/** The rail panel surface's whole content: a calm pointer to the sidebar page. */
+export const PANEL_SIDEBAR_HINT = 'Design Canvas opens from the sidebar.';
+/** The one line the row shows while this session has no canvas workspace yet. */
+export const NO_WORKSPACE_MESSAGE = 'No canvas workspace yet — Start creates one.';
+
 /**
- * The status section's one-line session line: whether THIS session is a design
- * session (Design Mode ON) and whether the project has a `.design-studio.json`
- * url. Pure, so the row and a test share one rule and one exact copy.
+ * The one-line session status: is this a canvas session (Design Mode ON) and
+ * does its workspace have a `.design-studio.json` url.
  */
-export function designSessionStatus(state: { modeOn: boolean; configUrl: string | null }): string {
-  if (!state.modeOn) return 'Design mode is off — start a design session to pick elements';
-  const url = state.configUrl?.trim();
-  return url
-    ? `Design session · .design-studio.json found · ${url}`
-    : 'Design session · no .design-studio.json url yet';
+export function canvasSessionStatus(state: { modeOn: boolean; workspaceDir: string | null; wsReady: boolean }): string {
+  if (!state.modeOn) return 'Design Mode is off — turn it on to open the canvas';
+  if (!state.workspaceDir) return 'Design session · workspace being created…';
+  return state.wsReady
+    ? `Design session · workspace ${state.workspaceDir}`
+    : `Design session · ${state.workspaceDir} (no .design-studio.json url yet)`;
 }
 
-/** Actionable message when a project has no url to open. */
+/** Actionable message when a workspace has no url to open or serve. */
 export const NO_PROJECT_URL_MESSAGE =
-  'No .design-studio.json url for this project — add one, or turn the dev server on first';
+  'No .design-studio.json url for this workspace — add one, or turn the dev server on first';
 
 /**
  * Why the `+` reference sources can be unavailable: every attach chip must carry
- * an http(s) url (a hard host rule), so a project with none has nothing to offer.
- * Shown both as the overlay's explanatory line and, when nothing is available,
- * as the reason the `+` is not shown at all. Pure copy, shared with a test.
+ * an http(s) url (a hard host rule), so a workspace with none has nothing to offer.
  */
 export const ATTACH_NEEDS_URL =
   'References need an http(s) url from .design-studio.json.';
 
 /**
- * The one line the row shows when the project has no usable `.design-studio.json`.
- * This is the WHOLE section in that state: no toggle, no Focus, nothing clickable
- * (so it can never raise a "no url" error). Pure copy, shared with a test.
- */
-export const NO_PROJECT_CONFIG_MESSAGE =
-  "No .design-studio.json here — Design Studio isn't set up in this project.";
-
-/**
- * Whether a project is "ready": it has a `.design-studio.json` whose `url` is a
- * non-empty string. The SINGLE source of truth for whether the row offers the
- * Design Mode toggle and Focus at all. Pure, so the row and a test share it.
+ * Whether a workspace is "ready": its `.design-studio.json` has a non-empty
+ * `url`. The SINGLE source of truth for whether the row offers the Start
+ * control and the page rows offer Preview.
  */
 export function projectReady(config: StudioConfig | null | undefined): boolean {
   return Boolean(config?.url?.trim());
@@ -820,30 +634,11 @@ export function projectReady(config: StudioConfig | null | undefined): boolean {
  */
 export function isLoopbackUrl(raw: string): boolean {
   try {
-    const host = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, '');
-    return host === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+    const hostname = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return hostname === 'localhost' || hostname === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
   } catch {
     return false;
   }
-}
-
-/**
- * What opening a project's live window should do: open `url` (with `dir` — the
- * project root the service starts a dev server from — only for a loopback URL),
- * or report an actionable message when the project has no url. Pure, so the
- * status row's Open action and Design Mode turning ON share one decision.
- */
-export type ProjectOpenDecision =
-  | { kind: 'open'; url: string; dir?: string }
-  | { kind: 'message'; message: string };
-
-export function decideProjectOpen(
-  config: StudioConfig | null | undefined,
-  projectDir: string | null | undefined,
-): ProjectOpenDecision {
-  const url = config?.url?.trim();
-  if (!url) return { kind: 'message', message: NO_PROJECT_URL_MESSAGE };
-  return projectDir && isLoopbackUrl(url) ? { kind: 'open', url, dir: projectDir } : { kind: 'open', url };
 }
 
 // The exact camelCase key set PICK_SCRIPT (service/browser.ts, `stylesFor`)
@@ -860,15 +655,22 @@ function localTimeOf(day: Date): string {
   return `${pad(day.getHours())}:${pad(day.getMinutes())}:${pad(day.getSeconds())}`;
 }
 
-/** The text of a picked element's chat reference chip. */
-export function referenceText(pick: PickPayload, url: string, pickedAt?: Date): string {
+/** The screen a pick landed on, for the chip's Screen lines (spec §F). */
+export type PickScreen = { id: string; url: string };
+
+/**
+ * The text of a picked element's chat reference chip. `screen` adds the
+ * `Screen: <id>` line and that screen's URL (spec §F pick-chip payload).
+ */
+export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, screen?: PickScreen): string {
   const styles = PICK_STYLE_KEYS
     .filter((key) => pick.styles[key] && pick.styles[key] !== 'normal' && pick.styles[key] !== 'none')
     .map((key) => `  ${key}: ${pick.styles[key]};`)
     .join('\n');
   return [
-    'Reference from Design Studio',
+    'Reference from Design Canvas',
     ...(pickedAt ? [`Picked at ${localTimeOf(pickedAt)}`] : []),
+    ...(screen ? [`Screen: ${screen.id}`, `Screen URL: ${screen.url}`] : []),
     `URL: ${url}`,
     `Selector: ${pick.selector}`,
     `Tag: ${pick.tag}${pick.classes ? `  Classes: ${pick.classes}` : ''}`,
@@ -923,8 +725,7 @@ export function contrastRatio(foreground: string, background: string): number | 
 
 /**
  * The token a picked element's colour should come from. We can only guess from
- * the property that carries a hardcoded colour; `null` when there is none, so
- * the caller can fall back to a neutral name. Pure.
+ * the property that carries a hardcoded colour; `null` when there is none.
  */
 export function tokenNameFor(styles: Record<string, string>): string | null {
   if (styles.backgroundColor) return '--color-surface';

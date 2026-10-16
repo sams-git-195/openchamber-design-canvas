@@ -1,75 +1,79 @@
-// Design Studio surfaces.
+// Design Canvas surfaces.
 //
 // Two surfaces, one thin row, one full-page home:
-//   - "status" (chat Work Status) — the ambient mirror: a compact row with the
-//     Start/Stop control, Design Mode toggle, session status and Cmd/Ctrl-click hint.
+//   - "status" (chat Work Status) — the ambient mirror: the canvas row with the
+//     Start/Stop control, Design Mode toggle, play/edit toggle, active-screen
+//     dropdown, Focus and the ⌘-click hint.
 //   - "panel" (rail panel) — a one-line pointer to the creation page.
-//   - "page" (the sidebar "Extension pages → Design Studio" entry) — the centred
-//     creation home: a display headline, the prompt composer with its type chip
-//     and working-directory selector, and a list of idea cards.
+//   - "page" (the sidebar "Extension pages → Design Canvas" entry) — the centred
+//     creation home: the hero, the prompt composer with its type chip, and the
+//     "Your design work" workspaces list from `GET /workspaces`.
 // Any other surface renders nothing. Nothing opens a live window on its own:
 // opening happens ONLY on the Design Mode toggle turning ON (or a Reopen/Retry).
 //
-// Picked elements become chat references (`host.attach`): a Cmd/Ctrl-click in
-// the live Chrome window is the pick gesture. The live view is a real headful
-// Chrome window the local service opens; this page only opens it, raises it and
-// reads its state. English-only copy by requirement.
-import { type GuestSessionsSnapshot, type HostReadyContext } from '@openchamber/sdk';
+// No registered project is required (decision 2): any chat starts a canvas by
+// making sure this session has a workspace — `ws/<sessionId>` = `{dir, name}` —
+// creating one inside the service-resolved workspace root when it does not
+// (Start creates the workspace on first use). The canvas itself is a real
+// headful Chrome window the local service opens on the workspace dir; this page
+// only opens it, raises it and reads its state. English-only copy by requirement.
+import { type HostReadyContext } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 
 import {
   ATTACH_NEEDS_URL,
   DESIGN_READY_BADGE,
-  NEEDS_PROJECT_MESSAGE,
   NO_CONFIG_BADGE,
   NO_DESIGN_WORK_MESSAGE,
-  NO_PROJECT_CONFIG_MESSAGE,
   NO_PROJECT_URL_MESSAGE,
+  NO_WORKSPACE_MESSAGE,
   OPENING_STATUS,
   PANEL_SIDEBAR_HINT,
   PICK_HINT,
   ServiceUnavailable,
   allProjectsFromSnapshot,
+  canvasSessionStatus,
   closeLive,
   countOtherActiveDesignSessions,
-  decideProjectOpen,
-  designChatMeta,
-  designChatRows,
-  designSessionStatus,
-  designWorkRows,
-  ensureHarness,
   focusLive,
   formatOpenStatus,
   getConfig,
   getServerStatus,
   getState,
+  getWorkspaces,
   host,
   isLoopbackUrl,
-  modeSessionIdFromKey,
-  openLive,
+  isWorkspaceRecord,
+  joinWorkspaceDir,
+  joinWorkspaceSessions,
+  normalizeDirPath,
+  openWorkspace,
+  pathContains,
   pickHintActive,
-  projectMeta,
   projectReady,
-  projectRows,
-  resolveDesignTarget,
+  resolveCanvasTarget,
+  sameDirPath,
   scaffoldProject,
+  setMode,
   shouldStopDevServer,
   startDevServer,
   stopDevServer,
+  uniqueCanvasSlug,
   validateReferencePath,
-  type DesignChatRow,
-  type DesignChatsView,
-  type DesignTarget,
+  workspaceMeta,
+  wsSessionIdFromKey,
+  type CanvasScreenState,
   type LiveState,
   type PickPayload,
-  type ProjectConfigRead,
-  type ProjectRow,
-  type ProjectSessions,
-  type ProjectsView,
   type RegisteredProject,
   type ScaffoldResult,
   type ServerStartResult,
   type StudioConfig,
+  type WorkspaceRecord,
+  type WorkspaceRow,
+  type WorkspacesResult,
+  type WorkspacesView,
+  type WorkspaceWorkRow,
 } from './api.ts';
 import { DIRECTIONS, type DirectionId } from './craft.ts';
 import {
@@ -99,6 +103,8 @@ import {
   projectReferenceChip,
   seedModeValue,
   seedSessionData,
+  workspaceOpenPrompt,
+  workspaceStorageKey,
   type DesignBriefSpec,
   type DesignMode,
   type DesignType,
@@ -106,13 +112,9 @@ import {
 } from './mode.ts';
 import type { DesignSystemPreset } from '../shared/design-systems.ts';
 import { addDraftReference, removeDraftReference, buildReferenceSubmission, type DraftReference } from './reference-draft.ts';
-import { buildAttachPayload } from './attach-dialog.ts';
+import { buildAttachPayload, type PickScreen } from './attach-dialog.ts';
 
 const POLL_MS = 900;
-
-const FALLBACK_CONFIG: StudioConfig = { version: 1, name: '', type: 'hi-fi', url: 'http://localhost:5173', entry: 'index.html' };
-
-type TrackedPick = PickPayload & { seq: number; url: string; pickedAt: Date };
 
 /** One suggestion under the composer: a title, a one-liner and the brief it seeds. */
 type Idea = { title: string; description: string; prompt: string };
@@ -162,57 +164,60 @@ const IDEAS: Record<DesignType, Idea[]> = {
   ],
 };
 
+/** A picked element plus the screen it was picked from. */
+type TrackedPick = PickPayload & { seq: number; url: string; pickedAt: Date; screen?: PickScreen };
+
+/** The one-time heads-up about out-of-folder edit permissions (decision 4b). */
+const PERMISSION_TOAST_KEY = 'ws-permission-notified';
+const PERMISSION_HEADS_UP =
+  'The agent edits the Design Canvas workspace, which lives outside the chat folder — approve its file-edit permission prompts so it can write the design files.';
+
 const state = {
   surface: 'panel',
+  /** The chat's own directory. The CANVAS session deliberately runs OUTSIDE the workspace (decision 4). */
   directory: null as string | null,
   sessionId: null as string | null,
   mode: { ...DEFAULT_MODE } as DesignMode,
   resolveAllowed: false,
+  /** This session's canvas workspace (`ws/<sessionId>`), or null before the first use. */
+  workspace: null as WorkspaceRecord | null,
+  /** The workspace's `.design-studio.json`, read by the service for the workspace dir. */
   config: null as StudioConfig | null,
   configPath: null as string | null,
   /**
-   * The directory `config` was read for. `onDirectory` keeps the last config
+   * The workspace dir `config` was read for. `onDirectory` keeps the last config
    * until the fresh read resolves, so a stale cached config is only ever used
-   * when it belongs to the CURRENT directory (`currentConfig()`).
+   * when it belongs to the CURRENT workspace (`currentConfig()`).
    */
   configDir: null as string | null,
   url: 'about:blank',
   title: '',
   windowOpen: false,
-  /**
-   * True while OUR side is bringing the window up: an open in flight, or the
-   * whole Design Mode ON transition (which awaits the persist and the marker
-   * writes before it opens). The close-detection below flips Design Mode OFF
-   * when `/state` reports `windowOpen:false` while the mode is ON — but not
-   * while we are the ones opening the window, so this gates it. Nothing else
-   * consults it: it never suppresses an explicit user open.
-   */
+  /** True while OUR side is bringing the window up (see openCanvasWindow). */
   pendingOpen: false,
   lastSeq: 0,
+  /** The live canvas controls from `GET /state` (spec §B). */
+  liveMode: 'edit' as 'edit' | 'play',
+  liveScreens: [] as CanvasScreenState[],
+  activeScreen: null as string | null,
   /** The current session's live `SessionSnapshot.busy`, from `host.onSession`. */
   sessionBusy: false,
-  /** Project dirs whose dev server THIS panel started (`/open` reported `started`). */
+  /** Workspace dirs whose dev server THIS panel started (`/open` reported `started`). */
   startedServers: new Set<string>(),
   /**
    * A stop waiting for the session to go idle (Design Mode OFF happened while
-   * busy). The queued REQUEST — its directory and manual mode — is preserved,
-   * so honouring it later neither loses the manual flag (an empty ownership
-   * set would then refuse it forever) nor targets the wrong directory.
+   * busy). The queued REQUEST — its directory and manual mode — is preserved.
    */
   pendingStop: null as null | { dir: string; manual: boolean },
-  /**
-   * Current preview-dev-server reachability for the row's Start/Stop control.
-   * `null` = unknown: nothing has been read yet (or a start answer carried no
-   * `up`), and the icon must render as checking — never masquerade as stopped.
-   */
+  /** Current preview-dev-server reachability for the row's Start/Stop control. */
   serverStatus: null as boolean | null,
   /** True while a manual start/stop is in flight. */
   serverPending: false,
   /** Last error from a server start/status action (for screen-reader announcement). */
   serverError: null as string | null,
   // ---- full-page creation surface ----
-  /** The registered projects, as the working-directory selector renders them. */
-  projects: null as ProjectsView | null,
+  /** The workspaces list (GET /workspaces joined with the cached ws/ scan). */
+  workspaces: null as WorkspacesView | null,
   /** The selected creation type; drives the headline, chip and the idea cards. */
   pageType: 'hi-fi' as DesignType,
   pageDirection: 'auto' as 'auto' | DirectionId,
@@ -222,25 +227,13 @@ const state = {
   /** An actionable error from a failed scaffold (the session still starts). */
   pageError: '' as string,
   pageBusy: false,
-  /** The chosen registered project; `null` means the current project. */
-  selectedProjectId: null as string | null,
   typeMenuOpen: false,
-  dirMenuOpen: false,
   /** The `+` attach overlay: its open state. */
   attachMenuOpen: false,
   /** The design-system picker panel open in the composer. */
   dsMenuOpen: false,
   /** The chosen design-system preset id, or null for "No design system". */
   pageDesignSystemId: null as string | null,
-  // ---- design projects & chats (the lists below the composer) ----
-  /** The design-chats list: sessions across the projects whose Design Mode is ON. */
-  designChats: null as DesignChatsView | null,
-  /**
-   * The id of the project whose chats the merged list is filtered to, or null
-   * for the full list. Set by clicking a project row (which also makes it the
-   * working target); cleared by `Show all`. It NEVER starts a session.
-   */
-  projectFilter: null as string | null,
 };
 
 let hintEl: HTMLElement;
@@ -248,10 +241,16 @@ let sessionLineEl: HTMLElement | null = null;
 let pageBody: HTMLElement | null = null;
 let statusRoot: HTMLElement | null = null;
 let modeToggleBtn: HTMLButtonElement | null = null;
-/** The interactive header line (the Design Mode toggle); hidden entirely when not ready. */
+/** The interactive header line (the canvas row); hidden entirely when not ready. */
 let barEl: HTMLElement | null = null;
-/** The preview-dev-server Start/Stop icon button; null when not rendered. */
+/** The preview-dev-server Start/Stop icon button; doubles as "Create canvas". */
 let serverBtn: HTMLButtonElement | null = null;
+/** The play/edit toggle, from `GET /state` mode. */
+let playToggleBtn: HTMLButtonElement | null = null;
+/** The active-screen dropdown, from `GET /state` screens. */
+let screenSelectEl: HTMLSelectElement | null = null;
+/** The Focus action: raises the live canvas window. */
+let focusLiveBtn: HTMLButtonElement | null = null;
 /** Screen-reader-only live region for server state changes. */
 let serverAnnounceEl: HTMLElement | null = null;
 
@@ -262,14 +261,10 @@ let sendEl: HTMLButtonElement | null = null;
 let accentFillEl: HTMLElement | null = null;
 /** Play the staggered reveal only on the first paint, not on every re-render. */
 let pageEnter = true;
-/** Live state of the open design-system picker: the search text and the highlighted entry (null = "No design system"). */
+/** Live state of the open design-system picker. */
 let dsQuery = '';
 let dsHighlight: string | null = null;
-/**
- * The `+` panel's paste-a-path draft. Module-level like `dsQuery`, so a
- * background re-render (a live sessions snapshot rebuilding the lists) keeps
- * what the user is typing; reset when the overlay opens and on submit.
- */
+/** The `+` panel's paste-a-path draft. */
 let attachPathDraft = '';
 let referenceError = '';
 let referencePending = false;
@@ -278,6 +273,11 @@ let referenceRequest = 0;
 let referenceLiveEl: HTMLElement | null = null;
 let referenceFocusId: string | null = null;
 const DROP_PATH_MESSAGE = 'Paste an accessible file path using + → File path. Dropped filenames do not include their filesystem path.';
+
+/** The cached ws/ scan: normalized workspace dir → session id (audit #19). */
+let wsSessionMap = new Map<string, string>();
+/** Every registered project, for decision 4c detection only. */
+let allProjects: RegisteredProject[] = [];
 
 function announceReference(message: string): void {
   if (!referenceLiveEl) return;
@@ -295,33 +295,6 @@ function cancelReferenceValidation(): void {
 /** Collapses overlapping `.design-studio.json` reads (mount + poll can race). */
 let configReadInFlight = false;
 
-// The design-chats list's live inputs: the projects it spans, the latest sessions
-// snapshot per project, the session ids whose Design Mode is ON, and the
-// (un)subscribe handles `host.onSessions` returns. Module-level, so a live
-// update can recompute the list without threading state through every call.
-let chatProjects: RegisteredProject[] = [];
-/**
- * EVERY registered project (id + name + directory), config or not. The chats
- * scan spans this, not the config-filtered `state.projects` rows: a design
- * session in a project with no `.design-studio.json` must still be listed. The
- * composer's target resolution matches the frame directory against it too. Set
- * by `loadProjects` from the raw workspace snapshot.
- */
-let allProjects: RegisteredProject[] = [];
-let chatSnapshots = new Map<string, GuestSessionsSnapshot>();
-let chatOnIds: ReadonlySet<string> = new Set<string>();
-/** The session ids carrying a persistent `design/<id>` marker (survives mode OFF). */
-let chatMarkerIds: ReadonlySet<string> = new Set<string>();
-/**
- * The session ids that have EVER had a `mode/<id>` entry, whatever its `on`
- * value. This key is written the first time Design Mode is used and kept when the
- * mode is later turned off, so its mere existence marks a session the user has
- * used for design — the only signal that exists for a history predating the
- * persistent marker.
- */
-let chatModeKeyIds: ReadonlySet<string> = new Set<string>();
-let chatUnsubscribes: Array<() => void> = [];
-
 function q<T extends HTMLElement>(tag: string, cls?: string, text?: string): T {
   const node = document.createElement(tag) as T;
   if (cls) node.className = cls;
@@ -337,10 +310,8 @@ function option(value: string, label: string): HTMLOptionElement {
 }
 
 /**
- * Errors and warnings the section must not swallow. The status row has no
- * general status line of its own, so the panel routes them to a toast (deduped,
- * since the poll can repeat the same outage every tick). Informational lines are
- * deliberately silent: the row carries only the Design Mode toggle.
+ * Errors and warnings the section must not swallow. Informational lines are
+ * deliberately silent: the row carries only its controls.
  */
 let lastStatus = '';
 function setStatus(message: string, kind: 'info' | 'error' | 'warn' = 'info'): void {
@@ -350,14 +321,8 @@ function setStatus(message: string, kind: 'info' | 'error' | 'warn' = 'info'): v
   void host.toast({ kind: kind === 'error' ? 'error' : 'info', message });
 }
 
-// ---- last-known URL (per project) ----
+// ---- last-known URL (per workspace dir) ----
 
-/**
- * The persisted last-known live-window URL for a project dir. Design Mode ON can
- * fall back to it when the live `.design-studio.json` is gone and no config is
- * cached, so a project whose config was deleted still reopens at its last page.
- * Keyed by the project dir, so each project remembers its own.
- */
 function lastUrlKey(dir: string | null): string | null {
   return dir ? `lastUrl/${dir}` : null;
 }
@@ -383,14 +348,156 @@ async function saveLastUrl(dir: string | null, url: string): Promise<void> {
   }
 }
 
+// ---- the per-session workspace (ws/<sessionId> = {dir, name}, decision 3) ----
+
+/** Read this session's stored workspace record, if any. */
+async function readStoredWorkspace(sessionId: string | null): Promise<WorkspaceRecord | null> {
+  const key = workspaceStorageKey(sessionId);
+  if (!key) return null;
+  try {
+    const value = await host.storage.get(key);
+    if (isWorkspaceRecord(value)) {
+      const name = typeof value.name === 'string' && value.name.trim() !== '' ? value.name.trim().slice(0, 80) : value.dir;
+      return { dir: value.dir, name };
+    }
+  } catch {
+    /* an unreadable record is simply absent */
+  }
+  return null;
+}
+
+/** Rebind `state.workspace` to the current session's stored record. */
+async function loadWorkspace(): Promise<void> {
+  const record = await readStoredWorkspace(state.sessionId);
+  if (record) {
+    state.workspace = record;
+    state.configDir = null;
+    state.config = null;
+    renderRow();
+    rerender();
+    void loadStudioConfig();
+  }
+}
+
+/** Persist the workspace record for `sessionId` (defaults to the current one). */
+async function saveWorkspaceRecord(sessionId: string | null, record: WorkspaceRecord): Promise<void> {
+  const key = workspaceStorageKey(sessionId);
+  if (!key) return;
+  try {
+    await host.storage.set(key, record);
+  } catch {
+    /* the in-memory record still drives this session */
+  }
+}
+
+/** A human workspace name: the brief's first words, else the slug prettified. */
+function workspaceDisplayName(brief: string, slug: string): string {
+  const words = brief.trim().replace(/\s+/g, ' ').slice(0, 60);
+  if (words) return words;
+  return slug.replace(/-+/g, ' ').replace(/^\w/, (c) => c.toUpperCase()) || 'Canvas';
+}
+
+/**
+ * The one-time heads-up (decision 4b): the FIRST scaffold flow notes that the
+ * agent will ask permission for out-of-folder edits. Skipped when the chat
+ * already sits inside the workspace dir. Fired once per device via host storage.
+ */
+async function maybeShowPermissionToast(dir: string): Promise<void> {
+  if (state.directory && sameDirPath(dir, state.directory)) return;
+  try {
+    const seen = await host.storage.get(PERMISSION_TOAST_KEY);
+    if (seen === true) return;
+    await host.storage.set(PERMISSION_TOAST_KEY, true);
+  } catch {
+    return;
+  }
+  await host.toast({ kind: 'info', message: PERMISSION_HEADS_UP });
+}
+
+/** The outcome of scaffolding a NEW canvas workspace under the service root. */
+type ScaffoldOutcome =
+  | { ok: true; record: WorkspaceRecord; url: string }
+  | { ok: false; error: string };
+
+/**
+ * Create the workspace: `GET /workspaces` for the service-resolved ROOT (the
+ * panel never constructs the Documents path itself — decision 3), a slug that
+ * no existing workspace clashes with, then `POST /scaffold` into `<root>/<slug>`
+ * (the service confines creation to its own root, spec §E).
+ */
+async function scaffoldCanvasWorkspace(brief: string, seed: string, designSystemId: string | null): Promise<ScaffoldOutcome> {
+  let result: WorkspacesResult;
+  try {
+    result = await getWorkspaces();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await host.toast({ kind: 'error', message: `Could not list canvas workspaces: ${message}` });
+    return { ok: false, error: `Could not list canvas workspaces: ${message}` };
+  }
+  const slug = uniqueCanvasSlug(brief || 'canvas', seed, result.workspaces.map((row) => row.dir));
+  const dir = joinWorkspaceDir(result.root, slug);
+  const name = workspaceDisplayName(brief, slug);
+  let scaffold: ScaffoldResult;
+  try {
+    scaffold = await scaffoldProject(dir, {
+      type: state.mode.type,
+      direction: state.mode.direction,
+      fidelity: state.mode.fidelity,
+      brief: brief || undefined,
+      // Omitted for "No design system" so the request stays as before.
+      designSystemId: designSystemId ?? undefined,
+    });
+  } catch (error) {
+    scaffold = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  if (!scaffold.ok) {
+    await host.toast({ kind: 'error', message: scaffold.error });
+    return { ok: false, error: scaffold.error };
+  }
+  await host.toast({ kind: 'success', message: `Canvas workspace created at ${dir} — served at ${scaffold.url}` });
+  await maybeShowPermissionToast(dir);
+  return { ok: true, record: { dir, name }, url: scaffold.url };
+}
+
+/**
+ * Make sure this session has a canvas workspace, creating one on first use
+ * (`Start creates the workspace` — spec §F). `forSessionId` overrides which
+ * session the record is keyed to (the page flow keys it to the NEW session the
+ * start-session call returns). A resolved record binds `state.workspace`.
+ */
+async function ensureCanvasWorkspace(brief: string, forSessionId: string | null = null): Promise<WorkspaceRecord | null> {
+  const sessionId = forSessionId ?? state.sessionId;
+  if (state.workspace && state.workspace.dir.trim() !== '') return state.workspace;
+  const stored = await readStoredWorkspace(sessionId);
+  if (stored) {
+    if (!state.workspace) {
+      state.workspace = stored;
+      renderRow();
+      rerender();
+    }
+    return stored;
+  }
+  if (!sessionId) {
+    return null; // no session to key a workspace to — the caller surfaces it
+  }
+  const outcome = await scaffoldCanvasWorkspace(brief, sessionId, state.pageDesignSystemId);
+  if (!outcome.ok) return null;
+  await saveWorkspaceRecord(sessionId, outcome.record);
+  state.workspace = outcome.record;
+  renderRow();
+  rerender();
+  return outcome.record;
+}
+
 // ---- Design Mode ----
 
-function modeStoragePayload(): { on: boolean; type: DesignType; direction: DesignMode['direction']; fidelity: Fidelity; brief: string } {
+function modeStoragePayload(): { on: boolean; type: DesignType; direction: DesignMode['direction']; fidelity: Fidelity; canvMode: 'edit' | 'play'; brief: string } {
   return {
     on: state.mode.on,
     type: state.mode.type,
     direction: state.mode.direction,
     fidelity: state.mode.fidelity,
+    canvMode: state.mode.canvMode,
     brief: state.mode.brief.slice(0, 2000),
   };
 }
@@ -407,9 +514,8 @@ async function saveMode(): Promise<void> {
 
 /**
  * Record that Design Mode was turned ON for this session, permanently. Written
- * once on the ON transition (never on a render, never on the OFF transition or a
- * window close), and never cleared, so the session stays a design chat in "Your
- * design work" even after the live window closes.
+ * once on the ON transition and never cleared — the durable "this chat designs"
+ * signal.
  */
 async function writeDesignMarker(): Promise<void> {
   const key = designMarkerKey(state.sessionId);
@@ -431,6 +537,7 @@ async function loadMode(): Promise<void> {
       if (DESIGN_TYPES.includes(stored.type as DesignType)) state.mode.type = stored.type as DesignType;
       if (stored.direction !== undefined && (stored.direction === 'auto' || stored.direction in DIRECTIONS)) state.mode.direction = stored.direction as DesignMode['direction'];
       if (FIDELITIES.includes(stored.fidelity as Fidelity)) state.mode.fidelity = stored.fidelity as Fidelity;
+      if (stored.canvMode === 'play' || stored.canvMode === 'edit') state.mode.canvMode = stored.canvMode;
       state.mode.brief = typeof stored.brief === 'string' ? stored.brief : '';
     }
   } catch {
@@ -441,8 +548,7 @@ async function loadMode(): Promise<void> {
 
 /**
  * Bumped by every ON transition. The NEWEST ON owns the pending-open release:
- * an older transition's cleanup (a fast first click finishing while a second
- * is still running) must not drop the newer one's guard.
+ * an older transition's cleanup must not drop the newer one's guard.
  */
 let pendingOpenHoldSeq = 0;
 
@@ -451,27 +557,20 @@ export async function toggleMode(next: boolean, type?: DesignType | null, brief?
   state.mode.on = next;
   if (type) state.mode.type = type;
   if (brief !== undefined && brief !== '') state.mode.brief = brief;
-  // An ON transition spans awaits — the persist, the marker write, then the
-  // open or focus — and `pendingOpen` used to be raised only once the open
-  // itself started. A stale `/state` snapshot (windowOpen:false, sampled before
-  // the window is up) landing inside those awaits then read the just-flipped ON
-  // as "the user closed the window" and flipped the mode straight back OFF.
-  // Hold the pending-open guard across the WHOLE ON transition, from before the
-  // first await, and clear it on every exit (no-url refusal, focus failure,
-  // open completion). The sequence means an overlapping newer ON owns the
-  // release, so an older transition's cleanup can never drop the newer guard.
+  // Hold the pending-open guard across the WHOLE ON transition so a stale
+  // `/state` snapshot cannot read the just-flipped ON as a window close.
   const hold = next ? ++pendingOpenHoldSeq : 0;
   if (hold) state.pendingOpen = true;
   try {
     await saveMode();
-    // The persistent marker is written exactly on the OFF→ON transition: not on a
-    // render, and not again while the mode is already on.
+    // The persistent marker is written exactly on the OFF→ON transition.
     if (next && !wasOn) await writeDesignMarker();
     renderModeUi();
     if (next) {
-      // ON brings up the project's live window at its URL; the window is what
-      // "Design Mode" IS. If it is already up, a click only raises it — never a
-      // second window, and never suppressed.
+      // ON: the workspace exists BEFORE the window can open — Start/toggle
+      // creates the canvas workspace on first use (spec §F).
+      const ws = await ensureCanvasWorkspace('');
+      if (!ws) return;
       if (state.windowOpen) {
         try {
           await focusLive();
@@ -479,15 +578,11 @@ export async function toggleMode(next: boolean, type?: DesignType | null, brief?
           setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
         }
       } else {
-        // The UI only offers this toggle when the project is ready, so a click here
-        // always has a url. As a backstop, if it is somehow called with none, the
-        // open resolves to nothing and stays SILENT — never a "no url" toast.
-        await openCurrentProjectWindow(false);
+        await openCanvasWindow(false);
       }
     } else {
-      // OFF is the mirror: close the live window and quit Chrome. This is a plain
-      // toggle now — no second-click confirmation. Then stop the dev server we
-      // started, if it is safe (idle session, no other active design session).
+      // OFF is the mirror: close the live window and quit Chrome, then stop the
+      // dev server we started, if it is safe.
       try {
         await closeLive();
       } catch {
@@ -496,7 +591,7 @@ export async function toggleMode(next: boolean, type?: DesignType | null, brief?
       try {
         await requestDevServerStop();
       } catch {
-        /* a stop failure is surfaced by doStopDevServer's own toast */
+        /* a stop failure is surfaced by requestDevServerStop's own toast */
       }
     }
   } finally {
@@ -504,82 +599,98 @@ export async function toggleMode(next: boolean, type?: DesignType | null, brief?
   }
 }
 
-/** The `/design` resolver. Registered on panel and page surfaces only. */
-async function resolveDesignCommand(args: string): Promise<null | Awaited<ReturnType<typeof buildModeChip>>> {
+/** The live windows' screens as the mode chip lists them (id/file/title). */
+function currentScreens(): Array<{ id: string; file: string; title: string }> {
+  return state.liveScreens.map((screen) => ({
+    id: screen.id,
+    title: screen.title,
+    file: screen.url.replace(/[?#].*$/, '').split('/').pop() || `${screen.id}.html`,
+  }));
+}
+
+/** The `/canvas` resolver. Registered on panel and page surfaces only. */
+async function resolveCanvasCommand(args: string): Promise<null | Awaited<ReturnType<typeof buildModeChip>>> {
   if (!state.resolveAllowed) return null;
-  // `/design` toggles Design Mode ON/OFF only: empty or "on…" turns it ON,
-  // "off" turns it OFF.
+  // `/canvas` toggles Design Mode ON/OFF; "play"/"edit" switch the canvas mode,
+  // "on…" turns it ON, "off" turns it OFF, and a brief turns it ON for this chat
+  // — the canvas workspace is created when the chat does not have one yet.
   const parsed = parseDesignArgs(args);
   if (!parsed.on) {
     await toggleMode(false);
     await host.toast({ kind: 'info', message: 'Design Mode is off.' });
     return null;
   }
-  // `/design <description>` in a project with no config yet scaffolds the project
-  // immediately, then starts the session. A scaffold failure falls through to the
-  // normal toggle, i.e. the agent-scaffolds flow. An UNREGISTERED directory is
-  // refused outright: no scaffold, no session, no chip.
+  // `/canvas play|edit`: the canvas mode switch (spec §B `POST /mode`), in-memory
+  // echo drives the row; persisted with the session's mode.
+  if (parsed.mode) {
+    try {
+      const result = await setMode(parsed.mode);
+      if (result.ok === false && result.error) setStatus(result.error, 'error');
+      else state.liveMode = parsed.mode;
+    } catch (error) {
+      setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
+    state.mode.canvMode = parsed.mode;
+    await saveMode();
+  }
   if (parsed.brief.trim() !== '') {
-    if (pageTarget().kind === 'needs-project') {
-      state.pageError = NEEDS_PROJECT_MESSAGE;
-      rerender();
-      await host.toast({ kind: 'error', message: NEEDS_PROJECT_MESSAGE });
-      return null;
-    }
-    if (state.directory && !projectReady(state.config)) {
-      const spec: DesignBriefSpec = {
-        type: parsed.type ?? state.mode.type,
-        direction: state.mode.direction,
-        fidelity: state.mode.fidelity,
-        brief: parsed.brief,
-        designSystemId: state.pageDesignSystemId,
-      };
-      if (await scaffoldCurrentProject(spec)) return null;
-    }
+    // `/canvas <brief>`: ensure/create THIS chat's canvas workspace, then turn
+    // Design Mode ON with the brief. No registered project is required, and no
+    // second session is started (decision 2/3) — this chat designs.
+    const ws = await ensureCanvasWorkspace(parsed.brief);
+    if (!ws) return null;
+    if (parsed.type) state.mode.type = parsed.type;
+    await toggleMode(true, parsed.type, parsed.brief);
+    return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), state.config?.url);
   }
   await toggleMode(true, parsed.type, parsed.brief || undefined);
-  return buildModeChip(state.sessionId, state.mode, state.config);
+  return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), state.config?.url);
 }
 
-// ---- design sessions ----
+// ---- canvas sessions ----
 
 type DesignSessionSpec = {
   id: string;
   title: string;
   url: string;
   text: string;
+  /** Decision 4c only: the registered project that CONTAINS the workspace dir. */
   projectId?: string;
-  /** The registered project's directory the session starts in. */
+  /** The workspace dir the session designs in (NOT the session's own dir). */
   dir: string;
   type: DesignType;
   brief: string;
-  /** Only the Studio page supplies its own unsent references. */
+  workspace?: WorkspaceRecord;
+  /** Only the page supplies its own unsent references. */
   references?: DraftReference[];
 };
 
 /**
  * Start a NEW session with Design Mode ON: the request itself carries the mode
- * chip's `data` (the cross-device signal the session record echoes back), the
- * per-session mode storage is seeded so the Work Status widget opens ready, and
- * the user is moved into the session.
+ * chip's `data`, the per-session mode and workspace storage are seeded (keyed to
+ * the session the host returns), and the user is moved into the session. Called
+ * WITHOUT `projectId` (decision 2) — the one exception is the decision 4c
+ * upgrade path, and only there does `projectId` ride along.
  */
 async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
   state.pageBusy = true;
   rerender();
   try {
-    const data = seedSessionData(spec.type, spec.brief);
+    const data = seedSessionData(spec.type, spec.brief, spec.workspace ?? null);
     const submission = spec.references !== undefined
       ? buildReferenceSubmission(spec.text, data, spec.references)
       : { text: spec.text, data };
     const result = await host.startSession({
-      providerId: 'design-studio',
+      providerId: 'design-canvas',
       id: spec.id,
       title: spec.title,
       url: attachUrl(spec.url),
       text: submission.text,
-      projectId: spec.projectId,
       navigation: 'preserve',
       data: submission.data,
+      // Decision 4c only: when a registered project CONTAINS the workspace dir,
+      // the session may land in it. Omitted everywhere else (decision 2).
+      ...(spec.projectId ? { projectId: spec.projectId } : {}),
     });
     if (!result.sessionId || result.sent !== 'sent') {
       const failure = 'failure' in result ? result.failure : undefined;
@@ -590,8 +701,7 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
       await host.toast({ kind: 'error', message });
       return false;
     }
-    // Delivery consumes this draft before ancillary work can fail. A toast or
-    // navigation transport failure must never make confirmed refs resendable.
+    // Delivery consumes this draft before ancillary work can fail.
     if (spec.references !== undefined) {
       cancelReferenceValidation();
       state.references = [];
@@ -601,18 +711,14 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
     }
     try {
       await host.storage.set(modeStorageKey(result.sessionId)!, seedModeValue(spec.type, spec.brief));
-      // A newly started design session is a design chat from birth: mark it
-      // permanently, so it stays in "Your design work" once the window closes.
+      // A newly started design session is a design chat from birth.
       await host.storage.set(designMarkerKey(result.sessionId)!, designMarkerValue());
+      // The workspace record binds to the SESSION the host created, so
+      // "Your design work" maps the workspace back to this chat and a later
+      // open reuses the session (decision 3 + audit #19).
+      if (spec.workspace) await saveWorkspaceRecord(result.sessionId, spec.workspace);
     } catch {
       /* the session's own data chip still marks it; the widget shows defaults */
-    }
-    // Complete supported best-effort writes before navigation tears down the
-    // frame. The registered project itself remains the session workspace.
-    try {
-      await ensureHarness(spec.dir);
-    } catch {
-      /* the session still works without the plugin */
     }
     try {
       await host.toast({ kind: 'success', message: 'Design session started — its controls are in Work Status.' });
@@ -637,143 +743,54 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
   }
 }
 
-/** A resolved creation target: a REGISTERED project the flow may act on. */
-type ResolvedTarget = Extract<DesignTarget, { kind: 'project' }>;
+/** Where the page's creation flow targets, via the shared pure rule. */
+
+/** The outcome of making sure the target workspace exists before the session starts. */
+type CanvasPrep =
+  | { kind: 'workspace'; workspace: WorkspaceRecord; url: string; projectId?: string }
+  | { kind: 'new'; workspace: WorkspaceRecord; url: string }
+  | { kind: 'failed'; error: string };
 
 /**
- * Where a creation flow targets, via the shared pure rule: a registered project
- * the user picked in the working-directory selector wins; otherwise the frame's
- * current directory is matched against the REGISTERED projects (exact, else the
- * containing one). When nothing matches the caller refuses — it must never
- * scaffold or start a session in an unregistered directory.
+ * Make sure a canvas workspace exists for the composer's brief, scaffolding one
+ * under the service root when this session has none (decision 2/3: there is no
+ * project gate to refuse on). A scaffold failure surfaces the error and the
+ * session still starts — the prompt ships the workspace path once the agent has
+ * created it (kept for the /canvas flows that carry a workspace later).
  */
-function pageTarget(): DesignTarget {
-  return resolveDesignTarget({
-    directory: state.directory,
-    selectedProjectId: state.selectedProjectId,
-    projects: allProjects,
-    rows: state.projects?.kind === 'list' ? state.projects.rows : [],
-  });
-}
-
-/** The outcome of making sure the target project exists before the session starts. */
-type ProjectPrep = { config: StudioConfig | null; url: string; scaffolded: boolean; failed: boolean; error: string };
-
-/**
- * Make sure the target has a `.design-studio.json`, so the session prompt takes
- * the "project exists" branch. A ready project is left alone. A project with no
- * config is scaffolded through the service's `/scaffold` — the target is always
- * a REGISTERED project (the callers refuse a `needs-project` target first, so
- * nothing here can write into an unregistered directory); a scaffold failure is
- * toasted and returned (`failed`), leaving the caller to fall back to the
- * agent-scaffolds flow. Nothing here starts a session or opens a window.
- */
-async function prepareProject(spec: DesignBriefSpec, target: ResolvedTarget): Promise<ProjectPrep> {
-  if (projectReady(target.config)) {
-    return { config: target.config, url: target.config?.url ?? '', scaffolded: false, failed: false, error: '' };
-  }
-  let result: ScaffoldResult;
-  try {
-    result = await scaffoldProject(target.dir, {
-      type: spec.type,
-      direction: spec.direction,
-      fidelity: spec.fidelity,
-      brief: spec.brief,
-      // Omitted for "No design system" so the request stays as before.
-      designSystemId: spec.designSystemId ?? undefined,
-    });
-  } catch (error) {
-    result = { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
-  if (!result.ok) {
-    await host.toast({ kind: 'error', message: result.error });
-    return { config: target.config, url: target.config?.url ?? '', scaffolded: false, failed: true, error: result.error };
-  }
-  await host.toast({ kind: 'success', message: `Project scaffolded at ${result.url}` });
-  // The scaffold wrote `.design-studio.json`; read it back so the session prompt
-  // takes the "project exists" branch instead of asking the agent to scaffold.
-  let config = target.config;
-  try {
-    config = (await getConfig(target.dir)).config;
-    if (target.dir === state.directory) {
-      state.config = config;
-      state.configDir = target.dir;
+async function scaffoldCurrentProject(spec: DesignBriefSpec): Promise<CanvasPrep> {
+  if (state.workspace && state.workspace.dir.trim() !== '') {
+    let url = state.config?.url ?? '';
+    try {
+      const read = await getConfig(state.workspace.dir);
+      url = read.config?.url ?? url;
+      if (state.workspace.dir === state.configDir) state.config = read.config;
+    } catch {
+      /* keep the cached config; the prompt degrades to the scaffold branch */
     }
-  } catch {
-    /* keep the cached config; the prompt degrades to the scaffold branch */
+    const target = resolveCanvasTarget({ workspace: state.workspace, brief: '', projects: allProjects });
+    const projectId = target.kind === 'workspace' ? target.projectId : undefined;
+    return { kind: 'workspace', workspace: state.workspace, url, projectId };
   }
-  return { config, url: result.url || config?.url || '', scaffolded: true, failed: false, error: '' };
+  const outcome = await scaffoldCanvasWorkspace(spec.brief, `new-design:${Date.now()}`, spec.designSystemId ?? null);
+  if (!outcome.ok) {
+    await host.toast({ kind: 'error', message: outcome.error });
+    return { kind: 'failed', error: outcome.error };
+  }
+  return { kind: 'new', workspace: outcome.record, url: outcome.url };
 }
 
 /**
- * Resolve the creation target for a USER ACTION, refreshing the projects cache
- * once when the answer could be stale or missing: nothing loaded yet, still
- * loading, the picked project unknown to the cache, or the directory refused.
- * The refresh makes a refusal honest — based on a fresh read, never a stale
- * cache — and makes a just-picked project resolvable on a fast send.
- */
-async function pageTargetFresh(): Promise<DesignTarget> {
-  const first = pageTarget();
-  const pickedUnknown =
-    state.selectedProjectId !== null &&
-    (first.kind === 'needs-project' || (first.kind === 'project' && first.projectId !== state.selectedProjectId));
-  if (!state.projects || state.projects.kind === 'loading' || first.kind === 'needs-project' || pickedUnknown) {
-    await loadProjects();
-    return pageTarget();
-  }
-  return first;
-}
-
-/**
- * The `/design <desc>` path: scaffold the RESOLVED target project through the
- * service and start a session for it. Returns true when the session was started;
- * false when the target is not a registered project (the refusal is toasted, so
- * the caller returns instead of toggling) or scaffolding failed (the error is
- * toasted) so the caller can fall back to the agent-scaffolds flow.
- */
-async function scaffoldCurrentProject(spec: DesignBriefSpec): Promise<boolean> {
-  const target = await pageTargetFresh();
-  if (target.kind === 'needs-project') {
-    state.pageError = NEEDS_PROJECT_MESSAGE;
-    rerender();
-    await host.toast({ kind: 'error', message: NEEDS_PROJECT_MESSAGE });
-    return false;
-  }
-  state.pageError = '';
-  state.pageBusy = true;
-  rerender();
-  const prep = await prepareProject(spec, target);
-  state.pageBusy = false;
-  if (prep.failed) {
-    state.pageError = prep.error;
-    rerender();
-    return false;
-  }
-  return startDesignSession({
-    id: `new-design:${Date.now()}`,
-    title: `New design · ${spec.type}`,
-    url: prep.url,
-    type: spec.type,
-    brief: spec.brief,
-    projectId: target.projectId,
-    dir: target.dir,
-    text: designSessionPrompt(spec, prep.config),
-  });
-}
-
-/**
- * The page's main action: start a design session for the composer's brief,
- * targeting the RESOLVED registered project (picked, or matched from the frame's
- * current directory). A project with no `.design-studio.json` is scaffolded
- * first; on failure the error is shown on the page and the session still starts
- * in the agent-scaffolds flow (the prompt asks the agent to create the project).
- * When the current directory belongs to no registered project the flow REFUSES:
- * no scaffold, no session — an actionable message instead. Reused by the
- * `/design` command via `scaffoldCurrentProject`.
+ * The page's main action: start a canvas session for the composer's brief. The
+ * workspace is scaffolded under the service root first when this session has
+ * none (no registered project is required — decision 2); on failure the error
+ * is shown on the page and the session still starts (the prompt asks the agent
+ * to find the workspace). The fresh session is keyed to the workspace AFTER the
+ * host answers, so `ws/<sessionId>` always holds the real session id.
  */
 async function startNewDesign(): Promise<void> {
   if (state.pageBusy || referencePending) return;
-  // Lock before the first await: a second click during project refresh must not
+  // Lock before the first await: a second click during the refresh must not
   // create a second session, and the first action owns this draft snapshot.
   state.pageBusy = true;
   state.pageError = '';
@@ -787,19 +804,23 @@ async function startNewDesign(): Promise<void> {
   const references = state.surface === 'page' ? [...state.references] : undefined;
   rerender();
   try {
-    const target = await pageTargetFresh();
-    if (target.kind === 'needs-project') {
-      state.pageError = NEEDS_PROJECT_MESSAGE;
-      rerender();
-      await host.toast({ kind: 'error', message: NEEDS_PROJECT_MESSAGE });
-      return;
-    }
-    const prep = await prepareProject(spec, target);
-    if (prep.failed) {
-      // Existing agent-scaffolds fallback remains; a failed send still retains
-      // the complete original draft.
+    const prep = await scaffoldCurrentProject(spec);
+    if (prep.kind === 'failed') {
+      // The session still starts in the agent-scaffolds fallback: the prompt
+      // carries the workspace once it exists (the flow below describes it).
       state.pageError = prep.error;
       rerender();
+      await startDesignSession({
+        id: `new-design:${Date.now()}`,
+        title: `New design · ${spec.type}`,
+        url: '',
+        type: spec.type,
+        brief: spec.brief,
+        dir: state.workspace?.dir ?? '',
+        text: designSessionPrompt(spec, state.workspace),
+        references,
+      });
+      return;
     }
     await startDesignSession({
       id: `new-design:${Date.now()}`,
@@ -807,9 +828,10 @@ async function startNewDesign(): Promise<void> {
       url: prep.url,
       type: spec.type,
       brief: spec.brief,
-      projectId: target.projectId,
-      dir: target.dir,
-      text: designSessionPrompt(spec, prep.config),
+      projectId: prep.kind === 'workspace' ? prep.projectId : undefined,
+      dir: prep.workspace.dir,
+      workspace: prep.workspace,
+      text: designSessionPrompt(spec, prep.workspace),
       references,
     });
   } catch (error) {
@@ -828,7 +850,7 @@ async function startNewDesign(): Promise<void> {
  */
 async function addToChat(pick: TrackedPick): Promise<void> {
   try {
-    await host.attach(buildAttachPayload(pick, pick.seq, pick.url, pick.pickedAt));
+    await host.attach(buildAttachPayload(pick, pick.seq, pick.url, pick.pickedAt, pick.screen));
     await host.toast({ kind: 'success', message: 'Reference added to the chat composer.' });
   } catch (error) {
     await host.toast({ kind: 'error', message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
@@ -840,119 +862,84 @@ async function addToChat(pick: TrackedPick): Promise<void> {
 // `host.attach` delivers a chip into the composer of the window that hosts the
 // panel frame making the call — there is no cross-window targeting, and every
 // hidden frame the host mounts for a slash command is force-unmounted after
-// `GUEST_REQUEST_TIMEOUT_MS` (20s, packages/ui/src/lib/guests/run-command.ts),
-// so a hidden pane CANNOT serve as a long-lived pick bridge. `/design` therefore
-// answers immediately: Design Mode is bound to the live window, and picks
-// attach through the chat's Work Status row. Routing picks into a mini chat
-// requires a host-side persistent surface there (tracked upstream).
-//
-// The service-side claim (service/bridge-claim.ts, POST /bridge, `bridgeActive`
-// in /state) stays: it is the coordination point the row already honors for
-// whichever long-lived surface eventually owns the mini-chat bridge.
+// `GUEST_REQUEST_TIMEOUT_MS` (20s), so a hidden pane CANNOT serve as a
+// long-lived pick bridge. `/canvas` therefore answers immediately: the mode is
+// bound to the live window, and picks attach through the chat's Work Status
+// row. Routing picks into a mini chat requires a host-side persistent surface
+// there (tracked upstream). The service-side claim (POST /bridge) stays.
 
-// ---- project config ----
+// ---- the canvas window ----
 
-/**
- * Surface an open's progress/result. The trimmed status row has no state line
- * of its own, so errors go to a toast (deduped by `setStatus`); informational
- * progress is silent. Nothing here ever opens a window.
- */
+/** Surface an open's progress/result. Errors go to a toast (deduped by `setStatus`). */
 function openStatus(message: string, kind: 'info' | 'error' = 'info'): void {
   setStatus(message, kind);
 }
 
 /**
- * Open (or navigate) the project's live window from a config. Called by Design
- * Mode turning ON, so it resolves the URL and dev-server dir the same way.
- * `notify` toasts the actionable message when the project has no url.
+ * Open (or navigate) the workspace's live canvas: `POST /open {dir}` — the
+ * service resolves `.design-studio.json` and all screens itself (spec §B).
+ * Called only from an explicit action (the toggle turning ON). `wsReady`
+ * (a config url) gates a real open; with none it stays SILENT — there is no
+ * "no url" toast for a backstop-only path.
  */
-async function openProjectWindow(
-  config: StudioConfig | null | undefined,
-  dir: string | null,
-  notify: boolean,
-): Promise<void> {
-  const decision = decideProjectOpen(config, dir);
-  if (decision.kind === 'message') {
-    if (notify) await host.toast({ kind: 'error', message: decision.message });
-    return;
-  }
-  // Mark the open in flight so a /state poll cannot read the not-yet-open window
-  // as "the user closed it". Nothing consults this to *suppress* an open.
-  state.pendingOpen = true;
-  openStatus(OPENING_STATUS);
-  try {
-    const result = await openLive(decision.url, decision.dir);
-    // Persist the URL the moment it is opened, so a later ON with no live config
-    // still reopens this project at its last page.
-    if (result.ok) await saveLastUrl(state.directory, decision.url);
-    // Remember that THIS panel started the server, so Design Mode OFF may stop
-    // it later (never a server we did not start).
-    if (result.ok && result.started && decision.dir) markServerStartedByUs(decision.dir);
-    // Design Mode turning ON for a ready project also drops the in-session harness
-    // plugin into `.opencode/`, so the craft rules and the verification mandate hold
-    // for every turn — including edits the user starts directly in chat. Best-effort
-    // and never blocking: a missing service or a refused write must not fail the open.
-    if (result.ok && dir) {
-      void ensureHarness(dir).catch(() => {
-        /* the design session still works without the plugin */
-      });
-    }
-    openStatus(formatOpenStatus(result), result.ok ? 'info' : 'error');
-  } catch (error) {
-    openStatus(`Could not open ${decision.url}: ${error instanceof Error ? error.message : String(error)}`, 'error');
-  } finally {
-    state.pendingOpen = false;
-  }
-}
-
-/**
- * Resolve the URL an open should use, in order: (a) the live `.design-studio.json`
- * for the project dir, (b) the config already cached from a previous read, (c)
- * the last-known URL persisted for this project. `null` when none resolve.
- */
-async function resolveOpenUrl(): Promise<{ url: string; dir: string | null } | null> {
-  const dir = state.directory;
-  if (dir) {
-    try {
-      const read = await getConfig(dir);
-      // A directory switch mid-read must not commit the OLD directory's
-      // config as the NEW directory's.
-      if (state.directory === dir) {
-        state.config = read.config;
-        state.configPath = read.path;
-        state.configDir = dir;
-      }
-      const url = read.config?.url?.trim();
-      if (url) return { url, dir };
-    } catch {
-      /* service not ready, or no config: fall through to the cache then storage */
-    }
-  }
-  const cached = currentConfig()?.url?.trim();
-  if (cached) return { url: cached, dir };
-  const last = await loadLastUrl(dir);
-  if (last) return { url: last, dir };
-  return null;
-}
-
-/**
- * Resolve and open the current project's live window. Called ONLY from an
- * explicit user action — the Design Mode toggle turning ON (`toggleMode(true)`).
- * Opening is never suppressed: an explicit ON always resolves and opens.
- */
-async function openCurrentProjectWindow(notify: boolean): Promise<void> {
+async function openCanvasWindow(notify: boolean): Promise<void> {
+  const ws = state.workspace;
+  if (!ws) return;
   // Mark an open in flight before any await: a /state poll landing mid-open must
   // not read the not-yet-open window as "the user closed it".
   state.pendingOpen = true;
   try {
-    const resolved = await resolveOpenUrl();
-    if (!resolved) {
+    // Read the workspace config so wsReady is known (and keep the cached config
+    // fresh for the row). A directory-level switch mid-read never commits.
+    try {
+      const read = await getConfig(ws.dir);
+      if (state.workspace?.dir === ws.dir) {
+        state.config = read.config;
+        state.configPath = read.path;
+        state.configDir = ws.dir;
+      }
+    } catch {
+      /* service not ready: fall through to the cache and lastUrl */
+    }
+    const url = state.config?.url?.trim() ?? (await loadLastUrl(ws.dir)) ?? undefined;
+    if (!url) {
       if (notify) await host.toast({ kind: 'error', message: NO_PROJECT_URL_MESSAGE });
       return;
     }
-    await openProjectWindow({ url: resolved.url }, resolved.dir, notify);
+    openStatus(OPENING_STATUS);
+    const result = await openWorkspace({ dir: ws.dir });
+    // Persist the URL the moment it is opened, so a later ON with no live config
+    // still reopens this workspace at its last page.
+    if (result.ok) await saveLastUrl(ws.dir, result.url || url);
+    // Remember that THIS panel started the server, so Design Mode OFF may stop
+    // it later (never a server we did not start).
+    if (result.ok && result.started) markServerStartedByUs(ws.dir);
+    openStatus(formatOpenStatus(result), result.ok ? 'info' : 'error');
+  } catch (error) {
+    openStatus(`Could not open the canvas: ${error instanceof Error ? error.message : String(error)}`, 'error');
   } finally {
     state.pendingOpen = false;
+  }
+}
+
+/**
+ * Raise the workspace of a workspaces-list row without rebinding this session:
+ * `POST /open {dir}` against that row's dir.
+ */
+async function previewWorkspace(row: WorkspaceRow): Promise<void> {
+  if (!row.url?.trim()) {
+    await host.toast({ kind: 'error', message: NO_PROJECT_URL_MESSAGE });
+    return;
+  }
+  try {
+    const result = await openWorkspace({ dir: row.dir });
+    if (!result.ok) {
+      await host.toast({ kind: 'error', message: result.error ?? 'Could not open the canvas' });
+      return;
+    }
+    await host.toast({ kind: 'success', message: `Opened ${row.name} — its canvas window is live.` });
+  } catch (error) {
+    await host.toast({ kind: 'error', message: `Could not open the canvas: ${error instanceof Error ? error.message : String(error)}` });
   }
 }
 
@@ -960,34 +947,25 @@ async function openCurrentProjectWindow(notify: boolean): Promise<void> {
 //
 // A dev server the panel started is stopped when Design Mode goes OFF — but
 // only when it is safe: our session is idle AND no other design session in the
-// same project dir is VERIFIED inactive (an unreadable check fails closed).
-// While our session is busy the stop is held as `pendingStop` — its directory
-// and manual mode preserved — and honoured on idle with the outcome announced;
-// a snapshot showing the session busy again cancels it, also announced. The
-// automatic path never stops a server this panel did not start
-// (`state.startedServers`). The MANUAL path (the icon button) skips that
-// in-memory gate and defers ownership to the service, which kills only a group
-// it recorded for `dir`.
+// same workspace dir is VERIFIED inactive (an unreadable check fails closed).
+// The MANUAL path (the icon button) skips the in-memory gate and defers
+// ownership to the service, which kills only a group it recorded for `dir`.
 
-/**
- * Bumped on every directory change. Start/Stop actions capture it with the
- * directory at entry, so a result that resolves after the user left — and
- * even after a round-trip A→B→A that lands back on the same directory — is
- * recognised as stale and never committed to the shared row state.
- */
 let directoryGeneration = 0;
-
-/**
- * Bumped by every Start/Stop action at entry. The NEWEST action owns the
- * shared `serverPending` marker: an older action's `finally` must never clear
- * the newer one's in-flight state (two actions can overlap across a directory
- * switch, which resets the marker).
- */
 let serverActionSeq = 0;
 
-/** Whether the frame has left `dir` since `gen` — including an A→B→A round-trip. */
+/**
+ * The dir the dev-server actions resolve against: the workspace dir first (the
+ * canvas model), the chat directory as the legacy/test fallback when no
+ * workspace is bound yet (`setProjectDirectory` drives it in tests).
+ */
+function actionDir(): string | null {
+  return state.workspace?.dir ?? state.directory;
+}
+
+/** Whether the action dir moved since `gen` — including an A→B→A round-trip. */
 function directoryMovedSince(dir: string, gen: number): boolean {
-  return state.directory !== dir || directoryGeneration !== gen;
+  return actionDir() !== dir || directoryGeneration !== gen;
 }
 
 /** Remember that THIS panel started `dir`'s dev server, so OFF may stop it. */
@@ -999,14 +977,11 @@ export function markServerStartedByUs(dir: string | null): void {
 type ProjectResolution = { kind: 'id'; id: string } | { kind: 'unregistered' } | { kind: 'unknown' };
 
 /**
- * The project whose directory is exactly `dir`, from the project list (cached
- * or read). `unregistered` is a VERIFIED answer: the read succeeded and no
- * registered project has this directory, and sessions only exist under
- * registered projects. A failed or still-loading read is `unknown`.
+ * The registered project whose directory contains `dir` (decision 4c detection
+ * doubles as the ownership check for the dev-server stop).
  */
 async function resolveProjectId(dir: string): Promise<ProjectResolution> {
-  const rows = state.projects?.kind === 'list' ? state.projects.rows : [];
-  const cached = rows.find((row) => row.directory === dir);
+  const cached = allProjects.find((row) => sameDirPath(row.directory, dir));
   if (cached) return { kind: 'id', id: cached.id };
   let snapshot: Awaited<ReturnType<typeof host.listProjects>>;
   try {
@@ -1015,15 +990,13 @@ async function resolveProjectId(dir: string): Promise<ProjectResolution> {
     return { kind: 'unknown' };
   }
   if (snapshot.state !== 'ready') return { kind: 'unknown' };
-  const project = snapshot.projects.find((candidate) => candidate.directory === dir);
+  const project = snapshot.projects.find((candidate) => sameDirPath(candidate.directory, dir));
   return project ? { kind: 'id', id: project.id } : { kind: 'unregistered' };
 }
 
 /**
  * How many OTHER design sessions are active in `dir` right now — or `null`
- * when that CANNOT be verified (the projects or sessions read failed or is
- * still loading). The stop decision must fail closed: an unverifiable check
- * is never "no other session". Only a verified read returns a count.
+ * when that CANNOT be verified. The stop decision fails closed.
  */
 async function countActiveDesignSessions(dir: string): Promise<number | null> {
   const resolved = await resolveProjectId(dir);
@@ -1040,14 +1013,7 @@ async function countActiveDesignSessions(dir: string): Promise<number | null> {
   return countOtherActiveDesignSessions(snapshot.sessions, state.sessionId, markerIds);
 }
 
-/**
- * Send the stop to the service and forget the record ONLY when the service
- * confirmed it stopped the server. `ok:true` without `stopped:true` — or an
- * outright refusal — means nothing was stopped, so ownership is retained and
- * only a matching queued request is cleared. Returns whether the server
- * actually stopped plus the service's own error detail when it gave one;
- * callers report it truthfully. Does NOT toast.
- */
+/** Send the stop to the service and forget the record ONLY on a confirmed stop. */
 async function tryStopDevServer(dir: string): Promise<{ stopped: boolean; error?: string }> {
   const result = await stopDevServer(dir);
   if (result.ok && result.stopped) {
@@ -1059,44 +1025,21 @@ async function tryStopDevServer(dir: string): Promise<{ stopped: boolean; error?
 }
 
 /**
- * Decide whether THIS panel may stop the dev server for `dir` (the current
- * directory, or an explicitly queued request's own directory), applying the
- * idle/other-session rules for both automatic and manual stops. Returns an
- * outcome shape so callers can surface the right message. A held stop is
- * queued in `state.pendingStop` WITH its mode and directory. `stopped` is
- * TRUTHFUL: it reports the service's confirmed stop (`ok && stopped`), so a
- * `stopped:false` answer falls through to the refusal path instead of reading
- * as a success, and a refused stop carries the service's own `error` when it
- * gave one.
- *
- * The safety lookup (other active design sessions) is awaited BEFORE anything
- * destructive is sent, and what it protects is re-checked afterwards: a
- * directory the user has left aborts the stop, and a session that became busy
- * during the lookup queues instead of stopping. `unknown:true` marks a check
- * that could not be verified — the stop FAILS CLOSED: nothing is sent, and
- * ownership/queue state is left untouched.
- *
- * Ownership differs by path: the AUTOMATIC path (Design Mode OFF, window
- * close) stops only a server this panel started (`state.startedServers`) —
- * after a reload that set is empty and the automatic stop must stay silent.
- * The MANUAL path (the icon button) skips that gate and defers ownership to
- * the service, which kills only a process group it recorded for `dir` and
- * refuses an unrecorded one — so a running server started by an earlier
- * panel instance can still be stopped by hand.
+ * Decide whether THIS panel may stop the dev server for `dir`, applying the
+ * idle/other-session rules. The safety lookup is awaited BEFORE anything
+ * destructive is sent; a check that could not be verified FAILS CLOSED.
+ * Ownership differs by path: the AUTOMATIC path stops only a server this panel
+ * started; the MANUAL path defers ownership to the service.
  */
 export async function requestDevServerStop(
   options: { manual?: boolean; dir?: string } = {},
 ): Promise<{ stopped: boolean; held: boolean; blocked?: boolean; unknown?: boolean; error?: string }> {
-  const dir = options.dir ?? state.directory;
+  const dir = options.dir ?? actionDir();
   if (!dir) return { stopped: false, held: false, blocked: false };
   const manual = options.manual ?? false;
   const gen = directoryGeneration;
   if (!manual && !state.startedServers.has(dir)) return { stopped: false, held: false, blocked: false };
   const otherActiveDesignSessions = await countActiveDesignSessions(dir);
-  // The safety lookup awaited: re-verify what it protects BEFORE anything
-  // destructive is sent. A session that became busy during the lookup queues
-  // (queueing is not destructive; the honoured stop re-verifies); an idle
-  // stop with an UNVERIFIABLE check fails closed — never a stop.
   if (state.sessionBusy) {
     state.pendingStop = { dir, manual };
     return { stopped: false, held: true, blocked: false };
@@ -1126,41 +1069,26 @@ export async function requestDevServerStop(
   return { stopped: false, held: false, blocked: true };
 }
 
-/**
- * The truthful message for a manual stop the service answered `stopped:false`.
- * The service refuses for several reasons (no recorded group, a legacy
- * identity, a surviving group, an occupied port) and reports the condition in
- * the status payload's `error` — pass it through verbatim. Without one: a
- * status that still reports a recorded group (a `pid` in the payload) keeps
- * the plain no-op line, as does a failed status read, which cannot tell; an
- * empty status means the service had no record for the dir.
- */
+/** The truthful message for a manual stop the service answered `stopped:false`. */
 export async function manualStopRefusalMessage(dir: string): Promise<string> {
   try {
     const status = await getServerStatus(dir);
     if (status.error) return status.error;
     return status.pid
       ? 'No preview dev server to stop.'
-      : 'The service did not record this server; it was not started by Design Studio.';
+      : 'The service did not record this server; it was not started by Design Canvas.';
   } catch {
     return 'No preview dev server to stop.';
   }
 }
 
-/**
- * Surface the outcome of a queued stop being honoured: the outcome is
- * announced, so "queued" is followed by an outcome. Only truthful outcomes are
- * announced — never a refusal read as success. The ICON commit is guarded by
- * the honoured request's own directory: honouring dir A's queued stop while
- * the user is on dir B must not flip B's running state to stopped. The
- * announcement is NOT guarded — it is truthful about the stop itself (P8).
- */
+/** Surface the outcome of a queued stop being honoured. */
 function reportHonouredStop(
   result: { stopped: boolean; held: boolean; blocked?: boolean; unknown?: boolean },
   dir: string,
 ): void {
   if (result.stopped) {
-    if (state.directory === dir) {
+    if (state.workspace?.dir === dir) {
       state.serverStatus = false;
       state.serverError = null;
       renderServerControl();
@@ -1174,12 +1102,12 @@ function reportHonouredStop(
 }
 
 /**
- * The current session's live snapshot (`host.onSession`). Keeps `sessionBusy`
- * fresh: a busy session cancels a pending stop (announced — the earlier
- * "queued" promise must not stand misleadingly); an idle one performs the
- * queued REQUEST, preserving its directory and manual mode.
+ * The current session's live snapshot (`host.onSession`). Re-binds the session
+ * (and its workspace record), keeps `sessionBusy` fresh, and performs a queued
+ * stop once the session goes idle.
  */
 export async function applySessionSnapshot(session: { id: string; busy: boolean } | null): Promise<void> {
+  const changed = state.sessionId !== (session?.id ?? null);
   state.sessionId = session?.id ?? null;
   state.sessionBusy = session?.busy ?? false;
   if (state.sessionBusy) {
@@ -1192,12 +1120,13 @@ export async function applySessionSnapshot(session: { id: string; busy: boolean 
     const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
     reportHonouredStop(result, request.dir);
   }
+  if (changed) await loadWorkspace();
   await loadMode();
 }
 
 /**
- * A session lifecycle event (`host.onSessionLifecycle`): a `completed` turn is
- * the moment a `pendingStop` is honoured, if the session is now idle.
+ * A session lifecycle event: a `completed` turn is the moment a `pendingStop`
+ * is honoured, if the session is now idle.
  */
 export async function handleSessionLifecycle(event: { phase: 'started' | 'completed' | 'failure' }): Promise<void> {
   if (event.phase === 'completed' && state.pendingStop && !state.sessionBusy) {
@@ -1209,11 +1138,6 @@ export async function handleSessionLifecycle(event: { phase: 'started' | 'comple
 
 // ---- preview-dev-server Start/Stop control ----
 
-/**
- * Screen-reader-only announcement of a preview-dev-server state change.
- * Cleared first so the same message is re-announced if repeated. Announcements
- * are recorded for the test seams (`getServerAnnouncements`).
- */
 const serverAnnouncements: string[] = [];
 
 function announceServer(message: string): void {
@@ -1230,22 +1154,14 @@ function focusInside(el: HTMLElement | null): boolean {
   return active === el || el.contains(active);
 }
 
-/**
- * Focus the session line when a rendered control the user was on disappears:
- * focus must land on something visible, never silently on `body`.
- */
+/** Focus the session line when a rendered control the user was on disappears. */
 function focusSessionLine(): void {
   if (!sessionLineEl) return;
   sessionLineEl.tabIndex = -1;
   sessionLineEl.focus();
 }
 
-/**
- * Monotonic token for the in-flight status read. The unawaited
- * `void refreshServerStatus()` fired from a previous action's `finally` can
- * resolve inside the NEXT action — a read a newer read or a manual action has
- * superseded must never commit.
- */
+/** Monotonic token for the in-flight status read. */
 let serverStatusRead = 0;
 
 /** The rendered Start/Stop state, exactly as `renderServerControl` derives it. */
@@ -1265,19 +1181,20 @@ function announceServerTransition(before: ReturnType<typeof serverRenderState>):
   else if (after === 'error') announceServer('Preview dev server status unavailable — click to retry.');
 }
 
+/** The workspace dir the dev-server read watch (the workspace, not the chat dir). */
+function workspaceDir(): string | null {
+  return state.workspace?.dir ?? null;
+}
+
 /**
- * Poll the service for the current directory's dev-server reachability.
- * Keeps `state.serverStatus` fresh without starting anything. Skipped while a
- * manual start/stop is already in flight so the UI never fights the user action.
- * A stale read — one a newer read or a manual action superseded — never commits.
- * A status that carries the service's own `error` (a recorded identity or port
- * conflict) surfaces that error and never renders as a green running state.
+ * Poll the service for the current WORKSPACE's dev-server reachability. A stale
+ * read — one a newer read or a manual action superseded — never commits.
  */
 async function refreshServerStatus(): Promise<void> {
-  if (state.serverPending || !state.directory) return;
-  const dir = state.directory;
+  const dir = actionDir();
+  if (state.serverPending || !dir) return;
   const token = ++serverStatusRead;
-  const superseded = (): boolean => token !== serverStatusRead || state.serverPending || state.directory !== dir;
+  const superseded = (): boolean => token !== serverStatusRead || state.serverPending || actionDir() !== dir;
   try {
     const status = await getServerStatus(dir);
     if (superseded()) return;
@@ -1286,8 +1203,6 @@ async function refreshServerStatus(): Promise<void> {
       state.serverError = status.error;
     } else {
       state.serverStatus = status.up;
-      // A clean read clears any error, `up` or not: a stopped server must
-      // return to `is-stopped` after a transient failure, not stay sticky.
       state.serverError = null;
     }
     announceServerTransition(before);
@@ -1301,14 +1216,28 @@ async function refreshServerStatus(): Promise<void> {
 }
 
 /**
- * Update (or hide) the preview-dev-server Start/Stop button. It sits to the
- * left of the Design Mode toggle, and only appears for ready projects whose
- * configured URL is loopback.
+ * Update (or hide) the preview-dev-server Start/Stop button. With NO workspace
+ * the button becomes "Create canvas" — the row NEVER falls back to "not set up"
+ * (spec §F). With a workspace it appears for loopback-configured workspaces
+ * only, exactly as before.
  */
 function renderServerControl(): void {
   if (!barEl || !serverBtn) return;
-  const url = state.config?.url?.trim();
-  const ready = projectReady(state.config) && url !== undefined && isLoopbackUrl(url);
+  const ws = state.workspace;
+  // No workspace yet: the control IS the create-canvas affordance.
+  if (!ws) {
+    serverBtn.hidden = false;
+    serverBtn.disabled = state.serverPending;
+    serverBtn.classList.remove('is-stopped', 'is-running', 'is-loading', 'is-error');
+    serverBtn.classList.add(state.serverPending ? 'is-loading' : 'is-stopped');
+    serverBtn.title = state.serverPending ? 'Working…' : 'Create canvas — start a Design Canvas workspace';
+    serverBtn.setAttribute('aria-label', serverBtn.title);
+    const icon = q('span', 'ds-server-icon');
+    serverBtn.replaceChildren(icon);
+    return;
+  }
+  const url = currentConfig()?.url?.trim();
+  const ready = projectReady(currentConfig()) && url !== undefined && isLoopbackUrl(url);
   if (!ready) {
     // The control disappears: keep focus visible, never dropped to `body`.
     const hadFocus = focusInside(serverBtn);
@@ -1325,8 +1254,6 @@ function renderServerControl(): void {
   } else if (state.serverError) {
     stateClass = 'is-error';
   } else if (state.serverStatus === null) {
-    // Unknown: nothing has been read yet. Reuse the existing loading style —
-    // an unread state must never masquerade as a stopped "Start" affordance.
     stateClass = 'is-loading';
   } else if (state.serverStatus) {
     stateClass = 'is-running';
@@ -1348,27 +1275,31 @@ function renderServerControl(): void {
   serverBtn.replaceChildren(icon);
 }
 
-/**
- * The cached config, but ONLY when it was read for the CURRENT directory.
- * `onDirectory` keeps the last config until the fresh read resolves, so a
- * stale one must never drive an action for the new directory.
- */
+/** The cached config, but ONLY when it was read for the CURRENT workspace. */
 function currentConfig(): StudioConfig | null {
-  return state.configDir === state.directory ? state.config : null;
+  return state.configDir === state.workspace?.dir ? state.config : null;
 }
 
 /**
- * Handle a click on the preview-dev-server Start/Stop button: start when
- * stopped, stop when running (the manual stop path — the service decides
- * ownership, the idle/other-session rules still hold).
+ * Handle a click on the preview-dev-server Start/Stop button: with no workspace
+ * it CREATES the canvas workspace (first use); otherwise start/stop the
+ * workspace's dev server as before.
  */
 async function onServerControlClick(): Promise<void> {
-  if (state.serverPending || !state.directory) return;
+  if (state.serverPending) return;
+  if (!state.workspace) {
+    // First use: Start creates the canvas workspace (spec §F), then turns
+    // Design Mode ON, which opens it.
+    const ws = await ensureCanvasWorkspace('');
+    if (!ws) {
+      announceServer('Could not create the canvas workspace.');
+      return;
+    }
+    await toggleMode(true);
+    return;
+  }
   const url = currentConfig()?.url?.trim();
   if (!url || !isLoopbackUrl(url)) return;
-  // Branch on the RENDERED state, not the raw status bit: after a poll error
-  // the icon reads "error — click to retry", and retrying must START the
-  // server, never stop the healthy one behind the stale status.
   if (state.serverStatus && !state.serverError) {
     await stopCurrentServer();
   } else {
@@ -1376,12 +1307,9 @@ async function onServerControlClick(): Promise<void> {
   }
 }
 
-/**
- * Ask the service to start the project's dev server and mark it as ours when
- * the service reports it spawned.
- */
+/** Ask the service to start the workspace's dev server and mark it as ours. */
 async function startCurrentServer(): Promise<void> {
-  const dir = state.directory;
+  const dir = actionDir();
   if (!dir) return;
   const url = currentConfig()?.url?.trim();
   if (!url || !isLoopbackUrl(url)) return;
@@ -1392,11 +1320,6 @@ async function startCurrentServer(): Promise<void> {
   renderServerControl();
   try {
     const result: ServerStartResult = await startDevServer(dir, url);
-    // Ownership bookkeeping records what the service ACTUALLY spawned for the
-    // dir the start was sent to — a confirmed spawn is marked for `dir` even
-    // if the user has since switched away. The RENDERED state, though, belongs
-    // to this action's directory: a switch — including a round-trip A→B→A —
-    // must not commit `serverStatus`/`serverError` there.
     if (result.ok && result.up && result.started) markServerStartedByUs(dir);
     if (directoryMovedSince(dir, gen)) return;
     state.serverStatus = result.up ?? null;
@@ -1413,22 +1336,15 @@ async function startCurrentServer(): Promise<void> {
     state.serverError = error instanceof Error ? error.message : String(error);
     announceServer(`Could not start the preview dev server: ${state.serverError}`);
   } finally {
-    // The newest action owns the shared in-flight marker; an older action
-    // resolving across a switch must never clear the newer one's state.
     if (action === serverActionSeq) state.serverPending = false;
     renderServerControl();
     void refreshServerStatus();
   }
 }
 
-/**
- * Ask the service to stop the project's dev server from the icon button. This
- * is the MANUAL path: it skips the panel's in-memory ownership set (empty
- * after a reload, or when the server was already running at START) and defers
- * ownership to the service, while keeping the idle/other-session rules.
- */
+/** Ask the service to stop the workspace's dev server from the icon button. */
 async function stopCurrentServer(): Promise<void> {
-  const dir = state.directory;
+  const dir = actionDir();
   if (!dir) return;
   const gen = directoryGeneration;
   const action = ++serverActionSeq;
@@ -1437,8 +1353,6 @@ async function stopCurrentServer(): Promise<void> {
   renderServerControl();
   try {
     const result = await requestDevServerStop({ manual: true });
-    // A switch mid-flight — including a round-trip back to this directory —
-    // must not commit this result to the shared row state.
     if (directoryMovedSince(dir, gen)) return;
     if (result.stopped) {
       state.serverStatus = false;
@@ -1454,9 +1368,6 @@ async function stopCurrentServer(): Promise<void> {
       state.serverError = null;
       announceServer('Another active design session is using this preview server.');
     } else {
-      // A truthful no-op: the service's own refusal reason when it gave one,
-      // else the status read. Never fake success, and never flip the icon to
-      // stopped here — `refreshServerStatus` reports the real state below.
       announceServer(result.error ?? await manualStopRefusalMessage(dir));
     }
   } catch (error) {
@@ -1464,8 +1375,6 @@ async function stopCurrentServer(): Promise<void> {
     state.serverError = error instanceof Error ? error.message : String(error);
     announceServer(`Could not stop the preview dev server: ${state.serverError}`);
   } finally {
-    // The newest action owns the shared in-flight marker; an older action
-    // resolving across a switch must never clear the newer one's state.
     if (action === serverActionSeq) state.serverPending = false;
     renderServerControl();
     void refreshServerStatus();
@@ -1473,24 +1382,20 @@ async function stopCurrentServer(): Promise<void> {
 }
 
 /**
- * Read the project's `.design-studio.json` for display only. This NEVER opens a
- * window: opening is an explicit action (the Design Mode toggle turning ON).
- * Called on mount, on directory change, and on every poll tick, so a config the
- * agent scaffolds mid-session flips the row to its ready state WITHOUT a reload.
- *
- * `reportErrors` toasts a service/config failure (mount only); the poll reads
- * silently.
+ * Read the WORkSPACE's `.design-studio.json` for display only (never opens a
+ * window). Called on mount, on workspace bind, and on every poll tick, so a
+ * config the agent scaffolds mid-session flips the row to its ready state
+ * WITHOUT a reload. `reportErrors` toasts a failure (mount only); the poll
+ * reads silently.
  */
 async function readStudioConfig(reportErrors: boolean): Promise<void> {
-  const dir = state.directory;
+  const dir = workspaceDir();
   if (!dir) return;
   if (configReadInFlight) return;
   configReadInFlight = true;
   try {
     const { config, path } = await getConfig(dir);
-    // A directory switch mid-read must not commit the OLD directory's config
-    // as the NEW directory's.
-    if (state.directory !== dir) return;
+    if (workspaceDir() !== dir) return;
     state.config = config;
     state.configPath = path;
     state.configDir = dir;
@@ -1504,7 +1409,7 @@ async function readStudioConfig(reportErrors: boolean): Promise<void> {
   }
 }
 
-/** Read the project config and surface failures (mount / directory change). */
+/** Read the workspace config and surface failures (mount / workspace bind). */
 export async function loadStudioConfig(): Promise<void> {
   await readStudioConfig(true);
 }
@@ -1516,80 +1421,75 @@ function rerender(): void {
   if (state.surface === 'page') renderPage();
 }
 
+/** Load the registered projects (decision 4c projectId detection only). */
 async function loadProjects(): Promise<void> {
-  state.projects = { kind: 'loading' };
-  rerender();
   let snapshot: Awaited<ReturnType<typeof host.listProjects>>;
   try {
     snapshot = await host.listProjects();
-  } catch (error) {
+  } catch {
     allProjects = [];
-    state.projects = { kind: 'error', message: error instanceof Error ? error.message : String(error) };
-    rerender();
     return;
   }
-  // The chats scan spans EVERY project, so remember them before the config
-  // filter below drops the ones with no `.design-studio.json`.
   allProjects = allProjectsFromSnapshot(snapshot);
-  // Read each project's config so a ready project is known before a send. A
-  // failed read must NOT hide the row: record the error, keep the row. A loading
-  // snapshot has no configs to read yet.
-  const configs: Record<string, ProjectConfigRead> = {};
-  if (snapshot.state === 'ready') {
-    await Promise.all(
-      snapshot.projects.map(async (project) => {
-        try {
-          const read = await getConfig(project.directory);
-          configs[project.directory] = { config: read.config, error: null };
-        } catch (error) {
-          configs[project.directory] = { config: null, error: error instanceof Error ? error.message : String(error) };
-        }
-      }),
-    );
-  }
-  state.projects = projectRows(snapshot, configs);
-  rerender();
-}
-
-/** Read the project list, then the design-chats list derived from it. */
-async function loadDesignHome(): Promise<void> {
-  await loadProjects();
-  await loadDesignChats();
 }
 
 /**
- * The session ids whose per-session Design Mode is ON. Reads `host.storage.keys()`
- * to find the `mode/<id>` entries, then confirms each value actually says ON
- * (turning the mode off keeps the key, so the key alone is not enough). Pure
- * parsing lives in `modeSessionIdFromKey`; this only does the IO.
+ * The cached ws/ scan: ONE `host.storage.keys()` pass per refresh, one map of
+ * normalized dir → session id (audit #19). The dirs are matched to /workspaces
+ * rows after separator/drive-case normalization (audit #11).
  */
-async function readDesignModeSessionIds(): Promise<Set<string>> {
-  const on = new Set<string>();
+async function readWorkspaceSessionMap(): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
   let keys: string[];
   try {
     keys = await host.storage.keys();
   } catch {
-    return on;
+    return map;
   }
-  const candidates = keys.map(modeSessionIdFromKey).filter((id): id is string => id !== null);
+  const sessionIds = keys.map(wsSessionIdFromKey).filter((id): id is string => id !== null);
   await Promise.all(
-    candidates.map(async (id) => {
+    sessionIds.map(async (id) => {
       try {
-        const value = (await host.storage.get(modeStorageKey(id)!)) as { on?: unknown } | undefined;
-        if (value && typeof value === 'object' && value.on === true) on.add(id);
+        const value = await host.storage.get(workspaceStorageKey(id)!);
+        if (isWorkspaceRecord(value)) map.set(normalizeDirPath(value.dir), id);
       } catch {
-        /* an unreadable mode entry is simply not ON */
+        /* an unreadable record simply never maps */
       }
     }),
   );
-  return on;
+  return map;
+}
+
+/** Read the workspaces list (decision 2: design work = workspaces on disk). */
+async function loadCanvasWorkspaces(): Promise<void> {
+  state.workspaces = { kind: 'loading' };
+  rerender();
+  wsSessionMap = await readWorkspaceSessionMap();
+  let result: WorkspacesResult;
+  try {
+    result = await getWorkspaces();
+  } catch (error) {
+    state.workspaces = { kind: 'error', message: error instanceof Error ? error.message : String(error) };
+    rerender();
+    return;
+  }
+  const rows = Array.isArray(result.workspaces) ? result.workspaces : [];
+  // The join NEVER drops a row: an unmapped workspace stays visible, sessionId null.
+  state.workspaces = rows.length === 0
+    ? { kind: 'empty' }
+    : { kind: 'list', rows: joinWorkspaceSessions(rows, wsSessionMap) };
+  rerender();
+}
+
+/** Read the registration list, then the workspaces list derived from it. */
+async function loadDesignHome(): Promise<void> {
+  await loadProjects();
+  await loadCanvasWorkspaces();
 }
 
 /**
- * The session ids carrying a persistent design marker (`design/<id>`). Unlike
- * the mode key, the marker is never cleared, so this read only needs the key's
- * presence — a session once turned ON stays a design chat. IO only; the key
- * parse lives in `designSessionIdFromKey`.
+ * The session ids carrying a persistent design marker (`design/<id>`). IO only;
+ * the key parse lives in `designSessionIdFromKey`.
  */
 async function readDesignMarkerSessionIds(): Promise<Set<string>> {
   const marked = new Set<string>();
@@ -1604,148 +1504,6 @@ async function readDesignMarkerSessionIds(): Promise<Set<string>> {
     if (id !== null) marked.add(id);
   }
   return marked;
-}
-
-/**
- * The session ids that have EVER had a `mode/<id>` entry, regardless of its `on`
- * value. Design Mode writes this key the first time it is used for a session and
- * keeps it (set to OFF) when the mode is turned off, so its mere presence marks a
- * session the user has used for design — the only signal that exists for a
- * history predating the persistent marker. IO only; the key parse lives in
- * `modeSessionIdFromKey` and this never reads the value.
- */
-async function readDesignModeKeySessionIds(): Promise<Set<string>> {
-  const used = new Set<string>();
-  let keys: string[];
-  try {
-    keys = await host.storage.keys();
-  } catch {
-    return used;
-  }
-  for (const key of keys) {
-    const id = modeSessionIdFromKey(key);
-    if (id !== null) used.add(id);
-  }
-  return used;
-}
-
-/**
- * Build the design-chats list: read EVERY registered project's sessions (config
- * or not), read which session ids have Design Mode ON via storage keys, derive the
- * view (per-session detection also reads each snapshot's own mode chip), then
- * keep it fresh with `onSessions`. Honours the snapshot states: loading while
- * the projects (or a sessions load) are loading, an error with a Retry
- * otherwise, and a true empty state only for ready + no design chat.
- */
-async function loadDesignChats(): Promise<void> {
-  const view = state.projects;
-  if (!view || view.kind === 'loading') {
-    state.designChats = { kind: 'loading' };
-    rerender();
-    return;
-  }
-  if (view.kind === 'error') {
-    state.designChats = { kind: 'error', message: view.message };
-    rerender();
-    return;
-  }
-  // The chats scan spans EVERY registered project, not the config-filtered
-  // design projects: a design chat in a project with no `.design-studio.json`
-  // is still a chat and must be listed.
-  chatProjects = allProjects;
-  chatOnIds = await readDesignModeSessionIds();
-  chatMarkerIds = await readDesignMarkerSessionIds();
-  chatModeKeyIds = await readDesignModeKeySessionIds();
-  chatSnapshots = new Map();
-  await Promise.all(
-    chatProjects.map(async (project) => {
-      try {
-        chatSnapshots.set(project.id, await host.listSessions(project.id));
-      } catch {
-        // A failed sessions read must not hide the rows the other projects
-        // contribute; record it as that project's error snapshot.
-        chatSnapshots.set(project.id, { kind: 'sessions', projectId: project.id, state: 'error', coverage: [], sessions: [] });
-      }
-    }),
-  );
-  await recomputeDesignChats();
-  await subscribeDesignChats();
-}
-
-/**
- * Derive the view from the latest snapshots, enrich each chat with the config
- * read from its OWN directory (an isolated chat's `.design-studio.json` lives in
- * `<project>/designs/<slug>`, not the project root), and repaint the page. The
- * signal-based rows paint immediately; the config reads follow, so a slow
- * service never delays the list.
- */
-async function recomputeDesignChats(): Promise<void> {
-  const listings: ProjectSessions[] = chatProjects.map((project) => ({
-    projectId: project.id,
-    projectName: project.name,
-    snapshot:
-      chatSnapshots.get(project.id) ??
-      { kind: 'sessions', projectId: project.id, state: 'loading', coverage: [], sessions: [] },
-  }));
-  const view = designChatRows(listings, chatOnIds, chatMarkerIds, chatModeKeyIds);
-  state.designChats = view;
-  rerender();
-  if (view.kind !== 'list') return;
-  const enriched = await withChatConfigs(view.rows);
-  // A newer snapshot may have replaced the view while the reads were in flight.
-  if (state.designChats === view) {
-    state.designChats = { kind: 'list', rows: enriched };
-    rerender();
-  }
-}
-
-/**
- * Attach each chat's own `.design-studio.json` (read from the chat's directory)
- * to its row. A failed read keeps the row and records the error, exactly as the
- * projects list does — it never hides a chat.
- */
-async function withChatConfigs(rows: DesignChatRow[]): Promise<DesignChatRow[]> {
-  return Promise.all(
-    rows.map(async (row) => {
-      if (!row.directory) return row;
-      try {
-        const read = await getConfig(row.directory);
-        return { ...row, config: read.config, configError: null };
-      } catch (error) {
-        return { ...row, config: row.config ?? null, configError: error instanceof Error ? error.message : String(error) };
-      }
-    }),
-  );
-}
-
-/** Drop any previous live subscriptions before re-subscribing. */
-function clearChatSubscriptions(): void {
-  for (const off of chatUnsubscribes) {
-    try {
-      off();
-    } catch {
-      /* the host may already have torn the subscription down */
-    }
-  }
-  chatUnsubscribes = [];
-}
-
-/** Keep each project's sessions snapshot fresh; a failure is only a lost bonus. */
-async function subscribeDesignChats(): Promise<void> {
-  clearChatSubscriptions();
-  await Promise.all(
-    chatProjects.map(async (project) => {
-      try {
-        const off = await host.onSessions(project.id, (snapshot) => {
-          chatSnapshots.set(project.id, snapshot);
-          void recomputeDesignChats();
-        });
-        chatUnsubscribes.push(off);
-      } catch {
-        /* live updates are a bonus; the initial read still populates the list */
-      }
-    }),
-  );
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -1770,11 +1528,7 @@ function svgIcon(paths: string, size = 18): SVGElement {
   return svg;
 }
 
-/**
- * The abstract mini-preview on an idea card: no real thumbnail exists, so a
- * small SVG suggests the layout each idea implies. `variant` is the card index
- * modulo four.
- */
+/** The abstract mini-preview on an idea card. `variant` is the card index modulo four. */
 function ideaThumb(variant: number): SVGElement {
   const svg = document.createElementNS(SVG_NS, 'svg');
   svg.setAttribute('viewBox', '0 0 56 40');
@@ -1832,13 +1586,11 @@ function updateComposerState(): void {
 }
 
 /** The composer overlays, every one driven by the same toggle contract. */
-export type OverlayId = 'type' | 'dir' | 'ds' | 'attach';
+export type OverlayId = 'type' | 'ds' | 'attach';
 
 /**
  * The ONE decision behind every composer overlay trigger: clicking a trigger
- * toggles it — the trigger's own overlay closes if it is already open, otherwise
- * it opens and takes over from whatever else was open, so only one is ever open
- * at a time. Pure, so the toggle contract is testable without a DOM.
+ * toggles it. Pure, so the toggle contract is testable without a DOM.
  */
 export function nextOverlayState(current: OverlayId | null, triggerId: OverlayId): OverlayId | null {
   return current === triggerId ? null : triggerId;
@@ -1847,7 +1599,6 @@ export function nextOverlayState(current: OverlayId | null, triggerId: OverlayId
 /** The overlay currently open, or null. At most one is open at a time. */
 function currentOverlay(): OverlayId | null {
   if (state.typeMenuOpen) return 'type';
-  if (state.dirMenuOpen) return 'dir';
   if (state.attachMenuOpen) return 'attach';
   if (state.dsMenuOpen) return 'ds';
   return null;
@@ -1856,72 +1607,51 @@ function currentOverlay(): OverlayId | null {
 /** The trigger to focus once the page is rebuilt — set whenever a close happens. */
 let refocusOverlayTrigger: OverlayId | null = null;
 
-/**
- * Toggle one composer overlay through the shared rule: open it (closing any
- * other), or close it when it is the one already open. A fresh open resets the
- * overlay's own scratch state; a close hands focus back to the trigger.
- */
+/** Toggle one composer overlay through the shared rule. */
 function toggleMenu(which: OverlayId): void {
   if (currentOverlay() === 'attach') cancelReferenceValidation();
   const next = nextOverlayState(currentOverlay(), which);
   state.typeMenuOpen = next === 'type';
-  state.dirMenuOpen = next === 'dir';
   state.attachMenuOpen = next === 'attach';
   state.dsMenuOpen = next === 'ds';
   if (next === 'ds') {
-    // Each open starts clean: an empty search, and the current choice highlighted.
     dsQuery = '';
     dsHighlight = state.pageDesignSystemId;
   }
-  // A close returns focus to the trigger it came from; an open leaves focus to
-  // the panel, which places it on its own first control.
   refocusOverlayTrigger = next === null ? which : null;
   renderPage();
 }
 
-/**
- * Close the one open overlay. `refocus` hands focus back to that overlay's
- * trigger after the rebuild (Escape and a selection); an outside click leaves
- * focus where the user clicked.
- */
+/** Close the one open overlay. `refocus` hands focus back to that overlay's trigger. */
 function closeMenus(refocus = false): void {
   const open = currentOverlay();
   if (!open) return;
   if (open === 'attach') cancelReferenceValidation();
   state.typeMenuOpen = false;
-  state.dirMenuOpen = false;
   state.attachMenuOpen = false;
   state.dsMenuOpen = false;
   refocusOverlayTrigger = refocus ? open : null;
   renderPage();
 }
 
-/**
- * Close the active overlay after a selection and return focus to its trigger.
- * Selection is always the overlay closing, so it does not re-check open state.
- */
+/** Close the active overlay after a selection and return focus to its trigger. */
 function closeActiveOverlay(id: OverlayId): void {
   if (id === 'attach') cancelReferenceValidation();
   state.typeMenuOpen = false;
-  state.dirMenuOpen = false;
   state.attachMenuOpen = false;
   state.dsMenuOpen = false;
   refocusOverlayTrigger = id;
   renderPage();
 }
 
-/**
- * Any click outside an open overlay closes it. The panel and the trigger count
- * as inside; the transparent backdrop does NOT — it is the outside click the
- * overlay catches, so it must close rather than be swallowed.
- */
+/** Any click outside an open overlay closes it. */
 function onPageWindowClick(event: MouseEvent): void {
   const target = event.target as HTMLElement | null;
   if (target?.closest('.ds-ds-panel, .ds-menu, .ds-menu-trigger')) return;
   closeMenus();
 }
 
-/** Escape from anywhere in the frame closes an open overlay, the pickers included. */
+/** Escape from anywhere in the frame closes an open overlay. */
 function onPageKeydown(event: KeyboardEvent): void {
   if (event.key !== 'Escape') return;
   if (!currentOverlay()) return;
@@ -1929,22 +1659,7 @@ function onPageKeydown(event: KeyboardEvent): void {
   closeMenus(true);
 }
 
-/**
- * The label the working-directory row shows: the resolved registered project,
- * else the needs-project state ("Loading…" until the first projects load).
- */
-function currentDirLabel(): string {
-  const view = state.projects;
-  if (!view || view.kind === 'loading') return 'Loading…';
-  const target = pageTarget();
-  if (target.kind === 'project') {
-    const project = allProjects.find((candidate) => candidate.id === target.projectId);
-    return project?.name ?? fileBaseName(target.dir);
-  }
-  return state.directory ? 'Not a registered project' : 'No project open';
-}
-
-/** The centred page: hero, composer, working directory and idea cards. */
+/** The centred page: hero, composer, workspace row and idea cards. */
 function renderPage(): void {
   if (!pageBody || state.surface !== 'page') return;
   pageBody.replaceChildren();
@@ -1956,7 +1671,7 @@ function renderPage(): void {
     shell.classList.add('ds-enter');
     pageEnter = false;
   }
-  shell.append(renderHero(), renderComposer(), renderDirRow(), renderIdeas(), renderDesignSection(), renderFooter());
+  shell.append(renderHero(), renderComposer(), renderWorkspaceRow(), renderIdeas(), renderCanvasSection(), renderFooter());
   pageBody.append(shell);
   updateComposerState();
   focusPendingTrigger();
@@ -1968,10 +1683,7 @@ function renderPage(): void {
   }
 }
 
-/**
- * Focus the trigger that a close asked to return focus to, once it is back in
- * the DOM. Keyboard users keep their place across the rebuild.
- */
+/** Focus the trigger that a close asked to return focus to, once it is back in the DOM. */
 function focusPendingTrigger(): void {
   const id = refocusOverlayTrigger;
   if (!id) return;
@@ -1995,14 +1707,8 @@ function renderHero(): HTMLElement {
 }
 
 /**
- * ONE anchored-popover pattern, shared by every composer overlay — the type
- * picker, the design-system picker and the `+` attach menu. It returns the
- * trigger's relative anchor and, while open, mounts a full-frame backdrop (what
- * an outside click hits) and the absolutely-positioned panel, so opening never
- * reflows the composer or the lists below. The panel is a labelled dialog, and
- * the keyboard contract — Escape closes, the arrow keys walk the options and
- * focus them — is wired here once for all of them; the panel's own content
- * decides what a click or Enter does.
+ * ONE anchored-popover pattern, shared by the composer overlays — the type
+ * picker, the design-system picker and the `+` attach menu.
  */
 function anchoredPopover(options: {
   open: boolean;
@@ -2027,7 +1733,6 @@ function anchoredPopover(options: {
     }
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
     const active = document.activeElement as HTMLElement | null;
-    // A focused <select> owns its arrows (the type panel's Direction/Fidelity).
     if (active?.tagName === 'SELECT') return;
     const items = Array.from(options.panel.querySelectorAll<HTMLElement>(options.optionSelector));
     if (items.length === 0) return;
@@ -2068,8 +1773,7 @@ function renderComposer(): HTMLElement {
   plus.append(svgIcon('<path d="M12 5v14"/><path d="M5 12h14"/>'));
   plus.title = 'Add a reference';
   plus.setAttribute('aria-label', 'Add a reference');
-  plus.disabled = state.pageBusy || pageTarget().kind !== 'project';
-  if (pageTarget().kind !== 'project') plus.title = 'Register or select a project to add references';
+  plus.disabled = state.pageBusy || referencePending;
   plus.setAttribute('aria-expanded', String(state.attachMenuOpen));
   plus.addEventListener('click', () => toggleMenu('attach'));
   const attachAnchor = anchoredPopover({
@@ -2081,8 +1785,7 @@ function renderComposer(): HTMLElement {
     onClose: () => closeMenus(true),
   });
 
-  // The design-system control, next to `+`: it names the current choice and opens
-  // the merged picker panel. "No design system" is the default and the cleared state.
+  // The design-system control, next to `+`.
   const designSystem = q<HTMLButtonElement>('button', 'ds-chip ds-ds-trigger ds-menu-trigger');
   designSystem.dataset.overlayTrigger = 'ds';
   designSystem.append(designSystemIcon());
@@ -2113,9 +1816,6 @@ function renderComposer(): HTMLElement {
   });
   sendEl = send;
 
-  // Every control and its overlay share one relative anchor (the SAME pattern),
-  // so each panel floats absolutely under its control instead of expanding the
-  // composer and pushing the idea cards / design-work list down.
   const dsAnchor = anchoredPopover({
     open: state.dsMenuOpen,
     trigger: designSystem,
@@ -2138,7 +1838,6 @@ function renderComposer(): HTMLElement {
   children.push(dsAnchor, typeAnchor, spacer, send);
   bar.append(...children);
   box.append(area, renderReferenceDraft(), bar);
-  // The overlays must escape the composer's rounded-corner clip while open.
   box.classList.toggle('ds-overlay-open', state.attachMenuOpen || state.dsMenuOpen || state.typeMenuOpen);
 
   const track = q('div', 'ds-composer-accent');
@@ -2201,12 +1900,7 @@ export function removePageReference(id: string): void {
   renderPage();
 }
 
-/**
- * The type picker panel: the DESIGN_TYPES list on top (each row names the type
- * and its hint; clicking one applies it and closes — the headline, the chip and
- * the idea cards all follow) and the Direction/Fidelity options in a footer, in
- * the same anchored overlay the design-system picker uses.
- */
+/** The type picker panel: DESIGN_TYPES plus Direction/Fidelity options. */
 function renderTypeMenu(): HTMLElement {
   const panel = q('div', 'ds-ds-panel ds-type-panel');
   const list = q('div', 'ds-ds-list ds-type-list');
@@ -2262,39 +1956,40 @@ function field(label: string, control: HTMLElement): HTMLElement {
 }
 
 // ---- the `+` attach control (an anchored overlay above the composer) ----
-//
-// The page stages source-qualified references locally. Only explicit pasted
-// paths are resolved; a browser's dropped File.name is never an accessible path.
-// In-session attachment remains a separate, compatible host-composer action.
 
-/** The project the `+` references: its dir, registered id (when any), name and config. */
+/**
+ * The workspace the `+` references: its dir, the registered-project id (decision
+ * 4c), name and config. With no workspace yet, the chat's own directory stands
+ * in so pasted paths still validate against SOMETHING reachable.
+ */
 type AttachProject = { dir: string; projectId?: string; name: string; config: StudioConfig | null };
 
-/** Resolve the project the `+` references from the page's target/current project. */
 function attachProject(): AttachProject {
-  const target = pageTarget();
-  // The target's config comes from the projects load; when it is the current
-  // directory, a fresh `/config` read (state.config) is the better fallback than
-  // nothing — never mix a config from a DIFFERENT directory in.
-  const config = target.kind === 'project'
-    ? (target.config ?? (target.dir === state.directory ? state.config : null))
-    : state.config;
-  const dir = target.kind === 'project' ? target.dir : (state.directory ?? '');
-  const name = config?.name?.trim() || (dir ? fileBaseName(dir) : 'Project');
-  return { dir, projectId: target.kind === 'project' ? target.projectId : undefined, name, config };
+  const ws = state.workspace;
+  const dir = ws?.dir ?? state.directory ?? '';
+  const config = ws ? (state.configDir === ws.dir ? state.config : null) : state.config;
+  const name = ws?.name || (dir ? fileBaseName(dir) : 'Canvas');
+  const projectId = allProjects.find((project) => dir !== '' && (sameDirPath(project.directory, dir) || pathContains(project.directory, dir)))?.id;
+  return { dir, projectId, name, config };
+}
+
+/** The workspace directory resolved for pasted-path validation. */
+function referenceBaseDir(): string | null {
+  return attachProject().dir || null;
 }
 
 /**
- * Attach a project reference to the composer. A no-url project refuses with the
- * actionable line rather than sending a chip the host would reject.
+ * Attach a workspace reference to the composer. A no-url workspace refuses with
+ * the actionable line rather than sending a chip the host would reject.
  */
 export async function attachProjectReference(): Promise<void> {
   const project = attachProject();
   if (state.surface === 'page') {
     if (state.pageBusy || referencePending) return;
-    if (pageTarget().kind !== 'project') {
-      referenceError = 'Register or select a project to add references.';
+    if (!project.dir) {
+      referenceError = 'No canvas workspace yet — start one with /canvas, then add references.';
       renderPage();
+      annotateReferenceFeedback();
       return;
     }
     stagePageReference({ id: `project:${project.dir}`, kind: 'project', path: project.dir, sourceDirectory: project.dir, label: project.name });
@@ -2309,15 +2004,20 @@ export async function attachProjectReference(): Promise<void> {
   try {
     const chip = projectReferenceChip({ projectId: project.projectId, dir: project.dir, name: project.name, url });
     await host.attach(chip);
-    await host.toast({ kind: 'success', message: 'Project reference added to the composer.' });
+    await host.toast({ kind: 'success', message: 'Workspace reference added to the composer.' });
   } catch (error) {
     await host.toast({ kind: 'error', message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
   }
 }
 
+/** Announce the reference error through the live region, if it is mounted. */
+function annotateReferenceFeedback(): void {
+  announceReference(referenceError);
+}
+
 /**
  * Attach a FILE reference from a pasted path: referenced (never uploaded) under
- * the project's url. A no-url project refuses the same way.
+ * the workspace's url. A no-url project refuses the same way.
  */
 export async function attachProjectPath(path: string): Promise<void> {
   const project = attachProject();
@@ -2325,14 +2025,14 @@ export async function attachProjectPath(path: string): Promise<void> {
     if (state.pageBusy || referencePending) return;
     attachPathDraft = path;
     referenceError = '';
-    if (pageTarget().kind !== 'project') {
-      referenceError = 'Register or select a project, then paste the file path again.';
+    if (!project.dir) {
+      referenceError = 'No canvas workspace yet — start one with /canvas, then paste the file path again.';
       renderPage();
       announceReference(referenceError);
       return;
     }
     if (!path.trim()) {
-      referenceError = 'Paste a project-relative or full file path.';
+      referenceError = 'Paste a workspace-relative or full file path.';
       renderPage();
       return;
     }
@@ -2348,8 +2048,6 @@ export async function attachProjectPath(path: string): Promise<void> {
       announceReference('This is taking longer than expected. Close the reference menu to cancel, then retry.');
     }, 15000);
     try {
-      // Capture the source before awaiting. Switching projects never rewrites
-      // an existing reference or resolves this request against another source.
       const resolved = await validateReferencePath(project.dir, path.trim());
       if (request !== referenceRequest || state.surface !== 'page') return;
       stagePageReference({ id: `file:${resolved.path}`, kind: 'file', path: resolved.path, sourceDirectory: resolved.sourceDirectory, label: fileBaseName(resolved.path) });
@@ -2403,7 +2101,6 @@ function onPageDragEnter(event: DragEvent): void {
 
 function onPageDragOver(event: DragEvent): void {
   if (!dragHasFiles(event)) return;
-  // Required on dragover or the drop event never fires.
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
 }
@@ -2431,9 +2128,6 @@ export async function attachDroppedFiles(event: DragEvent): Promise<void> {
 }
 
 // ---- references ----
-//
-// These chips represent ONLY the Studio page's unsent draft. They do not mirror
-// host.attach, whose live in-chat picks still belong to the host composer.
 
 function stagePageReference(reference: DraftReference): void {
   const duplicate = state.references.some((existing) => existing.kind === reference.kind && existing.path === reference.path);
@@ -2442,7 +2136,7 @@ function stagePageReference(reference: DraftReference): void {
   announceReference(duplicate ? `Already added: ${reference.path}.` : `Added ${reference.path}.`);
 }
 
-/** One source row of the attach overlay: a real button, disabled with a reason when unusable. */
+/** One source row of the attach overlay: a real button. */
 function attachOption(title: string, hint: string, disabled: boolean, onClick: () => void): HTMLButtonElement {
   const item = q<HTMLButtonElement>('button', 'ds-menu-item');
   item.disabled = disabled;
@@ -2454,18 +2148,18 @@ function attachOption(title: string, hint: string, disabled: boolean, onClick: (
   return item;
 }
 
-/** The `+` overlay: a project reference and explicit pasted paths only. */
+/** The `+` overlay: a workspace reference and explicit pasted paths only. */
 function renderAttachPanel(): HTMLElement {
   const panel = q('div', 'ds-ds-panel ds-attach-panel');
   const project = attachProject();
-  const usable = pageTarget().kind === 'project';
+  const usable = project.dir !== '';
 
   const list = q('div', 'ds-ds-list ds-attach-list');
   list.setAttribute('role', 'group');
   list.setAttribute('aria-label', 'Add a reference');
-  const projectHint = usable ? (project.dir || project.name) : 'Register or select a project to add references.';
+  const projectHint = usable ? (project.dir || project.name) : 'No canvas workspace yet — /canvas creates one.';
   list.append(
-    attachOption('Reference the project', projectHint, !usable || referencePending || state.pageBusy, () => {
+    attachOption('Reference the workspace', projectHint, !usable || referencePending || state.pageBusy, () => {
       void attachProjectReference();
     }),
   );
@@ -2502,7 +2196,6 @@ function renderAttachPanel(): HTMLElement {
       if (!path) return;
       void attachProjectPath(path);
     });
-    // A rebuild must not lose the draft (live snapshots rebuild the lists).
     input.addEventListener('input', () => {
       attachPathDraft = input.value;
       form.dataset.state = input.value ? 'dirty' : 'untouched';
@@ -2510,7 +2203,7 @@ function renderAttachPanel(): HTMLElement {
     });
     input.addEventListener('blur', () => {
       if (!input.value.trim() && input.value.length > 0) {
-        referenceError = 'Paste a project-relative or full file path.';
+        referenceError = 'Paste a workspace-relative or full file path.';
         input.setAttribute('aria-invalid', 'true');
         feedback.textContent = referenceError;
         feedback.classList.add('error');
@@ -2519,7 +2212,7 @@ function renderAttachPanel(): HTMLElement {
     panel.append(form);
     const feedback = q('div', `ds-attach-note${referenceError ? ' error' : ''}`, referencePending
       ? referenceSlow ? 'Still checking. Close this menu to cancel, then retry.' : 'Checking that the file is accessible…'
-      : referenceError || 'Paste a project-relative or full path. Files are referenced, never uploaded.');
+      : referenceError || 'Paste a workspace-relative or full path. Files are referenced, never uploaded.');
     feedback.id = 'ds-reference-feedback';
     feedback.setAttribute('role', 'status');
     if (referencePending) {
@@ -2536,17 +2229,7 @@ function renderAttachPanel(): HTMLElement {
 }
 
 // ---- the design-system picker (an anchored overlay above the composer) ----
-//
-// A single merged panel, not a separate screen: a search field + `+ Create`, a
-// list ("No design system" first, then the presets grouped by category) whose
-// entry drives a right-hand detail pane (name, category, description, a token
-// swatch strip), and the Clear action. Clicking — or Enter/Space on — a row
-// SELECTS AND APPLIES it (no separate Use step). Keyboard: arrows move, Enter
-// applies, Escape closes. The panel floats absolutely anchored to the
-// design-system control, so opening it never reflows the composer or the lists
-// below. The catalog and its filter/swatch rules live in mode.ts.
 
-/** The composer control's leading icon: a palette outline in the app's line style. */
 function designSystemIcon(): SVGElement {
   return svgIcon(
     '<circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>',
@@ -2560,7 +2243,7 @@ function applyDesignSystem(id: string | null): void {
   closeActiveOverlay('ds');
 }
 
-/** The detail pane for the highlighted entry: name, category, description, swatch strip. */
+/** The detail pane for the highlighted entry. */
 function renderDesignSystemDetail(detail: HTMLElement, id: string | null): void {
   detail.replaceChildren();
   const preset = findDesignSystem(id);
@@ -2577,7 +2260,6 @@ function renderDesignSystemDetail(detail: HTMLElement, id: string | null): void 
     const strip = q('div', 'ds-ds-swatches');
     for (const token of swatches) {
       const swatch = q('span', 'ds-ds-swatch');
-      // The swatch carries the preset's own colour; the strip's container stays OpenChamber.
       swatch.style.background = token.value;
       swatch.title = `${token.name} ${token.value}`;
       swatch.setAttribute('aria-label', `${token.name} ${token.value}`);
@@ -2589,11 +2271,7 @@ function renderDesignSystemDetail(detail: HTMLElement, id: string | null): void 
 
 function renderDesignSystemPanel(): HTMLElement {
   const panel = q('div', 'ds-ds-panel');
-  // role="dialog" and its aria-label are set by the shared `anchoredPopover` on
-  // open; Escape and the arrow keys are handled there too, once, for every
-  // overlay. Only the Enter-to-apply step is specific to this panel.
 
-  // Toolbar: the search field and the `+ Create` affordance.
   const toolbar = q('div', 'ds-ds-toolbar');
   const search = q<HTMLInputElement>('input', 'ds-ds-search');
   search.type = 'search';
@@ -2606,7 +2284,6 @@ function renderDesignSystemPanel(): HTMLElement {
   create.disabled = true;
   toolbar.append(search, create);
 
-  // Body: the list at left, the detail pane at right.
   const body = q('div', 'ds-ds-body');
   const list = q('div', 'ds-ds-list');
   list.setAttribute('role', 'listbox');
@@ -2614,8 +2291,6 @@ function renderDesignSystemPanel(): HTMLElement {
   const detail = q('div', 'ds-ds-detail');
   body.append(list, detail);
 
-  // Footer action: Clear returns to "No design system". There is no `Use`
-  // button — clicking (or Enter/Space on) a row applies it directly.
   const actions = q('div', 'ds-ds-foot');
   const clear = q<HTMLButtonElement>('button', 'ds-ds-clear', 'Clear');
   clear.addEventListener('click', () => applyDesignSystem(null));
@@ -2623,8 +2298,6 @@ function renderDesignSystemPanel(): HTMLElement {
 
   panel.append(toolbar, body, actions);
 
-  // The list items are kept so a highlight change updates classes in place — no
-  // rebuild, so the search field keeps its caret and value.
   const itemRefs: Array<{ id: string | null; el: HTMLButtonElement }> = [];
 
   const setHighlight = (id: string | null): void => {
@@ -2660,7 +2333,6 @@ function renderDesignSystemPanel(): HTMLElement {
       itemRefs.push({ id, el: item });
       list.append(item);
     };
-    // "No design system" stays first, whatever the search narrows to.
     add(null);
     const shown = filterDesignSystems(dsQuery);
     for (const group of designSystemGroups(shown)) {
@@ -2675,7 +2347,6 @@ function renderDesignSystemPanel(): HTMLElement {
 
   search.addEventListener('input', () => {
     dsQuery = search.value;
-    // A narrowed list may not hold the highlighted entry: fall back to "No design system".
     if (dsHighlight !== null && !filterDesignSystems(dsQuery).some((preset) => preset.id === dsHighlight)) {
       dsHighlight = null;
     }
@@ -2683,9 +2354,6 @@ function renderDesignSystemPanel(): HTMLElement {
     renderDesignSystemDetail(detail, dsHighlight);
   });
 
-  // Enter applies the highlighted entry. (Escape and the arrow keys are the
-  // shared `anchoredPopover` contract; arrows focus an option, whose focus
-  // listener sets the highlight.)
   panel.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && event.target !== create) {
       event.preventDefault();
@@ -2693,83 +2361,22 @@ function renderDesignSystemPanel(): HTMLElement {
     }
   });
 
-  // Focus the search field once the panel is in the DOM.
   queueMicrotask(() => search.focus());
 
   return panel;
 }
 
-function renderDirRow(): HTMLElement {
+/** The one-line workspace context under the composer (no registered-project gate). */
+function renderWorkspaceRow(): HTMLElement {
   const row = q('div', 'ds-dir');
-  const trigger = q<HTMLButtonElement>('button', 'ds-dir-trigger ds-menu-trigger');
-  trigger.dataset.overlayTrigger = 'dir';
-  trigger.append(q('span', 'ds-dir-label', 'Working directory'));
-  trigger.append(q('span', 'ds-dir-value', currentDirLabel()));
-  trigger.append(svgIcon('<path d="M6 9l6 6 6-6"/>', 16));
-  trigger.setAttribute('aria-label', 'Choose the working directory');
-  trigger.addEventListener('click', () => toggleMenu('dir'));
-  row.append(trigger);
-  // When the frame's directory belongs to no registered project, say so here —
-  // before the user types — with the same message a send refuses with. Skipped
-  // until the projects list has resolved once, so the state never flashes.
-  const view = state.projects;
-  if (view && view.kind !== 'loading' && pageTarget().kind === 'needs-project') {
-    row.append(q('div', 'ds-dir-note', NEEDS_PROJECT_MESSAGE));
-  }
-  if (state.dirMenuOpen) row.append(renderDirMenu());
+  const label = q('span', 'ds-dir-label', 'Canvas workspace');
+  const ws = state.workspace;
+  const value = q('span', 'ds-dir-value', ws
+    ? (ws.name.length > 38 ? `${ws.name.slice(0, 38)}…` : ws.name)
+    : 'Created on send — no project registration needed.');
+  value.title = ws ? ws.dir : NO_WORKSPACE_MESSAGE;
+  row.append(label, value);
   return row;
-}
-
-function renderDirMenu(): HTMLElement {
-  const menu = q('div', 'ds-menu');
-  const view = state.projects;
-  if (!view || view.kind === 'loading') {
-    menu.append(q('div', 'ds-menu-note', 'Loading projects…'));
-    return menu;
-  }
-  if (view.kind === 'error') {
-    menu.append(q('div', 'ds-menu-note error', `Could not list projects: ${view.message}`));
-    const retry = q<HTMLButtonElement>('button', 'ds-menu-retry', 'Retry');
-    retry.addEventListener('click', () => void loadProjects());
-    menu.append(retry);
-    return menu;
-  }
-
-  // Every REGISTERED project, config or not — the config-filtered rows would
-  // hide exactly the projects that most need choosing (the ones with no config
-  // yet). An unregistered current directory is not an option here: a creation
-  // flow refuses it, so it is not offered.
-  const configRows = view.kind === 'list' ? view.rows : [];
-  const currentRow = allProjects.find((project) => project.directory === state.directory);
-  const effectiveId = state.selectedProjectId ?? currentRow?.id ?? null;
-
-  if (allProjects.length === 0) {
-    menu.append(q('div', 'ds-menu-note', 'No registered projects yet.'));
-  }
-  for (const project of allProjects) {
-    const matched = configRows.find((candidate) => candidate.directory === project.directory);
-    const config = matched?.config ?? null;
-    const sub = config?.url ? `${config.type ?? 'custom'} · ${config.url}` : project.directory;
-    menu.append(dirOption(project.name, sub, project.id === effectiveId, project.id, projectReady(config) ? undefined : NO_CONFIG_BADGE));
-  }
-  return menu;
-}
-
-function dirOption(title: string, subtitle: string, on: boolean, id: string | null, badge?: string): HTMLElement {
-  const item = q<HTMLButtonElement>('button', `ds-menu-item${on ? ' on' : ''}`);
-  const main = q('span', 'ds-menu-main');
-  const titleLine = q('span', 'ds-menu-title');
-  titleLine.append(q('strong', undefined, title));
-  if (badge) titleLine.append(q('span', 'ds-badge', badge));
-  main.append(titleLine);
-  main.append(q('span', 'ds-menu-hint', subtitle));
-  item.append(main);
-  if (on) item.append(svgIcon('<path d="M20 6L9 17l-5-5"/>', 16));
-  item.addEventListener('click', () => {
-    state.selectedProjectId = id;
-    closeActiveOverlay('dir');
-  });
-  return item;
 }
 
 function renderIdeas(): HTMLElement {
@@ -2797,33 +2404,20 @@ function renderIdeas(): HTMLElement {
   return wrap;
 }
 
-/**
- * The calm closing line under everything: the extension's name and a one-line
- * hint, so the content never sits flush against the frame's bottom edge. No
- * controls — a footer, not a toolbar.
- */
+/** The calm closing line under everything. */
 function renderFooter(): HTMLElement {
   const footer = q('footer', 'ds-footer');
-  footer.append(q('span', 'ds-footer-name', 'Design Studio'));
-  footer.append(q('span', 'ds-footer-hint', 'Add references by ⌘-clicking an element in the live preview window.'));
+  footer.append(q('span', 'ds-footer-name', 'Design Canvas'));
+  footer.append(q('span', 'ds-footer-hint', 'Add references by ⌘-clicking an element in the live canvas window.'));
   return footer;
 }
-//
-// ONE list, not two: registered design projects and design chats (the sessions
-// whose Design Mode is ON) share a single list, each row marked by a small
-// leading type icon — a framed canvas for a project, a speech bubble for a chat.
-// Each row is one button, so it is focusable and fires on Enter/Space without a
-// nested control. A failed config/sessions read NEVER hides a row.
 
-/**
- * The two leading type icons of the merged list, as inline stroke paths in the
- * app's 24×24 line-icon style: a framed canvas for a design project, a speech
- * bubble for a design chat. No emoji; rendered at 15px through `svgIcon`.
- */
-const PROJECT_ROW_ICON = '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>';
-const CHAT_ROW_ICON = '<path d="M20 15.5a2.5 2.5 0 0 1-2.5 2.5H8l-5 3.5V6a2.5 2.5 0 0 1 2.5-2.5h12A2.5 2.5 0 0 1 20 6z"/>';
+// ONE list: the workspaces on disk (`GET /workspaces`, decision 2), each row
+// joined to its session via the cached ws/ scan when one exists.
 
-/** The small leading type icon span on a merged row (decorative; the button carries the label). */
+const WORKSPACE_ROW_ICON = '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>';
+
+/** The small leading type icon on a row (decorative; the button carries the label). */
 function rowIcon(paths: string): HTMLElement {
   const span = q('span', 'ds-list-icon');
   span.setAttribute('aria-hidden', 'true');
@@ -2843,38 +2437,14 @@ function listNote(message: string, kind: 'info' | 'error' = 'info'): HTMLElement
   return note;
 }
 
-/**
- * The ONE merged section below the composer: one heading, one list. A project
- * row and a chat row sit side by side, told apart by their leading type icon and
- * their action. `designWorkRows` collapses the two sources' snapshot states into
- * one, so Loading…, the error line + Retry, and the single empty line are the
- * only non-list states.
- */
-function renderDesignSection(): HTMLElement {
+/** The workspaces list below the composer: one heading, one list. */
+function renderCanvasSection(): HTMLElement {
   const section = q('section', 'ds-section');
   const head = q('div', 'ds-section-head');
   head.append(q('div', 'ds-section-label', 'Your design work'));
-  // While a project is selected, the one calm reset lives in the heading.
-  if (state.projectFilter) {
-    const showAll = q<HTMLButtonElement>('button', 'ds-section-reset', 'Show all');
-    showAll.title = 'Show every design project and chat';
-    showAll.addEventListener('click', () => {
-      state.projectFilter = null;
-      rerender();
-    });
-    head.append(showAll);
-  }
   section.append(head);
   const list = q('div', 'ds-list');
-  // In the unfiltered view a listed project hides its own chats — they stay one
-  // click away through "Open sessions". The filter view needs exactly those
-  // rows, so it omits nothing and filters instead.
-  const listedIds = state.projects?.kind === 'list' ? new Set(state.projects.rows.map((row) => row.id)) : new Set<string>();
-  const view = designWorkRows(
-    state.projects ?? { kind: 'loading' },
-    state.designChats ?? { kind: 'loading' },
-    state.projectFilter ? undefined : { omitChatProjectIds: listedIds },
-  );
+  const view = state.workspaces ?? { kind: 'loading' };
   if (view.kind === 'loading') {
     list.append(listNote('Loading…'));
   } else if (view.kind === 'error') {
@@ -2882,17 +2452,8 @@ function renderDesignSection(): HTMLElement {
   } else if (view.kind === 'empty') {
     list.append(listNote(NO_DESIGN_WORK_MESSAGE));
   } else {
-    const filter = state.projectFilter;
-    const rows = filter
-      ? view.rows.filter((row) => (row.kind === 'project' ? row.project.id === filter : row.chat.projectId === filter))
-      : view.rows;
-    for (const row of rows) {
-      list.append(row.kind === 'project' ? renderProjectRow(row.project) : renderChatRow(row.chat));
-    }
-    // A selected project with no design session yet says so once, rather than
-    // leaving the user looking at an unchanged list.
-    if (filter && !rows.some((row) => row.kind === 'chat')) {
-      list.append(listNote('No design sessions in this project yet.'));
+    for (const row of view.rows) {
+      list.append(renderWorkspaceListRow(row));
     }
   }
   section.append(list);
@@ -2900,125 +2461,90 @@ function renderDesignSection(): HTMLElement {
 }
 
 /**
- * A project row: a leading canvas icon, the name, its readiness badge and meta,
- * then the row's own action. The row NEVER starts a session — clicking the body
- * selects the project as the working target and filters the list to its chats
- * (`Open sessions`), and a ready project additionally offers `Preview`, which
- * raises its live window via `POST /open` and opens no session.
+ * A workspace row: a leading canvas icon, the name, its readiness badge and
+ * meta, then the row's own action. The row NEVER hides (decision 2/3): an
+ * unmapped workspace opens via a NEW session titled with the workspace name
+ * (carrying the open prompt); a mapped one reuses its session via
+ * `host.openSession`.
  */
-function renderProjectRow(row: ProjectRow): HTMLElement {
-  const ready = projectReady(row.config);
+function renderWorkspaceListRow(row: WorkspaceWorkRow): HTMLElement {
+  const ready = Boolean(row.url?.trim());
   const item = q('div', 'ds-list-row');
   const open = q<HTMLButtonElement>('button', 'ds-list-open');
-  open.setAttribute('aria-label', `Show the design sessions in ${row.name}`);
-  open.append(rowIcon(PROJECT_ROW_ICON));
+  open.setAttribute('aria-label', row.sessionId ? `Open the canvas chat ${row.name}` : `Open ${row.name} (starts its design chat)`);
+  open.append(rowIcon(WORKSPACE_ROW_ICON));
   const main = q('div', 'ds-list-main');
   const titleLine = q('div', 'ds-list-title');
-  titleLine.append(q('span', 'ds-list-name', row.name));
+  titleLine.append(q('span', 'ds-list-name', row.name || fileBaseName(row.dir)));
   titleLine.append(q('span', `ds-badge${ready ? ' ready' : ''}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
   main.append(titleLine);
-  main.append(q('div', 'ds-list-meta', projectMeta(row)));
-  // A read that failed keeps the row and says so — the bug this section must not
-  // reintroduce is a dropped row.
-  if (row.configError) main.append(q('div', 'ds-list-warn', `Could not read .design-studio.json: ${row.configError}`));
+  main.append(q('div', 'ds-list-meta', workspaceMeta(row)));
   open.append(main);
-  open.append(q('span', 'ds-list-go', state.projectFilter === row.id ? 'Showing' : 'Open sessions'));
-  open.addEventListener('click', () => openProjectSessions(row));
+  open.append(q('span', 'ds-list-go', row.sessionId ? 'Open' : 'Open chat'));
+  open.addEventListener('click', () => void openWorkspaceListRow(row));
   item.append(open);
-  // Preview is offered only for a project with a url — it can do what it says.
+  // Preview is offered only for a workspace with a url — it can do what it says.
   if (ready) {
     const preview = q<HTMLButtonElement>('button', 'ds-list-preview', 'Preview');
     preview.title = `Open the ${row.name} preview`;
     preview.setAttribute('aria-label', `Open the ${row.name} preview`);
-    preview.addEventListener('click', () => void previewProject(row));
+    preview.addEventListener('click', () => void previewWorkspace(row));
     item.append(preview);
   }
   return item;
 }
 
 /**
- * A project row's action: make the project the working target and filter the
- * merged list to its design chats, then bring the list into view. It NEVER
- * starts a session — that is the composer's send, and only there.
+ * A workspace row's action. When the ws/ scan mapped the workspace to a session,
+ * reuse it; otherwise start a NEW session titled with the workspace name and
+ * carrying the workspace-open prompt (decision 3 + §F).
  */
-function openProjectSessions(row: ProjectRow): void {
-  state.selectedProjectId = row.id;
-  state.projectFilter = row.id;
-  rerender();
-  scrollDesignSectionIntoView();
-}
-
-/** Bring the merged list into view after a project row selects it. Motion-aware. */
-function scrollDesignSectionIntoView(): void {
-  const section = pageBody?.querySelector<HTMLElement>('.ds-section');
-  if (!section || typeof section.scrollIntoView !== 'function') return;
-  const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  section.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
-}
-
-/**
- * A project row's `Preview` action: raise the project's live window with its
- * `.design-studio.json` url. No session is opened or created. A project with no
- * url cannot be previewed, so the button is not rendered (the guard is a backstop).
- */
-async function previewProject(row: ProjectRow): Promise<void> {
-  const url = row.config?.url?.trim();
-  if (!url) {
-    await host.toast({ kind: 'error', message: NO_PROJECT_URL_MESSAGE });
+async function openWorkspaceListRow(row: WorkspaceWorkRow): Promise<void> {
+  if (row.sessionId) {
+    try {
+      await host.openSession(row.sessionId);
+    } catch (error) {
+      await host.toast({ kind: 'error', message: `Could not open the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
+    }
     return;
   }
-  await openProjectWindow({ url }, row.directory, true);
-}
-
-/**
- * A chat row. Its config is the chat's OWN `.design-studio.json` (from the
- * chat's directory), so a chat isolated into `<project>/designs/<slug>` shows
- * its readiness and url exactly like a project row does.
- */
-function renderChatRow(row: DesignChatRow): HTMLElement {
-  const ready = projectReady(row.config);
-  const item = q('div', 'ds-list-row');
-  const open = q<HTMLButtonElement>('button', 'ds-list-open');
-  open.setAttribute('aria-label', `Open the design chat ${row.title} in ${row.projectName}`);
-  open.append(rowIcon(CHAT_ROW_ICON));
-  const main = q('div', 'ds-list-main');
-  const titleLine = q('div', 'ds-list-title');
-  titleLine.append(q('span', 'ds-list-name', row.title));
-  titleLine.append(q('span', `ds-badge${ready ? ' ready' : ''}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
-  main.append(titleLine);
-  main.append(q('div', 'ds-list-meta', designChatMeta(row)));
-  if (row.configError) main.append(q('div', 'ds-list-warn', `Could not read .design-studio.json: ${row.configError}`));
-  open.append(main);
-  open.append(q('span', 'ds-list-go', 'Open'));
-  open.addEventListener('click', () => void openDesignChat(row));
-  item.append(open);
-  return item;
-}
-
-/**
- * A design-chat row's action: move the user into that session, then — when the
- * chat has its own readable config — bring up its live window with the dev
- * server rooted at the CHAT's directory (so an isolated `designs/<slug>`
- * workspace serves itself, not the project root). Silent on failure: the chat
- * still opens.
- */
-async function openDesignChat(row: DesignChatRow): Promise<void> {
+  const name = row.name || fileBaseName(row.dir);
+  const record: WorkspaceRecord = { dir: row.dir, name };
+  let result: Awaited<ReturnType<typeof host.startSession>>;
   try {
-    await host.openSession(row.sessionId);
+    result = await host.startSession({
+      providerId: 'design-canvas',
+      id: `workspace:${fileBaseName(row.dir)}`,
+      title: name,
+      url: attachUrl(row.url),
+      text: workspaceOpenPrompt(record),
+      navigation: 'preserve',
+      data: seedSessionData('hi-fi', '', record),
+    });
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not open the design chat: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast({ kind: 'error', message: `Could not start the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
     return;
   }
-  const url = row.config?.url?.trim();
-  if (url) await openProjectWindow({ url }, row.directory || state.directory, false);
+  if (!result.sessionId || result.sent !== 'sent') {
+    const failure = 'failure' in result ? result.failure : undefined;
+    await host.toast({ kind: 'error', message: `The canvas chat could not be started (${result.sent}${failure ? `: ${failure}` : ''}).` });
+    return;
+  }
+  try {
+    await host.storage.set(workspaceStorageKey(result.sessionId)!, record);
+  } catch {
+    /* the session still opens; the map joins on the next refresh */
+  }
+  try {
+    await host.openSession(result.sessionId);
+  } catch (error) {
+    await host.toast({ kind: 'error', message: `The canvas chat could not open. Open it from Your design work. ${error instanceof Error ? error.message : String(error)}` });
+  }
 }
 
 // ---- live window state ----
 
-/**
- * Update the status row's live indicators: the dimmed pick hint. Safe to call
- * from the poll loop.
- */
+/** Update the status row's live indicators. */
 function renderWindowStatus(): void {
   if (hintEl) {
     hintEl.textContent = PICK_HINT;
@@ -3026,39 +2552,117 @@ function renderWindowStatus(): void {
     hintEl.classList.toggle('idle', !pickHintActive(state));
   }
   renderSessionStatus();
+  renderCanvasControls();
 }
 
 /**
- * The compact session line below the toggle row. When the project is NOT ready
- * this is the WHOLE visible section: the one not-set-up line (the toggle and
- * hint are hidden by `renderRow`). When ready it is the design-session line as
- * before. Cheap text update, safe from the poll loop.
+ * The compact session line below the toggle row: this session's workspace and
+ * its Design Mode state.
  */
 function renderSessionStatus(): void {
   if (!sessionLineEl) return;
-  if (!projectReady(state.config)) {
-    sessionLineEl.textContent = NO_PROJECT_CONFIG_MESSAGE;
+  const ws = state.workspace;
+  if (!ws) {
+    sessionLineEl.textContent = NO_WORKSPACE_MESSAGE;
     sessionLineEl.classList.add('off');
     return;
   }
-  sessionLineEl.textContent = designSessionStatus({ modeOn: state.mode.on, configUrl: state.config?.url ?? null });
+  sessionLineEl.textContent = canvasSessionStatus({
+    modeOn: state.mode.on,
+    workspaceDir: ws.dir,
+    wsReady: projectReady(currentConfig()),
+  });
   sessionLineEl.classList.toggle('off', !state.mode.on);
 }
 
 /**
- * Show the interactive row only when the project is ready (has a config with a
- * url). Not ready: hide the toggle bar and the ⌘-click hint, leaving exactly
- * the one not-set-up line — so there is NO clickable control and no way to
- * raise a "no url" toast. Re-run on every poll read, so a config that appears
- * (or is deleted) mid-session flips the section live.
+ * The play/edit toggle, the active-screen dropdown and Focus — all sourced from
+ * `GET /state` (spec §F). They appear only when the workspace is ready and the
+ * canvas reports screens.
+ */
+function renderCanvasControls(): void {
+  const ready = Boolean(state.workspace && projectReady(currentConfig()));
+  const hasScreens = state.liveScreens.length > 0;
+  if (playToggleBtn) {
+    playToggleBtn.hidden = !ready || !hasScreens;
+    if (!playToggleBtn.hidden) {
+      const mode = state.liveMode;
+      playToggleBtn.textContent = mode === 'play' ? 'Play' : 'Edit';
+      playToggleBtn.title = mode === 'play'
+        ? 'Canvas is in play mode — click to switch to edit'
+        : 'Canvas is in edit mode — click to switch to play';
+      playToggleBtn.classList.toggle('on', mode === 'play');
+    }
+  }
+  if (screenSelectEl) {
+    screenSelectEl.hidden = !ready || !hasScreens;
+    if (!screenSelectEl.hidden) {
+      screenSelectEl.replaceChildren();
+      for (const screen of state.liveScreens) {
+        screenSelectEl.append(option(screen.id, screen.title || screen.id));
+      }
+      screenSelectEl.value = state.activeScreen ?? state.liveScreens[0]?.id ?? '';
+      screenSelectEl.title = 'Active screen';
+      screenSelectEl.setAttribute('aria-label', 'Active screen');
+    }
+  }
+  if (focusLiveBtn) {
+    focusLiveBtn.hidden = !(state.mode.on && state.windowOpen);
+  }
+}
+
+/** The play/edit toggle click: `POST /mode` (spec §B), in-memory echo drives the row. */
+async function onPlayToggleClick(): Promise<void> {
+  const next = state.liveMode === 'play' ? 'edit' : 'play';
+  try {
+    const result = await setMode(next);
+    if (result.ok === false && result.error) {
+      setStatus(result.error, 'error');
+    } else {
+      state.liveMode = next;
+      state.mode.canvMode = next;
+      await saveMode();
+    }
+  } catch (error) {
+    setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, 'error');
+  }
+  renderCanvasControls();
+}
+
+/** The active-screen dropdown: `POST /open {dir, screen}` — warm activation, no restart. */
+async function onScreenSelectChange(): Promise<void> {
+  const id = screenSelectEl?.value;
+  const ws = state.workspace;
+  if (!id || !ws) return;
+  try {
+    await openWorkspace({ dir: ws.dir, screen: id });
+    state.activeScreen = id;
+  } catch (error) {
+    setStatus(`Could not switch screens: ${error instanceof Error ? error.message : String(error)}`, 'error');
+  }
+  renderCanvasControls();
+}
+
+/** The Focus action: raise the live canvas window (POST /focus). */
+async function onFocusClick(): Promise<void> {
+  try {
+    await focusLive();
+  } catch {
+    /* the window may be closing; the poll corrects the row */
+  }
+}
+
+/**
+ * Show the interactive canvas row whenever a workspace exists; the row NEVER
+ * falls back to "not set up" — absent workspace, the Start control reads
+ * "Create canvas" (spec §F). Re-run on every poll read so a config that appears
+ * (or is deleted) mid-session flips the row live.
  */
 function renderRow(): void {
-  const ready = projectReady(state.config);
-  if (barEl) barEl.classList.toggle('hidden', !ready);
-  if (hintEl) hintEl.classList.toggle('hidden', !ready);
-  // A readiness flip that hides the interactive row must not drop focus to
-  // `body`: move it to the visible session line.
-  if (!ready && (focusInside(barEl) || focusInside(hintEl))) focusSessionLine();
+  if (barEl) barEl.classList.toggle('hidden', false);
+  if (hintEl) hintEl.classList.toggle('hidden', !projectReady(currentConfig()));
+  // A readiness flip that hides the hint must not drop focus to `body`.
+  if (!projectReady(currentConfig()) && focusInside(hintEl)) focusSessionLine();
   renderServerControl();
   renderWindowStatus();
 }
@@ -3067,13 +2671,18 @@ export async function applyState(stateData: LiveState): Promise<void> {
   state.url = stateData.url;
   state.title = stateData.title;
   state.windowOpen = stateData.windowOpen;
+  if (stateData.mode === 'edit' || stateData.mode === 'play') state.liveMode = stateData.mode;
+  if (stateData.screens !== undefined) state.liveScreens = stateData.screens.map((screen) => ({ ...screen }));
+  state.activeScreen = stateData.activeScreen ?? null;
   if (stateData.lastPick && stateData.pickSeq > state.lastSeq) {
     state.lastSeq = stateData.pickSeq;
-    const pick: TrackedPick = { ...stateData.lastPick, seq: stateData.pickSeq, url: stateData.url, pickedAt: new Date() };
+    const screenState = stateData.lastPickScreen
+      ? state.liveScreens.find((screen) => screen.id === stateData.lastPickScreen)
+      : undefined;
+    const screen: PickScreen | undefined = screenState ? { id: screenState.id, url: screenState.url } : undefined;
+    const pick: TrackedPick = { ...stateData.lastPick, seq: stateData.pickSeq, url: stateData.url, pickedAt: new Date(), screen };
     // Design Mode: a pick IS the instruction context — attach without asking.
-    // Unless another panel owns the bridge right now (the hidden pane `/design`
-    // mounts inside a chat window): it attaches into ITS window's composer, and
-    // `lastSeq` is advanced above so this panel never replays the same pick.
+    // Unless another panel owns the bridge right now.
     if (state.mode.on && !stateData.bridgeActive) void addToChat(pick);
   }
   renderWindowStatus();
@@ -3085,22 +2694,17 @@ export async function applyState(stateData: LiveState): Promise<void> {
   }
 }
 
-/**
- * The user closed the live window. Mirror that into Design Mode: OFF (persisted
- * and reflected in the widget). No window is reopened here.
- */
+/** The user closed the live window. Mirror that into Design Mode: OFF. */
 async function turnModeOffByWindowClose(): Promise<void> {
   if (!state.mode.on) return;
   state.mode.on = false;
   state.pendingOpen = false;
   await saveMode();
   renderModeUi();
-  // The preview window is closed, which is Design Mode going OFF: stop the dev
-  // server too, if it is safe to.
   try {
     await requestDevServerStop();
   } catch {
-    /* a stop failure is surfaced by doStopDevServer's own toast */
+    /* a stop failure is surfaced by its own toast */
   }
 }
 
@@ -3113,7 +2717,7 @@ async function poll(): Promise<void> {
   try {
     await applyState(await getState());
   } catch (error) {
-    setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Live window error: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Live canvas error: ${error instanceof Error ? error.message : String(error)}`, 'error');
   }
   // Keep the server Start/Stop icon honest without blocking the next poll tick.
   void refreshServerStatus();
@@ -3131,12 +2735,7 @@ function renderModeUi(): void {
   renderSessionStatus();
 }
 
-/**
- * What kind of surface a host surface name maps to. Pure, so a test can pin that
- * the chat Work Status row draws the shared row, that the rail panel draws only
- * its calm one-line pointer to the sidebar page, that the page draws the
- * full-screen home, and that nothing else draws anything.
- */
+/** What kind of surface a host surface name maps to. Pure. */
 export type SurfaceKind = 'row' | 'note' | 'page' | 'none';
 
 export function surfaceKind(surface: string): SurfaceKind {
@@ -3146,30 +2745,19 @@ export function surfaceKind(surface: string): SurfaceKind {
   return 'none';
 }
 
-/**
- * Report a frame height to the host, but only for the chat Work Status section,
- * whose frame the host sizes. The rail panel and page own their own height, so a
- * height request there would be meaningless. Never opens a window.
- */
+/** Report a frame height to the host, but only for the chat Work Status section. */
 function setSurfaceHeight(height: number): void {
   if (state.surface !== 'status') return;
-  // A host refusal (teardown, disconnect) must not surface as an unhandled
-  // rejection; the next observed size change reports again — no retry flood.
   void host.setHeight(height).catch(() => {});
 }
 
-/** The row content height already reported to the host, so unchanged sizes are not re-sent. */
+/** The row content height already reported to the host. */
 let reportedStatusHeight = 0;
 /** The ResizeObserver watching the row's content height; a rebuild supersedes it. */
 let statusHeightObserver: ResizeObserver | null = null;
 let statusHeightGeneration = 0;
 
-/**
- * Measure only the content border box (already includes border and padding),
- * plus external vertical margins. Never measure the full-height body/#root:
- * that would feed the host's frame size back into its own height request.
- * The host clamps to 24–320; the row itself provides the overflow scroller.
- */
+/** Measure only the content border box plus external vertical margins. */
 function reportContentHeight(content: HTMLElement, generation: number): void {
   if (content !== statusRoot || generation !== statusHeightGeneration || state.surface !== 'status') return;
   const verticalMargins = (element: HTMLElement): number => {
@@ -3177,7 +2765,6 @@ function reportContentHeight(content: HTMLElement, generation: number): void {
     return (parseFloat(style.marginTop) || 0) + (parseFloat(style.marginBottom) || 0);
   };
   const height = Math.ceil(content.getBoundingClientRect().height + verticalMargins(content) + verticalMargins(document.body));
-  // 0 = not laid out yet; ±1px float jitter is not a real change.
   if (height <= 0 || Math.abs(height - reportedStatusHeight) <= 1) return;
   reportedStatusHeight = height;
   setSurfaceHeight(height);
@@ -3197,28 +2784,40 @@ function observeRowHeight(): void {
   reportContentHeight(content, generation);
 }
 
-
 /**
- * The compact chat Work Status row: Start/Stop and Design Mode with the ⌘-click hint and
- * the one-line session status below. The Brief & options form is gone from the
- * row (user decision, 2026-10-13) — the full creation page keeps its composer
- * and brief field. No address bar and no browser chrome. Building it never
- * opens a window.
+ * The compact chat Work Status row: Start/Stop, Design Mode, the play/edit
+ * toggle, the active-screen dropdown and Focus, plus the ⌘-click hint and the
+ * one-line session status below. Building it never opens a window.
  */
 export function buildRow(root: HTMLElement): void {
   statusRoot = q('div', 'ds-statusmode');
   const bar = q('div', 'ds-rowline');
-  // Preview-dev-server Start/Stop control: left of the Design Mode toggle.
+  // Preview-dev-server Start/Stop control — "Create canvas" before first use.
   serverBtn = q<HTMLButtonElement>('button', 'ds-server-control');
   serverBtn.addEventListener('click', () => void onServerControlClick());
   serverBtn.hidden = true;
   modeToggleBtn = q<HTMLButtonElement>('button', 'primary');
-  // A plain ON/OFF toggle: turning it ON opens the live window (or focuses it
-  // when already open); turning it OFF closes the window (see toggleMode).
+  // A plain ON/OFF toggle: turning it ON opens the live canvas (or focuses it
+  // when already open); OFF closes the window (see toggleMode).
   modeToggleBtn.addEventListener('click', () => {
     void toggleMode(!state.mode.on);
   });
-  bar.append(serverBtn, modeToggleBtn);
+  // The play/edit toggle, sourced from /state (spec §F).
+  // FORK-MERGE: ds-play-toggle / ds-screen-select / ds-focus reuse existing
+  // classes only — a styling pass for the new controls needs styles.css (owned
+  // by the P2 integration phase; not editable from the panel lane).
+  playToggleBtn = q<HTMLButtonElement>('button', 'ds-chip ds-play-toggle');
+  playToggleBtn.hidden = true;
+  playToggleBtn.addEventListener('click', () => void onPlayToggleClick());
+  screenSelectEl = q<HTMLSelectElement>('select', 'ds-screen-select');
+  screenSelectEl.hidden = true;
+  screenSelectEl.addEventListener('change', () => void onScreenSelectChange());
+  focusLiveBtn = q<HTMLButtonElement>('button', 'ds-chip ds-focus');
+  focusLiveBtn.textContent = 'Focus';
+  focusLiveBtn.title = 'Raise the live canvas window';
+  focusLiveBtn.hidden = true;
+  focusLiveBtn.addEventListener('click', () => void onFocusClick());
+  bar.append(serverBtn, modeToggleBtn, playToggleBtn, screenSelectEl, focusLiveBtn);
   barEl = bar;
   sessionLineEl = q('div', 'ds-sessionline');
   hintEl = q('span', 'ds-hintline');
@@ -3233,10 +2832,10 @@ export function buildRow(root: HTMLElement): void {
 }
 
 /**
- * The full-screen sidebar page (surface "page"): the Design Studio creation
- * home. The hero, the composer, the working-directory selector and the idea
- * cards all live under one `renderPage`. Building it never opens a live window;
- * only Send (or Enter) does, through `startNewDesign`.
+ * The full-screen sidebar page (surface "page"): the Design Canvas creation
+ * home. The hero, the composer, the workspace row and the idea cards all live
+ * under one `renderPage`. Building it never opens a live window; only Send (or
+ * Enter) does, through `startNewDesign`.
  */
 function buildPage(root: HTMLElement): void {
   const wrap = q('div', 'ds ds-page');
@@ -3247,13 +2846,8 @@ function buildPage(root: HTMLElement): void {
   referenceLiveEl.setAttribute('aria-atomic', 'true');
   wrap.append(pageBody, referenceLiveEl);
   root.append(wrap);
-  // A click anywhere outside an open dropdown closes it, and Escape closes it
-  // from anywhere in the frame. Registered once; the listeners outlive the
-  // re-rendered DOM.
   window.addEventListener('click', onPageWindowClick);
   window.addEventListener('keydown', onPageKeydown);
-  // Drops explain the pasted-path requirement; they never create guessed refs.
-  // The window-level guards keep a stray drop from navigating the frame.
   wrap.addEventListener('dragenter', onPageDragEnter);
   wrap.addEventListener('dragover', onPageDragOver);
   wrap.addEventListener('dragleave', onPageDragLeave);
@@ -3279,9 +2873,6 @@ function onPageWindowDrop(event: DragEvent): void {
 
 function build(root: HTMLElement): void {
   const kind = surfaceKind(state.surface);
-  // The chat Work Status section draws the thin row; the rail panel draws only
-  // its one-line pointer (the design work lives on the page); the page draws the
-  // full-screen creation home. Any other surface renders nothing.
   if (kind === 'row') {
     buildRow(root);
     return;
@@ -3295,11 +2886,7 @@ function build(root: HTMLElement): void {
   }
 }
 
-/**
- * The rail panel surface: one calm line, nothing else. The real surface is the
- * sidebar page (`/design` and the composer are there); the rail panel keeps a
- * quiet pointer rather than an empty frame. No controls, no live state.
- */
+/** The rail panel surface: one calm line, nothing else. */
 function buildPanelNote(root: HTMLElement): void {
   const wrap = q('div', 'ds ds-panel-note');
   wrap.append(q('p', 'ds-panel-note-line', PANEL_SIDEBAR_HINT));
@@ -3310,9 +2897,9 @@ async function main(): Promise<void> {
   const root = document.getElementById('root');
   if (!root) throw new Error('missing #root');
 
-  // The `/design` resolver: valid on the panel and page surfaces (the ones that
+  // The `/canvas` resolver: valid on the panel and page surfaces (the ones that
   // carry `commands`). Registered once, before the host asks.
-  host.onResolve((request) => resolveDesignCommand(request.args));
+  host.onResolve((request) => resolveCanvasCommand(request.args));
 
   let started = false;
   host.onReady((context: HostReadyContext) => {
@@ -3326,6 +2913,7 @@ async function main(): Promise<void> {
     build(root);
     setStatus('Loading…');
     void loadMode();
+    void loadWorkspace();
     void loadStudioConfig();
     // The row surfaces keep their live state fresh; the page does not poll.
     const kind = surfaceKind(state.surface);
@@ -3335,8 +2923,8 @@ async function main(): Promise<void> {
     }
   });
 
-  // The current session's live snapshot keeps `sessionBusy` fresh: it cancels a
-  // pending stop while the session works and performs it once idle.
+  // The current session's live snapshot keeps `sessionBusy` fresh and re-binds
+  // the workspace when the session changes.
   host.onSession((session) => {
     void applySessionSnapshot(session);
   });
@@ -3347,24 +2935,20 @@ async function main(): Promise<void> {
 
   host.onDirectory((directory) => {
     state.directory = directory;
-    // Keep the last config (and its path) until the fresh read resolves:
-    // nulling it here flickers the whole row hide→show on every directory
-    // event. The stale config is guarded: `currentConfig()` gates the actions,
-    // and the start/stop dir captures keep them targeting the NEW directory.
+    // The workspace is SESSION-bound, not directory-bound; the chat dir only
+    // feeds the attach fallback and the decision 4c detection. Reset the
+    // server-pending flags so a stale action never commits across a switch.
     state.serverStatus = null;
     state.serverPending = false;
     state.serverError = null;
     renderRow();
     rerender();
-    void loadStudioConfig();
   });
 }
 
 /**
- * Test seam: `node --test` has no host, so a test points the panel at a project
- * dir directly instead of replaying an `onReady` context. Mirrors the live
- * `onDirectory` semantics — the same server-state resets, and a generation
- * bump so mid-flight actions recognise the switch.
+ * Test seam: `node --test` has no host, so a test points the panel at a chat
+ * dir directly instead of replaying an `onReady` context.
  */
 export function setProjectDirectory(dir: string | null): void {
   state.directory = dir;
@@ -3372,6 +2956,12 @@ export function setProjectDirectory(dir: string | null): void {
   state.serverStatus = null;
   state.serverPending = false;
   state.serverError = null;
+}
+
+/** Test seam: bind the session's canvas workspace, as if `ws/<id>` was read. */
+export function setWorkspace(workspace: WorkspaceRecord | null): void {
+  state.workspace = workspace;
+  if (workspace) state.configDir = null;
 }
 
 /** Test seams for the unsent page draft, without installing a browser host. */
@@ -3416,22 +3006,17 @@ export function setDesignSystem(id: string | null): void {
   state.pageDesignSystemId = id;
 }
 
-/** Test seam: allow the `/design` resolver without replaying an `onReady` context. */
+/** Test seam: allow the `/canvas` resolver without replaying an `onReady` context. */
 export function allowResolve(value: boolean): void {
   state.resolveAllowed = value;
 }
 
 /** Test seam: run the New-design flow directly. */
-export { startNewDesign, resolveDesignCommand, loadProjects };
+export { startNewDesign, resolveCanvasCommand, loadProjects, loadCanvasWorkspaces };
 
-/** Test seam: the registered projects the last load recorded. */
+/** Test seam: the registered projects the last load recorded (decision 4c). */
 export function getAllProjects(): RegisteredProject[] {
   return [...allProjects];
-}
-
-/** Test seam: pretend the user picked this project in the working-directory selector. */
-export function setSelectedProject(id: string | null): void {
-  state.selectedProjectId = id;
 }
 
 /** Test seam: set the current session's busy flag without a host snapshot. */
@@ -3464,10 +3049,10 @@ export function getStopState(): {
   };
 }
 
-/** Test seam: set the cached config, as if read for the current directory. */
+/** Test seam: set the cached config, as if read for the current workspace. */
 export function setStudioConfig(config: StudioConfig | null): void {
   state.config = config;
-  state.configDir = state.directory;
+  state.configDir = state.workspace?.dir ?? state.directory;
 }
 
 /** Test seam: the Start/Stop control's committed state. */

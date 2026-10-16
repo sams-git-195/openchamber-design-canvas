@@ -1,8 +1,9 @@
 // Focused tests for the picked-element attach chip (panel/attach-dialog.ts).
 // The former attach-dialog mode was removed; what remains is the payload
 // builder every pick path shares, so a chip is identical no matter which
-// window picked the element. The SDK's connectHost needs a `window`, so a
-// minimal shim is installed before importing (same pattern as panel-open).
+// window picked the element — and now carries its Screen (spec §F). The SDK's
+// connectHost needs a `window`, so a minimal shim is installed before
+// importing (same pattern as panel-open).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -28,7 +29,7 @@ test('buildAttachPayload keeps the exact chip shape every pick path shares', () 
   const pickedAt = new Date(1731500000000);
   const chip = attachDialog.buildAttachPayload(PICK, 7, 'http://127.0.0.1:5173/', pickedAt);
   assert.deepEqual(chip, {
-    providerId: 'design-studio',
+    providerId: 'design-canvas',
     id: 'element-7',
     title: '#view-hero > h1',
     url: 'http://127.0.0.1:5173/',
@@ -42,8 +43,23 @@ test('buildAttachPayload keeps the exact chip shape every pick path shares', () 
       url: 'http://127.0.0.1:5173/',
     },
   });
+  assert.match(chip.text!, /^Reference from Design Canvas/);
   assert.match(chip.text!, /#view-hero > h1/);
   assert.equal(chip.data!.selector, chip.title);
+});
+
+test('a pick on a screen carries its Screen line, screen URL and data.screen fields (spec §F)', () => {
+  const pickedAt = new Date(1731500000000);
+  const chip = attachDialog.buildAttachPayload(PICK, 8, 'http://127.0.0.1:5173/', pickedAt, {
+    id: 'checkout',
+    url: 'http://127.0.0.1:5173/checkout.html',
+  });
+  assert.match(chip.text!, /Screen: checkout/);
+  assert.match(chip.text!, /Screen URL: http:\/\/127\.0\.0\.1:5173\/checkout\.html/);
+  const data = chip.data as { screen?: string; screenUrl?: string };
+  assert.equal(data.screen, 'checkout');
+  assert.equal(data.screenUrl, 'http://127.0.0.1:5173/checkout.html');
+  assert.equal(chip.providerId, 'design-canvas');
 });
 
 test('a second pick of the same element gets its own chip id (no dedupe by shape)', () => {

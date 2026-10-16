@@ -148,12 +148,14 @@ export const DESIGN_AUTHORITY = [
   'spacing or type values outside them. A hardcoded value that a token already covers is a defect.',
 ].join(' ');
 
-/** Workspace policy; does not assume existing apps or legacy children are empty. */
+/** The canvas workspace policy: absolute-path discipline and the screens.json protocol (decision 5). */
 export const DESIGN_WORKSPACE_NOTE = [
-  'The selected registered design project itself is the workspace for new design sessions.',
-  'Keep the current session directory: do not create a per-chat child workspace or move the session automatically.',
-  'Inspect and reuse the existing app, design system and .design-studio.json; do not assume the workspace is empty or scaffold over existing work.',
-  'Existing sessions already in legacy child directories stay there unless the user explicitly requests a move.',
+  'The canvas workspace is a Vite multi-page app: every screen is a real HTML page (root-level *.html files) and screens.json lists them.',
+  'To add a screen: write `<id>.html` at the workspace root, then add { "id": "<id>", "file": "<id>.html", "title": "...", "width": 1280, "height": 800 } to the screens array in screens.json (ids are [a-z0-9-], unique; width/height 200–8192).',
+  'Keep index.html as a meta-refresh redirect to home.html so `vite build` keeps a valid default entry.',
+  'Link between screens with plain <a href="other.html"> links; never create screens outside the workspace root.',
+  'The chat session does NOT run inside the workspace: use the workspace absolute path in every file write, edit and bash call.',
+  'Inspect and reuse the existing app, design system and .design-studio.json; do not scaffold over existing work.',
 ].join(' ');
 
 /** The standing mandate to verify, independent of any single edit. */

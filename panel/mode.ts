@@ -1,22 +1,27 @@
-// Design Mode: the switch that turns a chat session into a design session.
+// Design Mode: the switch that turns a chat session into a canvas session.
 //
 // It lives in three native hooks, because a guest cannot re-skin the host chat:
-//  · `/design [on|off|<type>] [brief…]` — a slash command resolved by the panel;
-//    toggling returns a context chip on the composer (the "design system is on"
-//    signal the model sees when the user sends).
+//  · `/canvas [on|off|play|edit|<type>] [brief…]` — a slash command resolved by
+//    the panel; toggling returns a context chip on the composer (the "canvas is
+//    on" signal the model sees when the user sends).
 //  · a Work Status section (surface "status") rendered inside the chat — the
-//    visible "the chat changed" part: the micro-brief widget. A guest cannot
-//    inject chat messages, so the widget configures the session and fills the
-//    composer with the first message.
-//  · per-session mode persisted in host storage, keyed by session id. Starting
-//    a design session seeds it, so the new session opens with the widget ON.
+//    visible "the chat changed" part.
+//  · per-session mode and workspace persisted in host storage, keyed by session
+//    id (`mode/<id>` and `ws/<id>`): starting a canvas session seeds them, so
+//    the new session opens with the widget ON and its workspace bound.
 import type { AttachIssueRequest } from '@openchamber/sdk';
 import { DIRECTIONS, type DirectionId } from './craft.ts';
-import { VERIFY_PROTOCOL } from '../shared/harness-text.ts';
+import { DESIGN_AUTHORITY, DESIGN_WORKSPACE_NOTE, IDENTITY, VERIFY_PROTOCOL, defaultCraft } from '../shared/harness-text.ts';
 import { DESIGN_SYSTEMS, type DesignSystemPreset } from '../shared/design-systems.ts';
-import type { StudioConfig } from './api.ts';
+import type { ScreenInfo, StudioConfig, WorkspaceRecord } from './api.ts';
 
 export { VERIFY_PROTOCOL };
+
+/** The text cap every attach / start-session payload must respect (SDK). */
+export const GUEST_ATTACH_TEXT_MAX = 16000;
+
+/** The cap on screens listed in the mode chip (spec §F chip budget, audit #16). */
+export const MODE_CHIP_SCREEN_CAP = 40;
 
 export type DesignType = 'wireframe' | 'hi-fi' | 'prototype' | 'deck' | 'custom';
 
@@ -40,7 +45,7 @@ export const FIDELITY_HINT: Record<Fidelity, string> = {
   interactive: 'hi-fi plus working interactions and transitions',
 };
 
-/** Select options shared by the wizard and the in-chat widget. English only. */
+/** Select options shared by the page composer. English only. */
 export const TYPE_OPTIONS: Array<[DesignType, string]> = [
   ['wireframe', 'Wireframe'],
   ['hi-fi', 'Hi-fi screens'],
@@ -120,7 +125,7 @@ const SWATCH_TOKEN_ORDER = [
 /**
  * Whether a token value can be painted as a swatch on its own: a literal colour,
  * not a `var(...)` indirection or a `color-mix(...)` that only resolves inside
- * the preset. Keeps the strip honest — an unresolvable token is left out.
+ * the preset.
  */
 export function isColorTokenValue(value: string): boolean {
   const text = value.trim().toLowerCase();
@@ -132,8 +137,7 @@ export function isColorTokenValue(value: string): boolean {
 
 /**
  * A few colour swatches from a preset's tokens, in a deliberate order and capped
- * so the strip stays a glance. The swatch takes the token colour; the strip's own
- * container stays OpenChamber.
+ * so the strip stays a glance.
  */
 export function designSystemSwatches(preset: DesignSystemPreset, max = 8): Array<{ name: string; value: string }> {
   const preferred = SWATCH_TOKEN_ORDER.filter((name) => isColorTokenValue(preset.tokens[name] ?? ''));
@@ -143,27 +147,34 @@ export function designSystemSwatches(preset: DesignSystemPreset, max = 8): Array
   return [...preferred, ...extras].slice(0, max).map((name) => ({ name, value: preset.tokens[name]! }));
 }
 
+/** The canvas mode: edit (pick elements) or play (click-throughs work). */
+export type CanvasMode = 'edit' | 'play';
+
 export type DesignMode = {
   on: boolean;
   type: DesignType;
   direction: 'auto' | DirectionId;
   fidelity: Fidelity;
+  canvMode: CanvasMode;
   brief: string;
 };
 
-export const DEFAULT_MODE: DesignMode = { on: false, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: '' };
+export const DEFAULT_MODE: DesignMode = { on: false, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' };
 
 export type ParsedDesignArgs = {
   on: boolean;
+  /** The explicit mode `play`/`edit` args carry, or null (keep the current mode). */
+  mode: CanvasMode | null;
   type: DesignType | null;
   brief: string;
 };
 
 /**
- * `/design [args]`:
- *   ""          → on, keep the current type
+ * `/canvas [args]`:
+ *   ""          → on, keep the current type and mode
  *   "off"       → off
- *   "on …"      → on, keep the current type
+ *   "on …"      → on, keep the current type and mode
+ *   "play|edit" → on with that canvas mode (a brief may follow)
  *   "<type> …"  → on with that type
  *   anything else → on, current type, whole text is the brief
  */
@@ -171,26 +182,30 @@ export function parseDesignArgs(raw: string): ParsedDesignArgs {
   const text = raw.trim();
   const [first = '', ...rest] = text.split(/\s+/);
   const brief = rest.join(' ');
-  if (/^off$/i.test(first)) return { on: false, type: null, brief };
-  if (first === '' || /^on$/i.test(first)) return { on: true, type: null, brief };
+  if (/^off$/i.test(first)) return { on: false, mode: null, type: null, brief };
+  if (/^on$/i.test(first)) return { on: true, mode: null, type: null, brief };
+  if (/^play$/i.test(first)) return { on: true, mode: 'play', type: null, brief };
+  if (/^edit$/i.test(first)) return { on: true, mode: 'edit', type: null, brief };
+  if (first === '') return { on: true, mode: null, type: null, brief };
   const type = DESIGN_TYPES.find((candidate) => candidate === first.toLowerCase());
-  if (type) return { on: true, type, brief };
-  return { on: true, type: null, brief: text };
+  if (type) return { on: true, mode: null, type, brief };
+  return { on: true, mode: null, type: null, brief: text };
 }
 
 export function modeStorageKey(sessionId: string | null): string | null {
   return sessionId ? `mode/${sessionId}` : null;
 }
 
+/** The per-session workspace key: `ws/<sessionId>` = `{dir, name}` (decision 3). */
+export function workspaceStorageKey(sessionId: string | null): string | null {
+  return sessionId ? `ws/${sessionId}` : null;
+}
+
 // ---- the persistent design marker ----
 //
-// The `mode/<id>` key says whether Design Mode is ON *right now*; turning the
-// mode off overwrites it with `{on:false}`, so "Your design work" forgets a
-// chat the moment its window closes. This marker is the opposite: written once
-// when Design Mode turns ON for a session and NEVER cleared, so a chat stays a
-// design chat for good. It is per-device, like the mode key, so it is only one
-// of the three signals `isDesignSession` reads (the session's own mode chip is
-// the cross-device one).
+// The `mode/<id>` key says whether Design Mode is ON *right now*; the marker is
+// the opposite: written once when Design Mode turns ON for a session and NEVER
+// cleared, so a canvas chat stays recognizable even when the mode is off.
 
 /** The host storage key holding a session's permanent design marker, or null. */
 export function designMarkerKey(sessionId: string | null): string | null {
@@ -204,7 +219,7 @@ export function designMarkerValue(at: Date = new Date()): { on: true; at: string
 
 /**
  * Whether a stored value is our persistent design marker. Reads `on` loosely, so
- * any extra fields (like `at`) never invalidate it. Pure.
+ * any extra fields (like `at`) never invalidate it.
  */
 export function isDesignMarker(value: unknown): boolean {
   return Boolean(value && typeof value === 'object' && (value as { on?: unknown }).on === true);
@@ -212,9 +227,7 @@ export function isDesignMarker(value: unknown): boolean {
 
 /**
  * The inverse of `designMarkerKey`: the session id a `design/<id>` host storage
- * key refers to, or null for any other key. DOM-free, so the chats scan can
- * parse the keys `host.storage.keys()` returns. A test pins it against
- * `designMarkerKey` so the `design/` prefix cannot drift.
+ * key refers to, or null for any other key.
  */
 export function designSessionIdFromKey(key: string): string | null {
   const prefix = 'design/';
@@ -223,7 +236,7 @@ export function designSessionIdFromKey(key: string): string | null {
 
 /**
  * Every `attach` / `start-session` payload must carry an http(s) URL — the host
- * rejects anything else with "URL must be http or https.". The design session
+ * rejects anything else with "URL must be http or https.". The canvas session
  * has no real page yet, so fall back to a placeholder that the chips can show.
  */
 export const PLACEHOLDER_URL = 'https://design.local/session';
@@ -238,7 +251,7 @@ export function isHttpUrl(value: string | undefined): boolean {
   }
 }
 
-/** A URL safe to send to the host: the project's when valid, a placeholder otherwise. */
+/** A URL safe to send to the host: the workspace's when valid, a placeholder otherwise. */
 export function attachUrl(value: string | undefined): string {
   return isHttpUrl(value) ? (value as string) : PLACEHOLDER_URL;
 }
@@ -250,9 +263,9 @@ export function fileBaseName(path: string): string {
 }
 
 /**
- * The project's own http(s) url from `.design-studio.json`, or null. Every
+ * The workspace's own http(s) url from `.design-studio.json`, or null. Every
  * `attach` chip must carry an http(s) url (a hard host rule), so this is the
- * single gate the composer's `+` sources consult. Pure.
+ * single gate the composer's `+` sources consult.
  */
 export function projectHttpUrl(config: StudioConfig | null | undefined): string | null {
   const url = config?.url?.trim();
@@ -261,56 +274,51 @@ export function projectHttpUrl(config: StudioConfig | null | undefined): string 
 
 /**
  * Whether the `+` attach control can offer anything at all: a source is attachable
- * only when the project has an http(s) url, so with none there is no `+` to show
- * (never a `+` that does nothing). Pure, shared with the composer and a test.
+ * only when the workspace has an http(s) url.
  */
 export function attachAvailable(config: StudioConfig | null | undefined): boolean {
   return projectHttpUrl(config) !== null;
 }
 
 /**
- * The chat chip for a project reference. `url` must already be http(s) — callers
- * gate on `projectHttpUrl`. The id is the registered project id when there is one,
- * else the directory's basename, so a second reference replaces the first.
+ * The chat chip for a workspace reference. `url` must already be http(s) — callers
+ * gate on `projectHttpUrl`. The id is the registered project id when there is one
+ * (decision 4c), else the directory's basename, so a second reference replaces
+ * the first.
  */
 export function projectReferenceChip(input: { projectId?: string | null; dir: string; name: string; url: string }): AttachIssueRequest {
   const handle = input.projectId?.trim() || fileBaseName(input.dir);
   return {
-    providerId: 'design-studio',
+    providerId: 'design-canvas',
     id: `project-${handle}`.slice(0, 110),
     title: input.name,
     url: input.url,
-    text: `Project reference: ${input.dir}`,
+    text: `Workspace reference: ${input.dir}`,
   };
 }
 
 /**
  * The chat chip for a FILE reference, built from a PATH the user gave — a file
- * dropped onto the page (its `File.name`, the only thing a dropped file carries
- * into the guest frame) or a path pasted into the `+` panel. The file's own url
- * is the PROJECT's url (files have none of their own), the id and title are the
- * basename, so the same file replaces its own chip instead of stacking. Nothing
- * is uploaded — a reference the agent reads from the project, never the file
- * itself. `url` must be http(s).
+ * dropped onto the page or a path pasted into the `+` panel. The file's own url
+ * is the WORKSPACE's url; the id and title are the basename, so the same file
+ * replaces its own chip instead of stacking. Nothing is uploaded — a reference
+ * the agent reads from the workspace. `url` must be http(s).
  */
 export function fileReferenceChip(input: { path: string; url: string; dropped?: boolean }): AttachIssueRequest {
   const base = fileBaseName(input.path);
   return {
-    providerId: 'design-studio',
+    providerId: 'design-canvas',
     id: `file-${base}`.slice(0, 128),
     title: base,
     url: input.url,
     text: input.dropped
-      ? `File reference: ${base} (dropped into Design Studio)`
+      ? `File reference: ${base} (dropped into Design Canvas)`
       : `File reference: ${input.path}`,
   };
 }
 
 /**
  * The next index when an arrow key walks a popover's list, wrapping at both ends.
- * A `current` of -1 (nothing focused yet) enters the list from the matching end.
- * Pure, so the one keyboard contract both pickers share is unit-testable without
- * a DOM.
  */
 export function popoverStep(current: number, count: number, delta: number): number {
   if (count <= 0) return -1;
@@ -318,20 +326,25 @@ export function popoverStep(current: number, count: number, delta: number): numb
   return (current + delta + count) % count;
 }
 
-/** Storage payload for a design session that was started with the mode ON. */
-export function seedModeValue(type: DesignType, brief: string): Pick<DesignMode, 'on' | 'type' | 'brief'> {
-  return { on: true, type, brief: brief.slice(0, 2000) };
+/** Storage payload for a canvas session that was started with the mode ON. */
+export function seedModeValue(type: DesignType, brief: string, canvMode: CanvasMode = 'edit'): Pick<DesignMode, 'on' | 'type' | 'brief' | 'canvMode'> {
+  return { on: true, type, brief: brief.slice(0, 2000), canvMode };
 }
 
 /**
- * The `data` payload a page-started design session carries on its `startSession`
+ * The `data` payload a page-started canvas session carries on its `startSession`
  * request, shaped exactly like the mode chip's `data` (`buildModeChip`): the
  * session record echoes it back as `items[].data`, where `isModeChipData` reads
- * `data.mode.on` — so a session started from the page is a design chat even when
+ * `data.mode.on` — so a session started from the page is a canvas chat even when
  * the post-session storage writes lose the race against the frame teardown.
  */
-export function seedSessionData(type: DesignType, brief: string): { mode: Pick<DesignMode, 'on' | 'type' | 'brief'> } {
-  return { mode: seedModeValue(type, brief) };
+export function seedSessionData(
+  type: DesignType,
+  brief: string,
+  workspace: WorkspaceRecord | null = null,
+  canvMode: CanvasMode = 'edit',
+): { mode: Pick<DesignMode, 'on' | 'type' | 'brief' | 'canvMode'>; workspace: WorkspaceRecord | null } {
+  return { mode: seedModeValue(type, brief, canvMode), workspace };
 }
 
 /** Map a `.design-studio.json` `type` onto a valid DesignType for the widget. */
@@ -351,24 +364,30 @@ export type DesignBriefSpec = {
   brief: string;
   /**
    * The chosen design-system preset id (see shared/design-systems.ts), or null /
-   * omitted for "No design system". Names the system in the prompt and travels
-   * into `/scaffold`.
+   * omitted for "No design system".
    */
   designSystemId?: string | null;
 };
 
 /**
- * The bounded verification-loop contract, appended to every prompt that asks
- * the agent to build or edit. Now defined in `shared/harness-text.ts` (the single
- * source of truth shared with the service) and re-exported here for the panel.
+ * The workspace rule every prompt repeats (decision 4a): the absolute path is
+ * the ONLY place design files are written; every edit/write/bash call uses it.
  */
+export function workspacePathRule(dir: string): string {
+  return [
+    `The workspace's absolute path is ${JSON.stringify(dir)} — it is the ONLY place design files are written.`,
+    `Use that absolute path in EVERY file write, edit and bash call you make, because the chat session does NOT run inside the workspace directory.`,
+    `Never write design files relative to the chat's own directory, and never create another workspace folder.`,
+  ].join(' ');
+}
 
 /**
- * The session's first message: what we are making and under which rules.
- * With a `.design-studio.json` the project already exists — open and edit it.
- * Without one, the agent scaffolds the project and writes the config itself.
+ * The session's first message: what we are making and under which rules, with
+ * the absolute workspace path front and centre (decision 4a). The full craft
+ * rulebook ships HERE — the mode chip carries only the trimmed rules
+ * (chip budget, audit #16).
  */
-export function designSessionPrompt(spec: DesignBriefSpec, config: StudioConfig | null): string {
+export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceRecord | null): string {
   const brief = spec.brief.trim();
   const preset = findDesignSystem(spec.designSystemId);
   const lines: string[] = [
@@ -383,53 +402,116 @@ export function designSessionPrompt(spec: DesignBriefSpec, config: StudioConfig 
     );
   }
   lines.push('');
-  if (config) {
+  if (workspace) {
     lines.push(
-      `Project: ${config.name ?? '(unnamed)'}${config.url ? ` at ${config.url}` : ''}.`,
-      config.url ? 'Open it in the Design Studio browser before anything else.' : 'Open the project in the Design Studio browser before anything else.',
-      'Design system: the project\'s DESIGN.md / tokens.css are authoritative; keep every screen inside them.',
+      `Design Canvas workspace: ${workspace.dir}`,
+      workspacePathRule(workspace.dir),
+      '',
+      DESIGN_WORKSPACE_NOTE,
     );
   } else {
-    lines.push(
-      'No .design-studio.json yet — create the project and its design system as part of this first build:',
-      '1. Scaffold the project for this type: create the files and scripts it needs (for prototype/interactive, a real app with a dev server; for a deck, HTML slides).',
-      '2. Write `.design-studio.json` at the project root: { "version": 1, "name": "...", "type": "...", "url": "<the URL it will be served on>", "command": "<dev command>", "harness": { "direction": "...", "fidelity": "..." } }.',
-      '3. Install dependencies and start it BOUND TO ALL INTERFACES (for Vite: `vite --host`), then report the URL. The in-app headless browser resolves localhost to IPv4, so an IPv6-only server shows "This site can\'t be reached".',
-      'Keep every screen inside DESIGN.md / tokens.css once created.',
-    );
+    lines.push('Design Canvas workspace: created by the Design Canvas service before this prompt (ask if the path is missing).');
   }
   lines.push(
-    'Workflow: the user points at elements in the live browser; each click arrives as a reference chip. Apply what it asks for and keep the system consistent.',
+    '',
+    'Design system authority: DESIGN.md and tokens.css (when present) are the workspace design system — follow them over any conflicting instinct.',
+    '',
+    defaultCraft(),
+  );
+  lines.push(
+    '',
+    'Workflow: in the live canvas the user picks elements; each pick arrives as a reference chip with its screen id. Apply what it asks for and keep the system consistent.',
     '',
     VERIFY_PROTOCOL,
   );
   return lines.join('\n');
 }
 
-/** The chip the composer shows while Design Mode is on. Same id → replaces itself. */
-export function buildModeChip(sessionId: string | null, mode: DesignMode, config: StudioConfig | null): AttachIssueRequest {
+/**
+ * The prompt a workspace row's "Open" action sends when the workspace has no
+ * session yet: open (or re-open) the canvas workspace at its absolute path.
+ */
+export function workspaceOpenPrompt(workspace: WorkspaceRecord): string {
+  return [
+    `Design Canvas workspace: ${workspace.dir}`,
+    workspacePathRule(workspace.dir),
+    '',
+    DESIGN_WORKSPACE_NOTE,
+    '',
+    'Open the Design Canvas browser and reuse what is already there; the user will point at elements to change.',
+    '',
+    IDENTITY,
+    '',
+    DESIGN_AUTHORITY,
+    '',
+    VERIFY_PROTOCOL,
+  ].join('\n');
+}
+
+/**
+ * The chip the composer shows while Design Mode is on. Same id → replaces itself.
+ * Chip budget (audit #16), in order: mode state → workspace path + screens
+ * protocol → screens id/URL list (cap 40) → TRIMMED rules (IDENTITY +
+ * design-system authority + VERIFY_PROTOCOL only — the craft rulebook ships via
+ * `designSessionPrompt` instead). Text is capped at `GUEST_ATTACH_TEXT_MAX`.
+ */
+export function buildModeChip(
+  sessionId: string | null,
+  mode: DesignMode,
+  workspace: WorkspaceRecord | null,
+  screens: ReadonlyArray<Pick<ScreenInfo, 'id' | 'file' | 'title'>> = [],
+  workspaceUrl?: string | null,
+): AttachIssueRequest {
   const id = `design-mode-${(sessionId || 'adhoc').slice(0, 110)}`;
-  const lines = [
+  const lines: string[] = [
     'Design Mode: ON',
+    `Canvas mode: ${mode.canvMode}${mode.canvMode === 'edit' ? ' — clicking an element sends a pick chip' : ' — clicks and links drive the screens'}`,
     `Artifact type: ${mode.type} — ${TYPE_HINT[mode.type]}`,
     `Visual direction: ${directionLabel(mode.direction)} · Fidelity: ${mode.fidelity}`,
     mode.brief ? `Brief: ${mode.brief}` : 'Brief: the user will say or type it next.',
-    config
-      ? `Project: ${config.name ?? '(unnamed)'}${config.url ? ` · ${config.url}` : ''} · configured type: ${config.type ?? mode.type}`
-      : 'Project: no .design-studio.json yet — scaffold the project and write one.',
-    'Design system: DESIGN.md and tokens.css are authoritative when present; keep every screen inside them.',
-    'Workflow: the user clicks elements in the live browser; each click arrives as a reference chip. Apply the change they ask for and keep the system consistent.',
-    VERIFY_PROTOCOL,
   ];
+  if (workspace) {
+    lines.push(
+      `Workspace: ${workspace.dir}`,
+      workspacePathRule(workspace.dir),
+      '',
+      DESIGN_WORKSPACE_NOTE,
+    );
+  } else {
+    lines.push('Workspace: the Design Canvas service creates it on /canvas — do not write design files anywhere else.');
+  }
+  if (screens.length > 0) {
+    const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);
+    lines.push(`Screens (${screens.length}):`);
+    for (const screen of shown) lines.push(`- ${screen.id} · ${screen.title || screen.file} · ${screen.file}`);
+    if (screens.length > MODE_CHIP_SCREEN_CAP) {
+      lines.push(`… ${screens.length - MODE_CHIP_SCREEN_CAP} more — every screen is reachable through the canvas; the full registry is screens.json at the workspace root.`);
+    }
+  } else {
+    lines.push('Screens: none yet — add a screen by writing `<file>.html` and adding `{id, file, title, width, height}` to screens.json at the workspace root.');
+  }
+  lines.push('', IDENTITY, '', DESIGN_AUTHORITY, '', VERIFY_PROTOCOL);
   return {
-    providerId: 'design-studio',
+    providerId: 'design-canvas',
     id,
     title: `Design Mode · ${mode.type}`,
-    url: attachUrl(config?.url),
-    text: lines.join('\n').slice(0, 16000),
+    url: attachUrl(workspaceUrl ?? undefined),
+    text: lines.join('\n').slice(0, GUEST_ATTACH_TEXT_MAX),
     data: {
-      mode: { on: true, type: mode.type, direction: mode.direction, fidelity: mode.fidelity, brief: mode.brief.slice(0, 2000) },
-      project: config ? { name: config.name ?? null, type: config.type ?? null, url: config.url ?? null } : null,
+      mode: {
+        on: true,
+        type: mode.type,
+        direction: mode.direction,
+        fidelity: mode.fidelity,
+        canvMode: mode.canvMode,
+        brief: mode.brief.slice(0, 2000),
+      },
+      workspace: workspace ? { dir: workspace.dir, name: workspace.name } : null,
+      screens: screens.slice(0, MODE_CHIP_SCREEN_CAP).map((screen) => ({
+        id: screen.id,
+        file: screen.file,
+        title: screen.title,
+      })),
     },
   };
 }
