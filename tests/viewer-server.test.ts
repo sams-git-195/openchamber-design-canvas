@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import { request } from 'node:http';
 const modulePath = '../service/viewer-server.ts';
 const viewer = await import(modulePath).catch(() => null);
+const config = { screens: [{ id: 'home', url: 'http://localhost:5173/', width: 1280, height: 800, title: 'Home' }], viewport: { width: 1280, height: 800 }, mode: 'edit' as const };
 test('private viewer serves only its capability HTML with exact Host/method and restrictive headers', async () => {
   assert.ok(viewer, 'private viewer server must exist');
-  const server = await viewer.startViewerServer({url:'http://localhost:5173/',pages:[],viewport:{width:1280,height:800}});
+  const server = await viewer.startViewerServer(config);
   try {
     const response = await fetch(server.url), html = await response.text();
     assert.equal(response.status,200);
+    assert.match(html, /data-screen="home"/);
+    assert.doesNotMatch(html, /id="preview"/);
     assert.equal(response.headers.get('referrer-policy'),'no-referrer');
     assert.match(response.headers.get('content-security-policy') ?? '', /script-src 'sha256-/);
     assert.match(response.headers.get('content-security-policy') ?? '', /frame-src http: https:/);

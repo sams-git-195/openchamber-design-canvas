@@ -1,6 +1,6 @@
 import { useSyncExternalStore, type FocusEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, CircleAlert, CircleCheck, Hand, LoaderCircle, Minus, Palette, Plus, TriangleAlert, type LucideIcon } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, CircleAlert, CircleCheck, Frame, Hand, LoaderCircle, Minus, Palette, Pencil, Play, Plus, TriangleAlert, type LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Toggle } from '@/components/ui/toggle';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
@@ -29,6 +29,20 @@ export function revealControl(viewport: HTMLElement, control: HTMLElement): void
   const ringRoom = 4;
   if (box.left < clip.left + ringRoom) viewport.scrollLeft -= clip.left + ringRoom - box.left;
   else if (box.right > clip.right - ringRoom) viewport.scrollLeft += box.right - clip.right + ringRoom;
+}
+
+/**
+ * The toolbar never flips the shell mode locally: it posts {type:'mode-request'}
+ * through the controller and the service confirms by pushing __dsCanvas.setMode.
+ * Base UI hands an array even in single-selection mode. Empty means no change.
+ */
+export function requestMode(values: readonly string[], bridge: ToolbarBridge): boolean {
+  const state = bridge.getSnapshot();
+  if (!state.ready || state.capturing || values.length !== 1) return false;
+  const mode = values[0];
+  if (mode !== 'edit' && mode !== 'play') return false;
+  bridge.setMode(mode);
+  return true;
 }
 
 function cameraAvailable(state: ToolbarState): boolean {
@@ -75,7 +89,7 @@ export function Toolbar({ bridge }: { bridge: ToolbarBridge }) {
   const cameraReason = state.capturing ? 'Capture in progress. Controls are temporarily unavailable.' : !state.ready ? 'The preview is not ready.' : state.layoutMode === 'fit' ? 'Fit uses native page scrolling. Camera zoom and Pan are unavailable.' : '';
   const activePage = state.pages.find((page) => page.url === state.currentUrl);
   const title = activePage?.label || state.currentTitle || 'Preview';
-  const statusLabel = state.capturing ? 'Capturing preview' : state.statusState === 'ready' ? 'Preview ready' : state.statusState === 'loading' ? 'Loading preview' : state.statusState === 'empty' ? 'No preview page available' : 'Preview failed';
+  const statusLabel = state.capturing ? 'Capturing preview' : state.statusState === 'ready' ? 'Preview ready' : state.statusState === 'loading' ? 'Loading preview' : state.statusState === 'empty' ? 'No screens on this canvas' : 'Preview failed';
   const Status = state.capturing || state.statusState === 'loading' ? LoaderCircle : state.statusState === 'ready' ? CircleCheck : CircleAlert;
   const percentage = Number.isFinite(state.scale) ? `${Math.round(state.scale * 100)}%` : '—';
   const selectedPreset = state.preset === 'custom' ? [] : [state.preset];
@@ -86,8 +100,22 @@ export function Toolbar({ bridge }: { bridge: ToolbarBridge }) {
   const actCamera = (action: () => void) => { if (cameraAvailable(bridge.getSnapshot())) action(); };
 
   return <TooltipProvider>
-    <div role="toolbar" aria-label="Design Studio preview controls" id="stock-toolbar-scroll" className="flex h-10 w-full shrink-0 flex-nowrap items-center gap-2 overflow-x-auto overflow-y-hidden px-2" onFocusCapture={onFocus}>
-      <InformationIcon icon={Palette} label="Design Studio" />
+    <div role="toolbar" aria-label="Design Canvas preview controls" id="stock-toolbar-scroll" className="flex h-10 w-full shrink-0 flex-nowrap items-center gap-2 overflow-x-auto overflow-y-hidden px-2" onFocusCapture={onFocus}>
+      <InformationIcon icon={Palette} label="Design Canvas" />
+      <Hint text={cameraReason || (state.mode === 'edit' ? 'Edit mode: clicking a screen picks that element for the chat' : 'Play mode: screens accept real interaction')}>
+        <ToggleGroup aria-label="Interaction mode" variant="outline" size="sm" spacing={0} multiple={false} value={[state.mode]} onValueChange={(values) => requestMode(values, bridge)} disabled={disabled} className="shrink-0">
+          <ToggleGroupItem value="edit" aria-label="Edit"><Pencil aria-hidden="true" />Edit</ToggleGroupItem>
+          <ToggleGroupItem value="play" aria-label="Play"><Play aria-hidden="true" />Play</ToggleGroupItem>
+        </ToggleGroup>
+      </Hint>
+      {state.screens.length > 0 ? <div role="group" aria-label="Screens" className="flex shrink-0 items-center gap-1">
+        {state.screens.map((screen) => <Button key={screen.id} size="sm" variant={screen.id === state.active ? 'secondary' : 'ghost'} aria-pressed={screen.id === state.active} disabled={state.capturing} title={`${screen.title} · ${screen.width} × ${screen.height}`} onClick={() => { if (!bridge.getSnapshot().capturing) bridge.activateScreen(screen.id); }}>
+          {screen.state === 'error' ? <CircleAlert aria-hidden="true" /> : screen.state === 'loading' ? <LoaderCircle aria-hidden="true" className="animate-spin" /> : null}{screen.title}
+        </Button>)}
+      </div> : null}
+      <Hint text={cameraReason || 'Fit all screens'}>
+        <Button id="fit-all" variant="ghost" size="icon-sm" aria-label="Fit all screens" disabled={disabled} onClick={() => { if (!bridge.getSnapshot().capturing && bridge.getSnapshot().ready) bridge.fitAll(); }}><Frame aria-hidden="true" /></Button>
+      </Hint>
       {/* modal={false}: a modal menu disables pointer interactions on outside
           elements, which would make clicks/touches on the live artifact never
           reach the preview — artifact dismissal (pointerdown → dismiss) is how
