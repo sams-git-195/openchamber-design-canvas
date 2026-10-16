@@ -15,7 +15,7 @@ artboards; edit mode picks elements into the chat; play mode makes click-through
 | 5 | **Screens are real HTML pages.** A workspace is a Vite multi-page app (dev server per workspace, same port machinery). A screen = `{id, file, title, width, height}`. New `screens.json` at workspace root is the registry; the agent adds a screen by writing `<file>.html` + updating `screens.json`; each screen URL = `<config.url><file>`. Inter-screen links are plain `<a href="other.html">` (work in play mode). |
 | 6 | **Canvas = real Chrome window, N artboards.** Extend the existing viewer shell (service/viewer-ui.ts + viewer-client/src/canvas-controller.js): one `#camera` containing N `<section data-screen><header…><iframe data-ds-screen=ID></section>` artboards laid out in an auto grid, each scaled like today, whole camera pannable/zoomable (wheel/Ctrl+wheel/space/H/arrows all already exist in canvas-controller.js:89-146). Fit-all button + per-screen focus/zoom. |
 | 7 | **Modes.** `edit` (default when Design Mode on): iframes get `pointer-events:none`; per-artboard header shows title+size; a Ctrl/Cmd-click (or plain click in edit) on an artboard picks the element under the point → existing pick→`host.attach` chip path (panel/main.ts:3066-3086,829-836). `play`: pointer-events auto, headers dim; clicks and in-app links drive the screen itself; a screen navigating updates its artboard (reuse `changed` event, browser.ts:1063-1082,1256-1268). |
-| 8 | **Windows-first runtime** (user is on Win11): fix every POSIX-only process/path assumption (Phase 0 list below). `DS_CHROME_PATH` auto-detected; env override kept. |
+| 8 | **Cross-platform runtime** (must work on Windows, macOS, and Linux; dev host is Win11): every OS-specific behavior gets a per-platform branch — nothing POSIX-only may remain un-branched and nothing Windows-only may break macOS/Linux. `DS_CHROME_PATH` env override kept; auto-discovery per OS (see G). |
 | 9 | Verify gates per screen: deferred to integration phase; fork v1 keeps single-active-screen verify via `browser.getProbe(screen?)`. |
 | 10 | Out of scope v1: connectors/flow arrows between artboards, mini-chat bridge, VSCode/mobile, per-screen verify history. |
 
@@ -76,17 +76,19 @@ Controller API (canvas-controller.js keeps old names where semantics survive):
 - Pick chip payload (panel/attach-dialog.ts): include `Screen: <id>` line + the screen url.
 - Keep dead files dead (panel/compose.ts, settings.ts, tokens.ts unused).
 
-### G. Windows portability (Phase 0 — before D/E work)
+### G. Cross-platform portability (Phase 0 — before D/E work)
+Rule: **no branch may be Windows-only.** Existing POSIX code paths stay intact and become the darwin/linux behavior; win32 gets an equivalent; Linux must be explicitly handled everywhere OS detection appears.
 | Fix | Where |
 |---|---|
-| Chrome default: `DS_CHROME_PATH` → probe `C:\Program Files\Google\Chrome\Application\chrome.exe`, `(x86)`, `%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`; posix defaults unchanged | browser.ts:28-29 |
-| Orphan reaper: `ps -ax` → `tasklist /FO CSV /FI "IMAGENAME eq chrome.exe"` + parse `--user-data-dir=ds-chrome-` in wmic-less way: enumerate via `Get-CimInstance` powershell fallback; skip reaping gracefully if unavailable | browser.ts:816-858 |
-| Dev-server identity/stop: POSIX pgid+`ps lstart` → on win32 record `{pid, port, cmdish}` and stop via `taskkill /PID <pid> /T /F` gated on port-owner check (`Get-NetTCPConnection -LocalPort`) ; never kill unverified pid | project-server.ts:258-311, 278-300, 333-393 |
-| `spawn('npm', {shell:false})` on win32 → `spawn(process.env.ComSpec?\u0022npm.cmd\u0022)` with shell:false, or shell:true | scaffold.ts:544 |
-| `process.env.TMPDIR ?? '/tmp'` → `os.tmpdir()` | scripts/build-viewer.mjs:14 |
+| Chrome default per OS: `DS_CHROME_PATH` env wins on all platforms; win32 probes `C:\Program Files\Google\Chrome\Application\chrome.exe`, `(x86)`, `%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`; darwin keeps `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`; linux probes `/usr/bin/google-chrome`, `/usr/bin/google-chrome-stable`, `/usr/bin/chromium`, `/usr/bin/chromium-browser`, `/snap/bin/chromium`, then bare `google-chrome` | browser.ts:28-29 |
+| Orphan reaper: POSIX `ps -ax` branch stays for darwin/linux (must not throw if `ps` missing); win32 branch enumerates via `Get-CimInstance` (powershell) matching `ds-chrome-` profile dirs, kills via `taskkill /PID x /F /T`; if neither works, skip reaping silently | browser.ts:816-858 |
+| Dev-server identity/stop: POSIX pgid + `ps lstart` + SIGTERM/SIGKILL group-kill branch stays; win32 records `{pid, port, startedAt, platform:'win32'}`, verifies port owner via `netstat -ano` before `taskkill /T /F`; never kill unverified pids | project-server.ts:258-311, 278-300, 333-393 |
+| `spawn('npm', {shell:false})` → win32 uses `npm.cmd`, POSIX unchanged | scaffold.ts:544 |
+| `process.env.TMPDIR ?? '/tmp'` → `os.tmpdir()` (correct on all three OSes) | scripts/build-viewer.mjs:14 |
 | `node --test 'tests/*.test.ts'` single-quote glob breaks under cmd → `node --test --test-concurrency=1 tests` (dir arg; Node 24 type-stripping finds *.test.ts) | package.json test script |
-| SIGTERM handler no-op note; host kill is fine | main.ts:596-613 (leave) |
-| Keep DS_CHROME_PATH env respected (already set in user's env) | done |
+| SIGTERM/SIGINT handlers: POSIX branch unchanged; win32 relies on host kill (document inline) | main.ts:596-613 (leave) |
+| Home paths use `os.homedir()` (never `$HOME`); `ComSpec` reads guarded win32-only; window geometry default `80,80` (macOS comment) stays harmless elsewhere | all new/edited code |
+CI: `.github/workflows/ci.yml` (ubuntu) runs typecheck+build+test — fork must not introduce OS-specific assumptions in included tests; Chrome-dependent tests stay excluded from CI as upstream does.
 
 ### H. Copy/branding
 README.md, docs/, tests/manifest.test.ts (pins ids/copy — update expectations), statusSection title, page title, command description. Version → `0.2.0`.
@@ -95,7 +97,7 @@ README.md, docs/, tests/manifest.test.ts (pins ids/copy — update expectations)
 
 | Phase | Scope | Files (ownership: only these agents touch these in this phase) | Model |
 |---|---|---|---|
-| **P0 Windows** | G | service/browser.ts (reaper/chrome-path only), service/project-server.ts, service/scaffold.ts (spawn line), scripts/build-viewer.mjs, package.json (test script) | deepseek-v4-pro-0813#max |
+| **P0 Cross-OS** | G | service/browser.ts (reaper/chrome-path only), service/project-server.ts, service/scaffold.ts (spawn line), scripts/build-viewer.mjs, package.json (test script) | deepseek-v4-pro-0813#max |
 | **P0.5 Spec audit** | critique this spec vs code, list contradictions | read-only | qwen3.8-flash#xhigh |
 | P1 panel | F, H(panel bits) | package.json manifest+contributes, panel/*.ts, tests/manifest+panel-open+mode-open | deepseek-v4-pro-0813#max |
 | P1 screens+scaffold | A, B (routes), E | service/screens.ts (new), service/main.ts, service/studio-config.ts, service/scaffold.ts, tests/scaffold+service | deepseek-v4-pro-0813#max |
@@ -103,8 +105,10 @@ README.md, docs/, tests/manifest.test.ts (pins ids/copy — update expectations)
 | P1 browser | D | service/browser.ts, service/artifact-context.ts, service/browser-control.ts, tests/live-canvas+canvas-zoom+nova-canvas | qwen3.8-flash#xhigh |
 | P2 integration | build+typecheck+tests green; per-screen verify (D9); cross-phase fixes | anything | deepseek-v4-pro#max |
 | P3 review | adversarial code review vs this spec; findings→fix list; apply approved fixes | anything | qwen3.8-flash#xhigh (review) |
-| P4 smoke | real Chrome on Windows via installed extension; screenshots of canvas with 2 screens, edit pick, play click-through | — | flash agent + orchestrator browser tools |
+| P4 smoke | real Chrome via installed extension; canvas with 2 screens, edit pick, play click-through; spot-check macOS/Linux logic by reading branches (no macOS/Linux hosts available — review-only for those OSes) | — | flash agent + orchestrator browser tools |
 | P5 ship | commit on canvas-fork, install path handoff to user | — | orchestrator |
+
+OS caveat: development and runtime verification happen on Windows; macOS/Linux correctness is enforced through (a) per-platform branch review in P3, (b) unchanged POSIX paths kept byte-identical, and (c) ubuntu CI for the non-Chrome test suite.
 
 Rules for all agents:
 1. Work in `C:\Users\samhe\Documents\github\openchamber-design-studio` on branch `canvas-fork`. `npm install` first if node_modules missing.
@@ -112,6 +116,7 @@ Rules for all agents:
 3. Source of truth is the `.ts`/`.js` sources; ALWAYS rerun `npm run build` (and `npm run build:viewer` when shell touched) and keep bundles in sync — the host loads built files.
 4. Run `npm run typecheck` + `npm run test` where your scope allows; report failures honestly.
 5. No new npm dependencies without noting it in the report (viewer build needs Tailwind CLI already present).
+6. All new/edited code must be cross-platform (spec §G rule): platform behavior via explicit `process.platform` branches, no POSIX-only or win32-only assumptions.
 
 ## Acceptance (what "done" looks like)
 1. Original `design-studio` and fork `design-canvas` both installed, no rail/command clashes; `/canvas` works in THIS scratch chat with no project registered.
@@ -119,4 +124,4 @@ Rules for all agents:
 3. Canvas: wheel-drag pans both axes, Ctrl+wheel zooms, Fit-all frames every artboard, header shows title + device size, double-click an artboard = zoom to ~100%.
 4. Edit mode: click element in artboard → chip appears in THIS chat's composer with selector/styles + screen id. Play mode: buttons/links inside screens work, navigation stays inside its artboard frame, URL/title of that artboard updates.
 5. Everything survives OpenChamber restart: mode chips, workspace list, reopening canvas (`/canvas on` in the same chat reopens, no re-scaffold).
-6. `npm run check` green on Windows.
+6. `npm run check` green on Windows AND the ubuntu CI path (typecheck+build+tests, no Chrome); POSIX code paths reviewed byte-identical or properly branched.
