@@ -108,22 +108,26 @@ README.md (fork purpose, Claude-canvas parity, OS matrix, disable-original guida
 - **P1-shell**: tests/viewer-ui, viewer-server, stock-controller
 - **P1-browser**: tests/browser, artifact-context, live-canvas-browser, canvas-zoom-routing, fit-page-browser, fit-page-breaker, nova-canvas-breaker
 
-## Phase plan (Alibaba models per AGENTS.md)
+## Phase plan (Alibaba models per AGENTS.md) — GATES LOCKED
 
-| Phase | Scope | Model | State |
+**Model governance rule (user directive 2026-10-17):** spec authoring/approval and all code review/approval belong to the biggest Alibaba agents — **Qwen 3.8 flash @ xhigh (max effort)** for spec gates + adversarial code review; **Deepseek v4-pro #max** for planned implementation; **Deepseek flash** only for scoped visual/browser checks. No phase ships past a gate the Qwen reviewer has not approved.
+
+| Phase | Scope | Model | Gate |
 |---|---|---|---|
-| P0 cross-OS | §G (+§H test rows) | deepseek-v4-pro-0813#max | RUNNING |
-| P0.5 spec audit | done — 20 amendments folded into this v2 | qwen3.8-flash#xhigh | DONE |
-| P1-panel | §F, identity §1, harness §5 (shared/harness-text.ts), README/docs, its §H tests | deepseek-v4-pro-0813#max | after P0 |
-| P1-screens | §A/§B-routes/§E + workspace-root helper | deepseek-v4-pro-0813#max | after P0 |
-| P1-shell | §C (+ its §H tests) | qwen3.8-flash#xhigh | unblocked by §B Browser contract + §C v2 |
-| P1-browser | §D (+ §B Browser methods on browser.ts, its §H tests) | qwen3.8-flash#xhigh | after P0 (browser.ts handoff) |
-| P2 integration | make typecheck+build+tests green across phases; verify.ts active-screen defaults; cross-file seams | deepseek-v4-pro#max | after P1 |
-| P3 review | adversarial review vs this spec; per-platform branch audit (win/mac/linux); fix round | qwen3.8-flash#xhigh | after P2 |
-| P4 smoke | real Chrome on Windows; install in OpenChamber; acceptance below | flash + orchestrator | after P3 |
-| P5 ship | commit, changelog, handoff | orchestrator | — |
+| P0 cross-OS | §G (+§H test rows) | deepseek-v4-pro-0813#max | committed after orchestrator scope-check ✅ |
+| P0.5 spec audit | 20 amendments → spec v2 | qwen3.8-flash#xhigh | DONE ✅ |
+| **P1.5 spec v3 gate** | review Claude-parity additions + P2/P2.5 scope against real code (esp. CDP export feasibility); produce docs/SPEC-V3-P2-SCOPE.md as the BINDING P2 contract; may edit ONLY parity/phase/acceptance sections of FORK-DESIGN-CANVAS.md — never §A–§H (live P1 contracts) | **qwen3.8-flash#xhigh** | blocks P2 |
+| P1-panel | §F, identity §1, harness §5, README/docs, its §H tests | deepseek-v4-pro-0813#max | reviewed in P3 |
+| P1-screens | §A/§B-routes/§E + workspace-root helper | deepseek-v4-pro-0813#max | reviewed in P3 |
+| P1-shell | §C (+ its §H tests) | qwen3.8-flash#xhigh | reviewed in P3 |
+| P1-browser | §D (+ §B Browser methods, its §H tests) | qwen3.8-flash#xhigh | reviewed in P3 |
+| P2 integration | docs/SPEC-V3-P2-SCOPE.md contract: green build/typecheck/tests across phases; view-state persistence; `/export` PNG/PDF; variants+size prompt rules; `/canvas critique`; screens `{x,y}` + drag-reposition; cross-phase seams | deepseek-v4-pro#max | **P3 approval MANDATORY** |
+| P3 review | adversarial full-diff review vs spec + SPEC-V3; per-OS branch audit (win/mac/linux); findings→fix→re-review until **APPROVED** | **qwen3.8-flash#xhigh** | **no P4 smoke / install / push before APPROVED verdict** |
+| P2.5 enhancements | comments.json + pinned markers, in-place text retype + snapshot versioner — only if P2 is P3-approved clean | deepseek-v4-pro#max implement → **qwen3.8-flash#xhigh** review | same gate |
+| P4 smoke | real Chrome on Windows; acceptance 1–9; install in OpenChamber | flash executes + orchestrator drives | findings → P3-style re-review for any fix |
+| P5 ship | migrate branch to `~/Documents/github/openchamber-design-canvas`, push `canvas-fork` to user's fork, changelog, install handoff | orchestrator | final qwen3.8-flash#xhigh quick-look at shipped diff + instructions |
 
-Agent rules: (1) branch `canvas-fork`, workdir `C:\Users\samhe\Documents\github\openchamber-design-studio`, npm install done; (2) touch ONLY your §H/phase files — outside changes only as `FORK-MERGE:` comment + report; (3) rebuild bundles after edits (`npm run build`; shell phase also `npm run build:viewer`); (4) typecheck your files; run tests you own; report baseline-vs-new failures honestly; (5) no new deps without flagging; (6) resolve code by SYMBOL, not line numbers; (7) all code cross-platform via explicit `process.platform` branches.
+Agent rules: (1) branch `canvas-fork`; workdir per phase table (P0–P1: `C:\Users\samhe\Documents\github\openchamber-design-studio`; P1.5 onward of the cutover: `C:\Users\samhe\Documents\github\openchamber-design-canvas`); npm install done in the old clone; (2) touch ONLY your phase-owned files — outside changes only as `FORK-MERGE:` comment + report; (3) bundles: P1 agents do **NOT** run `npm run build` (parallel tree, corrupted-intermediate risk) — P2 rebuilds everything once (shell agent still runs `npm run build:viewer`, its asset file is phase-owned); (4) typecheck your files; run your owned tests individually; report baseline-vs-new failures honestly; (5) no new deps without flagging; (6) resolve code by SYMBOL, not line numbers; (7) all code cross-platform via explicit `process.platform` branches.
 
 ## P0 handoff notes (committed with P0)
 - Bundles on this branch had PRE-EXISTING source→bundle drift (stale pick-bridge in panel/main.js); P0's rebuild re-synced. P5 must rebuild everything one final time before shipping.
