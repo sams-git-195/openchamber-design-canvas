@@ -131,31 +131,27 @@ Agent rules: (1) branch `canvas-fork`, workdir `C:\Users\samhe\Documents\github\
 - `stopDevServerWin32` descendant check needs PowerShell; plain pid equality remains the fallback gate (refuses, never guesses).
 - Known pre-existing Windows test failures remain for P2: project-server (POSIX shell quoting in test bodies), reference-path (URL.pathname join), stock-nova (`C:\C:\`), window tests (Git-Bash `ps`), Chrome-open flakiness class.
 
-## Claude Design parity map (from user-supplied Claude overview, 2026-10-17)
+## Claude Design parity map v2 — canvas/artboard details (2026-10-17, user-supplied docs + third-party reports)
 
-Claude feature → fork equivalent → status. Local-first replaces hosted: workspace files are the design, git/versions replace server state, exports are files on disk.
+New confirmations from the deeper write-up (marked unofficial where so):
+- **Artboard = its own HTML file** (`.dc.html` upstream) in a sandboxed preview iframe; **`canvas.json` keeps positions separately** → one artboard can be rewritten without disturbing others; moving an artboard is a POSITION edit, not a redraw. → Our model matches already (per-screen HTML files, sandboxed iframes, screens.json data). Upgrade: screens.json entries gain optional `{x, y}` (service normalize accepts+persists, shell uses when present, auto-grid when absent — mixed model). **Drag-to-reposition artboards in the shell** (mousedown on artboard chrome → live move → persist via `PUT /screens`) = the cheap "edit by hand" win, promoted to P2.
+- **Artboard identity**: title + position label ("artboard 1 of 7") → shell header shows `N · Title` + size. Trivial; P2.
+- **Layers inside an artboard; enter & select elements** → edit-mode pick already does element-level selection incl. shadow DOM. P2 adds: clicking a chip's screen header enters a "focused screen" full-frame view where repeated picks are rapid-fire (no camera gymnastics). Stretch.
+- **Hand edits don't cost tokens / direct drag-resize-align-rewrite text in place + properties panel + undo/redo + Save=version**:
+  - Artboard reposition: ADOPTED (above — it's the same "data, not redraw" trick).
+  - **In-place text retyping**: scoped experiment for P2.5: dblclick text element in edit mode → contentEditable → on commit, service patches the element's outerHTML into the screen's HTML file via the pick selector. Guarded: text-only, agent-generated structure, every patch snapshots the file first (see versions). Failure = restore + tell user to ask in chat. NOT v1.
+  - Element drag/resize/align inside artboards + properties panel: remains DEFERRED (real HTML/CSS; doing this well is a different product).
+  - **Undo/redo & versions**: local analog = lightweight file versioner (P2.5): service snapshots `<workspace>/<file>` into `<workspace>/.design-studio/versions/<ts>/` before any PATCH/export-time write; `POST /restore {file, ts}`; git remains the heavy layer.
+- **Comments as notes OR instructions ("Send to Claude" checkbox)** → P2.5 comment markers upgrade: a pinned comment persists to `<workspace>/comments.json` (screen, selector, text, open/resolved) AND optionally sends the pick+note into the chat in the same action. The pick-chip→chat path already covers "instruction to Claude" as the default gesture.
+- **One artifact, one share link; view/comment/edit access** → hosted-only, but local analog: `vite build` → static `dist/` (openable/shareable via any file host) + our `/export` PDF/PNG. Document as the "share" story in README; don't build link-serving.
+- **Pan/zoom "like Figma/Illustrator"** → parity intent locked: camera keeps scale/translate under wheel+drag, cursor-anchored zoom, fit shortcuts — already in shell spec §C.
+- **Canvas built for comparison** (one page × 3 widths; three directions; full flow in order) → these three cases become the README's usage examples and the prompt rules from the parity map v1 (variants as artboards; same-page responsive screens).
 
-| Claude Design | Design Canvas equivalent | Status |
-|---|---|---|
-| Chat + canvas pairing | Design Mode row + live Chrome canvas beside chat | v1 (P1) |
-| Canvas of artboards, pannable/zoomable, side-by-side comparison | N-artboard grid shell | v1 (P1-shell/browser) |
-| Artboards are LIVE HTML (not pictures); layouts respond to frame width | Real pages on Vite dev server per screen size | v1 |
-| Engine fixed / content is data | Shell runtime fixed; `screens.json` + `.html` files are the data | v1 — architecture match |
-| Iterate via chat | Agent edits files → HMR reload | v1 |
-| Iterate via inline comments pinned to an element | Edit-mode pick chip + typed ask = "that button"; PERSISTENT pinned comment markers on artboards | chip = v1; markers = P2.5 stretch |
-| Iterate via direct on-canvas text editing | DOM→source-file write-back is fragile; deliberate SKIP for v1/v2 — chat+pick covers the loop the same way Claude's does for structural asks | deferred, documented |
-| Ask for 2-3 variants at once | Harness/prompt rule: variants become SEPARATE screens (artboards) side by side, same tokens | text-level — apply in P2 (P1-panel owns harness text now; re-add there) |
-| Multiple frame sizes (1440 desktop, 390 phone, A4 poster, 1080×1080 post) | screens.json per-screen width/height — any size already legal | data-model v1; preset menu (poster/square/A4) in P2 toolbar |
-| Design System artifact (colors+themes, type, spacing, components, assets) | DESIGN.md + tokens.css + 22 presets; assets = workspace files (e.g. `assets/`) | v1; light/dark variant guidance as prompt note |
-| Critique (a11y, contrast, hierarchy) | Existing G1–G6 gates + LLM summary; new `/canvas critique` runs verify across screens | P2 |
-| Handoff stays synced with code | Designs ARE the repo already; nothing exported | v1 (structural) |
-| Export/share (PDF/image download) | NEW `POST /export {dir, screen?|all}` → CDP `Page.captureScreenshot` PNG per screen (+ `Page.printToPDF` for multi-screen/poster) written to `<workspace>/exports/`; row button | P2 (after P1-browser lands capture generalization) |
-| Separate view state (scroll/zoom/focus never changes the design) | Persist shell camera via existing getCamera/restoreCamera → `<workspace>/.design-studio/view.json` (or service memory + restore on open) | P2, small |
-| Shared DB / live rooms / collaboration | Out of model — local files + git are the version/collab layer | n/a by design |
-| Paste content onto canvas | stretch (v3) | stretch |
-| Background worker for fast edits | dev-server HMR + file watch covers it | n/a |
-
-**P2 integration scope gains four explicit deliverables** (in priority order): 1) camera view-state persistence, 2) `/export` PNG/PDF, 3) variants + size-preset prompt rules (incl. re-applying any harness-text tweaks P1-panel shipped), 4) `/canvas critique`. P2.5 (if P2 lands clean): pinned comment markers. Direct on-canvas editing remains deferred with rationale above.
+**Phase scope re-lock** (avoid bloat; P1 agents still mid-flight):
+- P1 (running) — unchanged.
+- P2 (integration) — the four parity items from v1 map (view-state persistence, `/export` PNG/PDF, variants+size prompt rules, `/canvas critique`) **PLUS**: screens.json `{x,y}` positions + shell drag-to-reposition + `N · Title · WxH` header format (v1 headers already reserved; now specified).
+- P2.5 (enhancements, only if P2 green) — pinned comments (`comments.json`, note/instruction), in-place text retype with pre-patch snapshot, versioner + restore.
+- Deferred with rationale — element-level drag/resize/align + properties panel; link-sharing/collab; paste-to-canvas.
 
 ## Acceptance
 1. `design-canvas` installs beside `design-studio` without rail/command clashes; `/canvas` works in a chat with NO registered project. (Agent-`browser.*` arbitration between two installed providers is documented, not guaranteed — README tells users to disable the original.)
