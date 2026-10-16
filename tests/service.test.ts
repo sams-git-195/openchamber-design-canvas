@@ -7,6 +7,23 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
+import {
+  normalizeScreens,
+  readScreens,
+  resolveScreenFile,
+  screenUrl,
+  writeScreens,
+  ScreensError,
+  type ScreensRegistry,
+} from '../service/screens.ts';
+import {
+  candidateWorkspaceRoots,
+  isInsideOrEqual,
+  resolveWorkspaceRoot,
+  WORKSPACE_FOLDER,
+} from '../service/workspace-root.ts';
+import { getLastWorkspace, setLastWorkspace, updateLastWorkspaceMode } from '../service/last-workspace.ts';
+
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const TOKEN = 'test-token-123';
 
@@ -581,5 +598,352 @@ test('POST /server/start refuses a foreign holder on the configured port', { tim
     child.kill('SIGKILL');
     await new Promise<void>((resolve) => holder.close(() => resolve()));
     await rm(project, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Design Canvas service layer — unit tests for the modules P1-screens owns.
+// ---------------------------------------------------------------------------
+
+test('normalizeScreens silently drops bad entries, dedupes ids and clamps sizes', () => {
+  const base = tmpdir();
+  const registry = normalizeScreens(
+    {
+      version: 2,
+      screens: [
+        { id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 },
+        { id: 'home', file: 'other.html', title: 'Duplicate', width: 300, height: 400 }, // dupe id → dropped
+        { id: 'Bad ID!', file: 'x.html', title: 'X', width: 300, height: 400 }, // bad id → dropped
+        { id: 'escape', file: '../evil.html', title: 'E', width: 300, height: 400 }, // escapes → dropped
+        { id: 'nosize', file: 'a.html', title: 'A', width: 'wide', height: 400 }, // bad size → dropped
+        'not-an-object', // dropped
+        { id: 'smol', file: 's.html', title: 'S', width: 99, height: 99999 }, // clamped
+      ],
+    },
+    base,
+  );
+  assert.deepEqual(registry, {
+    version: 2,
+    screens: [
+      { id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 },
+      { id: 'smol', file: 's.html', title: 'S', width: 200, height: 8192 },
+    ],
+  });
+});
+
+test('normalizeScreens of unrecognizable input is the empty registry', () => {
+  const base = tmpdir();
+  for (const input of [null, undefined, 42, 'text', { nope: true }, { screens: 'x' }]) {
+    assert.deepEqual(normalizeScreens(input, base), { version: 1, screens: [] });
+  }
+});
+
+test('resolveScreenFile refuses escapes and absolutes on every OS', () => {
+  const base = path.join(tmpdir(), 'ws');
+  assert.equal(resolveScreenFile(base, '../evil.html'), null);
+  assert.equal(resolveScreenFile(base, '..\\evil.html'), null, 'backslash escape');
+  assert.equal(resolveScreenFile(base, 'C:\\x.html'), null, 'drive letter is absolute');
+  assert.equal(resolveScreenFile(base, '/abs.html'), null);
+  assert.equal(resolveScreenFile(base, 'a/../b.html'), null, 'dot-dot segment');
+  assert.equal(resolveScreenFile(base, './x.html'), null, 'dot segment');
+  assert.equal(resolveScreenFile(base, 'x.htm'), null, 'must end in .html');
+  assert.equal(resolveScreenFile(base, 'x.css'), null);
+  assert.equal(resolveScreenFile(base, ''), null);
+  assert.equal(resolveScreenFile(base, { whatever: true }), null, 'non-string');
+  assert.equal(resolveScreenFile(base, 'a/b.html'), 'a/b.html');
+  assert.equal(resolveScreenFile(base, 'a\\b.html'), 'a/b.html', 'backslashes are separators');
+  assert.equal(resolveScreenFile(base, 'X.HTML'), 'X.HTML', 'case-insensitive .html suffix');
+  assert.equal(resolveScreenFile(base, 'h.html'), 'h.html');
+});
+
+test('writeScreens validates + normalizes + dedupes; readScreens round-trips', async () => {
+  const ws = await mkdtemp(path.join(tmpdir(), 'ds-screens-unit-'));
+  const { path: rel } = await writeScreens(ws, {
+    version: 1,
+    screens: [
+      { id: 'checkout', file: 'checkout.html', title: 'Checkout', width: 99, height: 99999 },
+      { id: 'pay', file: 'sub/pay.html', title: '', width: 300, height: 400 },
+      { id: 'checkout', file: 'second.html', title: 'Duplicate', width: 300, height: 400 },
+    ],
+  });
+  assert.equal(rel, 'screens.json');
+  assert.deepEqual(await readScreens(ws), {
+    version: 1,
+    screens: [
+      { id: 'checkout', file: 'checkout.html', title: 'Checkout', width: 200, height: 8192 },
+      { id: 'pay', file: 'sub/pay.html', title: 'pay', width: 300, height: 400 },
+    ],
+  });
+  assert.equal(JSON.parse(await readFile(path.join(ws, 'screens.json'), 'utf8') as string).screens[0].width, 200, 'clamps persist on disk');
+});
+
+test('missing or unreadable screens.json reads as the empty registry', async () => {
+  const ws = await mkdtemp(path.join(tmpdir(), 'ds-screens-empty-'));
+  assert.deepEqual(await readScreens(ws), { version: 1, screens: [] });
+  await writeFile(path.join(ws, 'screens.json'), '{ not json', 'utf8');
+  assert.deepEqual(await readScreens(ws), { version: 1, screens: [] }, 'invalid JSON reads empty');
+});
+
+test('writeScreens throws ScreensError for invalid registries (route → 400)', async () => {
+  const ws = await mkdtemp(path.join(tmpdir(), 'ds-screens-bad-'));
+  await assert.rejects(() => writeScreens(ws, 'nope'), ScreensError);
+  await assert.rejects(() => writeScreens(ws, { version: 1, screens: 'x' }), ScreensError, 'screens must be an array');
+  await assert.rejects(() => writeScreens(ws, { version: 'one', screens: [] }), ScreensError, 'version must be a number');
+  await assert.rejects(() => writeScreens(ws, { screens: [{ id: 'Bad ID', file: 'x.html', width: 300, height: 400 }] }), ScreensError, 'id regex');
+  await assert.rejects(() => writeScreens(ws, { screens: [{ id: 'a', file: '../../evil.html', width: 300, height: 400 }] }), ScreensError, 'file escapes');
+  await assert.rejects(() => writeScreens(ws, { screens: [{ id: 'a', file: 'x.html', width: 'wide', height: 400 }] }), ScreensError, 'width type');
+  await assert.rejects(() => writeScreens(ws, { screens: [{ id: 'a', file: 'x.html', width: 300, height: Infinity }] }), ScreensError, 'height finite');
+});
+
+test('screenUrl joins per decision 6 (strip trailing slashes, append file)', () => {
+  assert.equal(screenUrl('http://localhost:5173/', 'home.html'), 'http://localhost:5173/home.html');
+  assert.equal(screenUrl('http://localhost:5173//', 'home.html'), 'http://localhost:5173/home.html');
+  assert.equal(screenUrl('http://localhost:5173', 'sub/a.html'), 'http://localhost:5173/sub/a.html');
+});
+
+// ---- workspace-root ----
+
+test('candidateWorkspaceRoots: ONEDRIVE → USERPROFILE → homedir on win32, homedir elsewhere', () => {
+  const win = candidateWorkspaceRoots({ ONEDRIVE: 'C:\\Users\\sam\\OneDrive', USERPROFILE: 'C:\\Users\\sam' }, 'win32', 'C:\\Users\\sam');
+  assert.deepEqual(win, [
+    path.resolve('C:\\Users\\sam\\OneDrive\\Documents', WORKSPACE_FOLDER),
+    path.resolve('C:\\Users\\sam\\Documents', WORKSPACE_FOLDER),
+  ]);
+  assert.equal(candidateWorkspaceRoots({ USERPROFILE: 'C:\\Users\\sam' }, 'win32', 'C:\\Users\\sam').length, 1, 'homedir === USERPROFILE collapses');
+  assert.deepEqual(candidateWorkspaceRoots({}, 'darwin', '/Users/sam'), [path.resolve('/Users/sam', 'Documents', WORKSPACE_FOLDER)]);
+  assert.deepEqual(candidateWorkspaceRoots({}, 'linux', '/home/sam'), [path.resolve('/home/sam', 'Documents', WORKSPACE_FOLDER)]);
+});
+
+test('resolveWorkspaceRoot: DS_WORKSPACE_ROOT wins outright', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ds-wsroot-'));
+  assert.equal(await resolveWorkspaceRoot({ DS_WORKSPACE_ROOT: dir }), path.resolve(dir));
+  assert.equal(await resolveWorkspaceRoot({ DS_WORKSPACE_ROOT: `${dir}${path.sep}` }), path.resolve(dir), 'trailing separator resolved');
+  const missing = path.join(dir, 'not-created-yet');
+  assert.equal(await resolveWorkspaceRoot({ DS_WORKSPACE_ROOT: missing }), missing, 'override wins even when missing (scaffold creates it)');
+});
+
+test('resolveWorkspaceRoot probes "Documents" existence (win32 branch)', async () => {
+  if (process.platform !== 'win32') return; // POSIX candidates are homedir-only (covered above)
+  const one = await mkdtemp(path.join(tmpdir(), 'ds-od1-'));
+  const two = await mkdtemp(path.join(tmpdir(), 'ds-od2-'));
+  await mkdir(path.join(one, 'Documents'));
+  await mkdir(path.join(two, 'Documents'));
+  try {
+    const picked = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two });
+    assert.equal(picked, path.resolve(one, 'Documents', WORKSPACE_FOLDER), 'first existing Documents wins');
+    await rm(path.join(one, 'Documents'), { recursive: true });
+    const second = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two });
+    assert.equal(second, path.resolve(two, 'Documents', WORKSPACE_FOLDER), 'when the first dies the next wins');
+  } finally {
+    await rm(one, { recursive: true, force: true }).catch(() => undefined);
+    await rm(two, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('isInsideOrEqual is lexical and sibling-safe', () => {
+  const base = path.join(tmpdir(), 'canvas-root');
+  assert.equal(isInsideOrEqual(base, base), true);
+  assert.equal(isInsideOrEqual(base, path.join(base, 'my-slug')), true);
+  assert.equal(isInsideOrEqual(base, path.join(base, 'my-slug', 'deep')), true);
+  assert.equal(isInsideOrEqual(base, `${base}-sibling`), false, 'a sibling sharing the prefix is NOT inside');
+  assert.equal(isInsideOrEqual(base, tmpdir()), false);
+});
+
+test('lastWorkspace echo updates in memory', () => {
+  setLastWorkspace({ dir: '/ws/demo', screens: [], mode: 'edit', activeScreen: null });
+  assert.equal(getLastWorkspace()?.mode, 'edit');
+  updateLastWorkspaceMode('play');
+  assert.equal(getLastWorkspace()?.mode, 'play');
+  setLastWorkspace(null);
+  assert.equal(getLastWorkspace(), null);
+});
+
+// ---------------------------------------------------------------------------
+// Design Canvas routes (spec §B). The compiled service/main.js is rebuilt by
+// P2 — until then these spawn the TS entry directly; Node 24 type-strips the
+// extension's .ts modules (all relative imports carry .ts extensions).
+// ---------------------------------------------------------------------------
+
+async function startServiceTs(extraEnv: Record<string, string>): Promise<{ port: number; child: ChildProcess }> {
+  const port = 64000 + Math.floor(Math.random() * 1400); // above the other suites' bands, below 65536
+  const child = spawn(process.execPath, [path.join(root, 'service', 'main.ts')], {
+    env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN, ...extraEnv },
+    stdio: 'ignore',
+  });
+  try {
+    await waitForHealth(port, child);
+  } catch (error) {
+    child.kill('SIGKILL');
+    throw error;
+  }
+  return { port, child };
+}
+
+test('GET/PUT /screens: 400 validation, silent read normalization, clamped write', { timeout: 60_000 }, async () => {
+  const ws = await mkdtemp(path.join(tmpdir(), 'ds-screens-route-'));
+  const { port, child } = await startServiceTs({});
+  try {
+    const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    assert.equal((await fetch(`http://127.0.0.1:${port}/screens`, { headers: { authorization: `Bearer ${TOKEN}` } })).status, 400, 'missing dir → 400');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/screens?dir=relative`, { headers: { authorization: `Bearer ${TOKEN}` } })).status, 400, 'relative dir → 400');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/screens?dir=${encodeURIComponent(ws)}`)).status, 401, 'bearer token required');
+
+    // Missing screens.json reads as the empty registry.
+    const empty = await (await fetch(`http://127.0.0.1:${port}/screens?dir=${encodeURIComponent(ws)}`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+    assert.deepEqual(empty, { version: 1, screens: [] });
+
+    // Invalid PUT bodies → 400 with an actionable error.
+    const badBodies = [
+      'not json',
+      JSON.stringify({ version: 1 }),
+      JSON.stringify({ screens: 'nope' }),
+      JSON.stringify({ version: 1, screens: [{ id: 'Bad ID', file: 'x.html', title: 'X', width: 300, height: 400 }] }),
+      JSON.stringify({ version: 1, screens: [{ id: 'x', file: '../evil.html', title: 'X', width: 300, height: 400 }] }),
+      JSON.stringify({ version: 1, screens: [{ id: 'x', file: 'x.html', title: 'X', width: 'wide', height: 400 }] }),
+    ];
+    for (const body of badBodies) {
+      const res = await fetch(`http://127.0.0.1:${port}/screens?dir=${encodeURIComponent(ws)}`, { method: 'PUT', headers: bearer, body });
+      assert.equal(res.status, 400, `body ${body.slice(0, 40)}… is refused`);
+      assert.equal(typeof ((await res.json()) as { error?: string }).error, 'string');
+    }
+
+    // A valid PUT is clamped + deduped on write; GET reflects the written file.
+    const put = await fetch(`http://127.0.0.1:${port}/screens?dir=${encodeURIComponent(ws)}`, {
+      method: 'PUT',
+      headers: bearer,
+      body: JSON.stringify({
+        version: 2,
+        screens: [
+          { id: 'checkout', file: 'checkout.html', title: 'Checkout', width: 99, height: 99999 },
+          { id: 'checkout', file: 'dup.html', title: 'Duplicate', width: 300, height: 400 },
+          { id: 'pay', file: 'sub/pay.html', title: '', width: 300, height: 400 },
+        ],
+      }),
+    });
+    assert.equal(put.status, 200);
+    assert.deepEqual(await put.json(), { path: 'screens.json' });
+    const got = await (await fetch(`http://127.0.0.1:${port}/screens?dir=${encodeURIComponent(ws)}`, { headers: { authorization: `Bearer ${TOKEN}` } })).json() as ScreensRegistry;
+    assert.deepEqual(got, {
+      version: 2,
+      screens: [
+        { id: 'checkout', file: 'checkout.html', title: 'Checkout', width: 200, height: 8192 },
+        { id: 'pay', file: 'sub/pay.html', title: 'pay', width: 300, height: 400 },
+      ],
+    });
+  } finally {
+    child.kill('SIGKILL');
+    await rm(ws, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('GET /workspaces answers {root, workspaces} from the workspace root on disk', { timeout: 60_000 }, async () => {
+  const wsRoot = await mkdtemp(path.join(tmpdir(), 'ds-wsroot-route-'));
+  const alpha = path.join(wsRoot, 'alpha');
+  const beta = path.join(wsRoot, 'beta');
+  const gamma = path.join(wsRoot, 'gamma'); // no config → excluded
+  await mkdir(alpha);
+  await mkdir(beta);
+  await mkdir(gamma);
+  await writeFile(
+    path.join(alpha, '.design-studio.json'),
+    JSON.stringify({ version: 1, name: 'Alpha', url: 'http://localhost:5173/' }),
+  );
+  await writeFile(
+    path.join(alpha, 'screens.json'),
+    JSON.stringify({ version: 1, screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }] }),
+  );
+  await writeFile(path.join(beta, '.design-studio.json'), JSON.stringify({ version: 1 })); // no name → basename, no url, no screens
+  await writeFile(path.join(wsRoot, 'stray.txt'), 'not a workspace'); // files are skipped
+
+  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: wsRoot });
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/workspaces`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { root: string; workspaces: Array<Record<string, unknown>> };
+    assert.equal(body.root, wsRoot);
+    assert.equal(body.workspaces.length, 2, 'only dirs with .design-studio.json are listed');
+    assert.deepEqual(body.workspaces[0], {
+      dir: alpha,
+      name: 'Alpha',
+      url: 'http://localhost:5173/',
+      screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }],
+    });
+    assert.deepEqual(body.workspaces[1], { dir: beta, name: 'beta' }, 'no url/screens keys when absent');
+    assert.equal(JSON.stringify(body.workspaces).includes('gamma'), false, 'no-config dirs are excluded');
+  } finally {
+    child.kill('SIGKILL');
+    await rm(wsRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('GET /workspaces with a missing root answers the root with an empty list', { timeout: 60_000 }, async () => {
+  const missing = path.join(await mkdtemp(path.join(tmpdir(), 'ds-wsroot-missing-')), 'never-created');
+  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: missing });
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/workspaces`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { root: missing, workspaces: [] });
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
+test('POST /mode validates edit|play and echoes in memory (no browser needed)', { timeout: 60_000 }, async () => {
+  const { port, child } = await startServiceTs({});
+  try {
+    const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    assert.equal((await fetch(`http://127.0.0.1:${port}/mode`, { method: 'POST', headers: bearer, body: JSON.stringify({ mode: 'absurd' }) })).status, 400);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/mode`, { method: 'POST', headers: bearer, body: JSON.stringify({}) })).status, 400);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/mode`, { method: 'GET', headers: { authorization: `Bearer ${TOKEN}` } })).status, 405);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/mode`, { method: 'POST', headers: bearer, body: 'nope' })).status, 400);
+    assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/mode`, { method: 'POST', headers: bearer, body: JSON.stringify({ mode: 'play' }) })).json(), { ok: true, mode: 'play' });
+    assert.deepEqual(await (await fetch(`http://127.0.0.1:${port}/mode`, { method: 'POST', headers: bearer, body: JSON.stringify({ mode: 'edit' }) })).json(), { ok: true, mode: 'edit' });
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
+// POST /open {dir, screen?} — the channel to a live Chrome via
+// Browser.openWorkspace cannot run without the P1-browser methods; these pin
+// the deterministic validation/refusal shapes. P2 integrates the open-success
+// path against the real Browser implementation.
+test('POST /open extension validates {dir, screen?} and refuses deterministically', { timeout: 60_000 }, async () => {
+  const { port, child } = await startServiceTs({});
+  try {
+    const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    const post = (body: unknown) =>
+      fetch(`http://127.0.0.1:${port}/open`, { method: 'POST', headers: bearer, body: JSON.stringify(body) });
+
+    assert.equal((await post({})).status, 400, 'no url, no dir → 400');
+    assert.equal((await post({ dir: 'relative/path' })).status, 400, 'relative dir → 400');
+
+    // A dir with no config → 200 ok:false (business failure, not transport).
+    const bare = await mkdtemp(path.join(tmpdir(), 'ds-open-bare-'));
+    const noConfig = await post({ dir: bare });
+    assert.equal(noConfig.status, 200);
+    assert.deepEqual(await noConfig.json(), { ok: false, error: 'no .design-studio.json url found' });
+
+    // Loopback config url that is down with no command to start it → 200
+    // ok:false, never a window.
+    const deadPort = await freePort();
+    const dead = await mkdtemp(path.join(tmpdir(), 'ds-open-dead-'));
+    await writeFile(path.join(dead, '.design-studio.json'), JSON.stringify({ version: 1, name: 'dead', url: `http://127.0.0.1:${deadPort}/` }));
+    await writeFile(path.join(dead, 'screens.json'), JSON.stringify({ version: 1, screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }] }));
+    const deadRes = await post({ dir: dead });
+    assert.equal(deadRes.status, 200);
+    const deadBody = (await deadRes.json()) as { ok: boolean; error?: string };
+    assert.equal(deadBody.ok, false);
+    assert.match(deadBody.error ?? '', /not running/);
+
+    // Unknown screen id → 400. The config url is non-loopback so the dev-server
+    // step is skipped and the id check is reached deterministically.
+    const ext = await mkdtemp(path.join(tmpdir(), 'ds-open-ext-'));
+    await writeFile(path.join(ext, '.design-studio.json'), JSON.stringify({ version: 1, name: 'ext', url: 'https://example.com/' }));
+    await writeFile(path.join(ext, 'screens.json'), JSON.stringify({ version: 1, screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }] }));
+    const unknown = await post({ dir: ext, screen: 'nope' });
+    assert.equal(unknown.status, 400);
+    assert.deepEqual(await unknown.json(), { error: 'unknown screen id' });
+  } finally {
+    child.kill('SIGKILL');
   }
 });

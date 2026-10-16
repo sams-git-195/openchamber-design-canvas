@@ -14,7 +14,7 @@ import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-import { readStudioConfig, writeStudioConfig } from './studio-config.ts';
+import { readStudioConfig, resolveConfigPath, writeStudioConfig } from './studio-config.ts';
 import { ensureDevServer, getDevServerStatus, isLoopbackUrl, stopDevServer } from './project-server.ts';
 import { ensureBrowser, getBrowser, stopBrowser } from './surface.ts';
 import { BridgeClaims } from './bridge-claim.ts';
@@ -24,15 +24,39 @@ import { handleVerifyRequest } from './verify-routes.ts';
 import { writeHarnessPlugin } from './harness-plugin.ts';
 import { listProjectFiles, resolveReferencePath } from './project-files.ts';
 import { scaffoldProject } from './scaffold.ts';
+import { hasScreensFile, readScreens, screenUrl, writeScreens, type CanvasMode } from './screens.ts';
+import { resolveWorkspaceRoot } from './workspace-root.ts';
+import { getLastWorkspace, setLastWorkspace, updateLastWorkspaceMode } from './last-workspace.ts';
 import { BROWSER_PROVIDER_PATH } from '@openchamber/sdk';
 
 const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT ?? 0);
 const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
 
 if (!PORT || !TOKEN) {
-  console.error('[design-studio] missing OPENCHAMBER_SERVICE_PORT or OPENCHAMBER_SERVICE_TOKEN');
+  console.error('[design-canvas] missing OPENCHAMBER_SERVICE_PORT or OPENCHAMBER_SERVICE_TOKEN');
   process.exit(1);
 }
+
+// ---- Design Canvas browser contract (spec §B) ----
+// P1-browser adds these to service/browser.ts:
+//
+//   openWorkspace(cfg: { screens: Screen[]; baseUrl: string; mode: 'edit'|'play' }): Promise<void>
+//   setScreens(screens: Screen[]): Promise<void>
+//   setMode(m: 'edit'|'play'): Promise<void>
+//   setActive(id: string): Promise<void>
+//   getMode(): 'edit'|'play'
+//
+// Until that lands (it is being added CONCURRENTLY per spec), main.ts codes
+// against the contract through this shim so typecheck stays green against
+// today's Browser class; P2 drops the cast when the real methods exist.
+/** View form of a screen: the registry entry with `file` joined into `url`. */
+type CanvasScreen = { id: string; url: string; width: number; height: number; title: string };
+interface CanvasBrowser {
+  openWorkspace(cfg: { screens: CanvasScreen[]; baseUrl: string; mode: CanvasMode }): Promise<void>;
+  setMode(mode: CanvasMode): Promise<void>;
+  setActive(id: string): Promise<void>;
+}
+const asCanvas = (browser: unknown): CanvasBrowser => browser as CanvasBrowser;
 
 type Json = Record<string, unknown>;
 
@@ -370,6 +394,97 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // The canvas screen registry (spec §A/§B). GET answers the normalized
+    // registry (bad entries silently dropped, duplicates deduped, sizes
+    // clamped 200–8192); a missing or unreadable screens.json reads as
+    // {version:1,screens:[]}. PUT validates the full registry and writes it —
+    // an invalid body is a 400 with an actionable error. `dir` must be
+    // absolute in both cases.
+    if (url.pathname === '/screens') {
+      const dir = params.get('dir') ?? '';
+      if (!path.isAbsolute(dir)) {
+        sendJson(res, 400, { error: 'dir must be absolute' });
+        return;
+      }
+      if (req.method === 'PUT') {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(await readBody(req));
+        } catch {
+          sendJson(res, 400, { error: 'body must be JSON' });
+          return;
+        }
+        try {
+          sendJson(res, 200, { ...(await writeScreens(dir, parsed)) });
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof Error ? error.message : 'invalid screens registry' });
+        }
+        return;
+      }
+      sendJson(res, 200, (await readScreens(dir)) as unknown as Json);
+      return;
+    }
+
+    // Design workspaces on disk (decision 2/§F): the workspace root (resolved
+    // service-side, NEVER by the panel) and every child containing a
+    // .design-studio.json — with the config's name/url, and screens when
+    // screens.json exists. A missing workspace root answers an empty list,
+    // never an error.
+    if (url.pathname === '/workspaces') {
+      const rootDir = await resolveWorkspaceRoot();
+      const workspaces: Json[] = [];
+      try {
+        for (const entry of await fs.readdir(rootDir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const dir = path.join(rootDir, entry.name);
+          if ((await resolveConfigPath(dir)) === null) continue;
+          const { config } = await readStudioConfig(dir);
+          const name =
+            typeof config?.name === 'string' && config.name.trim() !== '' ? config.name.trim() : entry.name;
+          const item: Json = { dir, name };
+          if (typeof config?.url === 'string' && config.url.trim() !== '') item.url = config.url.trim();
+          if (await hasScreensFile(dir)) {
+            const registry = await readScreens(dir);
+            item.screens = registry.screens as unknown as Json;
+          }
+          workspaces.push(item);
+        }
+      } catch {
+        /* no workspace root yet: answer the root with an empty list */
+      }
+      workspaces.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      sendJson(res, 200, { root: rootDir, workspaces });
+      return;
+    }
+
+    // Canvas mode (decision 8): validate 'edit'|'play', push into the live
+    // shell when a browser is running and always echo in memory (so the next
+    // /open starts in the chosen mode). With no browser yet this is a warm
+    // no-op: ok:true.
+    if (url.pathname === '/mode') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'POST required' });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'body must be JSON' });
+        return;
+      }
+      const mode = (parsed as { mode?: unknown } | null)?.mode;
+      if (mode !== 'edit' && mode !== 'play') {
+        sendJson(res, 400, { error: 'mode must be "edit" or "play"' });
+        return;
+      }
+      updateLastWorkspaceMode(mode);
+      const target = getBrowser();
+      if (target) await asCanvas(target).setMode(mode);
+      sendJson(res, 200, { ok: true, mode });
+      return;
+    }
+
     if (url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'text/plain' });
       res.end('ok');
@@ -447,33 +562,109 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'body must be JSON' });
         return;
       }
-      const body = parsed as { url?: unknown; dir?: unknown } | null;
+      const body = parsed as { url?: unknown; dir?: unknown; screen?: unknown } | null;
+      // { url } — the original single-page flow, kept unchanged (byte-for-byte
+      // behavior for existing callers).
       const target = body?.url;
-      if (typeof target !== 'string' || target === '') {
+      if (typeof target === 'string' && target !== '') {
+        const dir = typeof body?.dir === 'string' && body.dir !== '' ? body.dir : null;
+        if (dir && !path.isAbsolute(dir)) {
+          sendJson(res, 400, { error: 'dir must be absolute' });
+          return;
+        }
+        // A loopback URL may belong to a project's dev server. When a project dir
+        // is known (or the URL is loopback) make sure the server is up first: a
+        // dead server must yield `ok:false`, never a window on Chrome's error page.
+        let started = false;
+        if (dir || isLoopbackUrl(target)) {
+          const dev = await ensureDevServer(target, { dir: dir ?? undefined });
+          if (!dev.up) {
+            sendJson(res, 200, { ok: false, error: dev.error ?? 'the dev server is not available' });
+            return;
+          }
+          started = dev.started;
+        }
+        try {
+          const browser = await ensureBrowser(target);
+          const nav = await browser.open(target);
+          sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'open failed' });
+        }
+        return;
+      }
+
+      // { dir, screen? } — the canvas workspace flow (spec §B extension). The
+      // config's url is authoritative; screens.json supplies the artboards.
+      const dirValue = body?.dir;
+      if (typeof dirValue !== 'string' || dirValue === '') {
         sendJson(res, 400, { error: 'url is required' });
         return;
       }
-      const dir = typeof body?.dir === 'string' && body.dir !== '' ? body.dir : null;
-      if (dir && !path.isAbsolute(dir)) {
+      if (!path.isAbsolute(dirValue)) {
         sendJson(res, 400, { error: 'dir must be absolute' });
         return;
       }
-      // A loopback URL may belong to a project's dev server. When a project dir
-      // is known (or the URL is loopback) make sure the server is up first: a
-      // dead server must yield `ok:false`, never a window on Chrome's error page.
+      const screenParam = typeof body?.screen === 'string' && body.screen !== '' ? body.screen : null;
+
+      const { config } = await readStudioConfig(dirValue);
+      const configUrl =
+        typeof config?.url === 'string' && config.url.trim() !== '' ? config.url.trim() : null;
+      if (!configUrl) {
+        sendJson(res, 200, { ok: false, error: 'no .design-studio.json url found' });
+        return;
+      }
+
+      // Auto-start the dev server only for loopback URLs (the panel's Start
+      // control owns manual starts; externally served workspaces skip this).
       let started = false;
-      if (dir || isLoopbackUrl(target)) {
-        const dev = await ensureDevServer(target, { dir: dir ?? undefined });
+      if (isLoopbackUrl(configUrl)) {
+        const dev = await ensureDevServer(configUrl, { dir: dirValue });
         if (!dev.up) {
           sendJson(res, 200, { ok: false, error: dev.error ?? 'the dev server is not available' });
           return;
         }
         started = dev.started;
       }
+
+      const registry = await readScreens(dirValue);
+      // An explicit initial screen must exist in the registry (400 otherwise).
+      if (screenParam !== null && !registry.screens.some((s) => s.id === screenParam)) {
+        sendJson(res, 400, { error: 'unknown screen id' });
+        return;
+      }
+      const mode = getLastWorkspace()?.mode ?? 'edit';
+      const viewScreens: CanvasScreen[] = registry.screens.map((s) => ({
+        id: s.id,
+        title: s.title,
+        width: s.width,
+        height: s.height,
+        url: screenUrl(configUrl, s.file),
+      }));
+
       try {
-        const browser = await ensureBrowser(target);
-        const nav = await browser.open(target);
-        sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
+        if (viewScreens.length === 0) {
+          // No screens registered: fall back to the config url alone, exactly
+          // like the { url } flow. The workspace echo still records the dir so
+          // browser-control has its dir fallback.
+          const browser = await ensureBrowser(configUrl);
+          const nav = await browser.open(configUrl);
+          setLastWorkspace({ dir: dirValue, screens: [], mode, activeScreen: null });
+          sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
+        } else {
+          const active = screenParam ?? viewScreens[0]!.id;
+          const browser = await ensureBrowser();
+          // Cold: openWorkspace bakes the screens into the ViewerConfig at
+          // launch; warm: it pushes setScreens into the live shell (spec §B —
+          // the Browser implements the cold/warm split itself).
+          await asCanvas(browser).openWorkspace({ screens: viewScreens, baseUrl: configUrl, mode });
+          await asCanvas(browser).setActive(active);
+          setLastWorkspace({ dir: dirValue, screens: registry.screens, mode, activeScreen: active });
+          // Same shape /state answers with: {ok, started} + BrowserState (which
+          // P1-browser extends with mode/screens/activeScreen).
+          const state = (await browser.state()) as Record<string, unknown>;
+          sendJson(res, 200, { ok: true, started, ...state });
+        }
       } catch (error) {
         sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'open failed' });
       }
@@ -590,7 +781,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[design-studio] service listening on 127.0.0.1:${PORT}`);
+  console.log(`[design-canvas] service listening on 127.0.0.1:${PORT}`);
 });
 
 let shuttingDown = false;

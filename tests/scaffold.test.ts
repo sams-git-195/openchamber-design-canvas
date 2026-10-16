@@ -52,7 +52,7 @@ function isLoopback(url: string): boolean {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
-test('scaffolds a runnable Vite skeleton with a pinned loopback URL', async () => {
+test('scaffolds a runnable multi-page Vite skeleton with a pinned loopback URL', async () => {
   const dir = await tempDir();
   const result = await scaffoldProject({
     dir,
@@ -67,30 +67,65 @@ test('scaffolds a runnable Vite skeleton with a pinned loopback URL', async () =
   assert.equal(result.ok, true, JSON.stringify(result));
   if (!result.ok) return;
 
-  const expected = ['package.json', 'index.html', 'tokens.css', 'styles.css', 'DESIGN.md', '.design-studio.json'];
+  const expected = [
+    'package.json',
+    'home.html',
+    'index.html',
+    'tokens.css',
+    'styles.css',
+    'DESIGN.md',
+    'app.js',
+    'screens.json',
+    '.design-studio.json',
+  ];
   for (const rel of expected) {
     const info = await stat(path.join(dir, rel));
     assert.equal(info.isFile(), true, `${rel} exists`);
     assert.ok(result.files.includes(rel), `${rel} is reported in files[]`);
   }
-  // The harness plugin is written too and reported.
-  assert.ok(
-    result.files.includes('.opencode/plugin/design-studio-harness.ts'),
-    'the harness plugin is reported',
+  // Decision 5: NO harness plugin is written — the in-session harness ships via
+  // the panel's buildModeChip, not a project-scoped plugin.
+  assert.equal(
+    result.files.some((file) => file.includes('.opencode')),
+    false,
+    'no harness plugin is written or reported',
   );
-  await stat(path.join(dir, '.opencode', 'plugin', 'design-studio-harness.ts'));
+  await assert.rejects(() => stat(path.join(dir, '.opencode', 'plugin', 'design-studio-harness.ts')), 'no plugin dir exists');
+
+  // index.html is a meta-refresh redirect to home.html (keeps `vite build`'s
+  // default entry valid); home.html carries the pre-fork hero with the brief.
+  const indexHtml = await readFile(path.join(dir, 'index.html'), 'utf8');
+  assert.match(indexHtml, /http-equiv="refresh" content="0; url=\.\/home\.html"/, 'index.html redirects to home.html');
+  const homeHtml = await readFile(path.join(dir, 'home.html'), 'utf8');
+  assert.match(homeHtml, /A small landing page for a type foundry/, 'the brief seeds the home lede');
+  assert.match(homeHtml, /src="\.\/app\.js"/, 'home.html loads the shared nav');
+
+  // app.js carries the bundled screen list for the bottom nav.
+  assert.match(await readFile(path.join(dir, 'app.js'), 'utf8'), /DS_SCREENS/);
+
+  // screens.json seeds the home screen registry per spec §A.
+  const registry = JSON.parse(await readFile(path.join(dir, 'screens.json'), 'utf8')) as {
+    version: number;
+    screens: Array<{ id: string; file: string; title: string; width: number; height: number }>;
+  };
+  assert.deepEqual(registry, {
+    version: 1,
+    screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }],
+  });
 
   // The URL is loopback and the port is inside the pinned scan range.
   assert.equal(isLoopback(result.url), true, 'url is loopback');
   const port = Number(new URL(result.url).port);
   assert.ok(port >= PORT_SCAN_START && port <= PORT_SCAN_END, `port ${port} is in the scan range`);
 
-  // The config parses and carries the pinned port and the run command.
+  // The config parses and carries the pinned port, the run command and the
+  // canvas pagesRoot.
   const config = JSON.parse(await readFile(path.join(dir, '.design-studio.json'), 'utf8')) as StudioConfig;
   assert.equal(config.version, 1);
   assert.equal(config.type, 'prototype');
   assert.equal(config.entry, 'index.html');
   assert.equal(config.command, 'npm run dev');
+  assert.equal((config as Record<string, unknown>).pagesRoot, '.');
   assert.equal(config.url, result.url);
   assert.deepEqual(config.harness, { direction: 'editorial', fidelity: 'interactive' });
 
@@ -111,7 +146,7 @@ test('a second scaffold in the same directory is refused and clobbers nothing', 
   const first = await scaffoldProject({ dir, type: 'hi-fi', install: false, boot: false });
   assert.equal(first.ok, true);
 
-  const before = await readFile(path.join(dir, 'index.html'), 'utf8');
+  const before = await readFile(path.join(dir, 'home.html'), 'utf8');
 
   const second = await scaffoldProject({ dir, type: 'deck', install: false, boot: false });
   assert.equal(second.ok, false);
@@ -119,7 +154,7 @@ test('a second scaffold in the same directory is refused and clobbers nothing', 
   assert.match(second.error, /already exists/);
 
   // The original files are untouched.
-  assert.equal(await readFile(path.join(dir, 'index.html'), 'utf8'), before);
+  assert.equal(await readFile(path.join(dir, 'home.html'), 'utf8'), before);
   const config = JSON.parse(await readFile(path.join(dir, '.design-studio.json'), 'utf8')) as StudioConfig;
   assert.equal(config.type, 'hi-fi', 'the first type survives');
 });
@@ -236,3 +271,61 @@ test('scaffold pins a port from the injected range and offset', async () => {
   if (!result.ok) return;
   assert.equal(new URL(result.url).port, String(base + 1), 'the offset port is pinned');
 });
+
+// ---- scaffold confinement (§E) ----
+
+test('a NEW directory outside the workspace root is refused', async () => {
+  const root = await tempDir(); // the injected workspace root
+  const outside = await tempDir(); // an unrelated temp dir, sibling of root
+  const target = path.join(outside, 'fresh-outside-dir');
+  assert.ok(!insideOrEqualHelper(root, target), 'the target is genuinely outside the root');
+
+  const result = await scaffoldProject({
+    dir: target,
+    type: 'hi-fi',
+    install: false,
+    boot: false,
+    workspaceRoot: root,
+  });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.match(result.error, /outside the Design Canvas workspace root/);
+  await assert.rejects(() => stat(path.join(target, '.design-studio.json')), 'nothing was written');
+});
+
+test('a NEW directory inside the workspace root scaffolds', async () => {
+  const root = await tempDir();
+  const target = path.join(root, 'brand-new-slug');
+  const result = await scaffoldProject({
+    dir: target,
+    type: 'wireframe',
+    install: false,
+    boot: false,
+    workspaceRoot: root,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  if (!result.ok) return;
+  assert.equal((await stat(path.join(target, 'home.html'))).isFile(), true, 'home.html was seeded');
+});
+
+test('an EXISTING directory outside the workspace root is accepted (the user\u2019s own project)', async () => {
+  const root = await tempDir();
+  const existing = await tempDir(); // exists already, outside root
+  assert.ok(!insideOrEqualHelper(root, existing), 'the existing dir is genuinely outside the root');
+
+  const result = await scaffoldProject({
+    dir: existing,
+    type: 'hi-fi',
+    install: false,
+    boot: false,
+    workspaceRoot: root,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+});
+
+/** Local mirror of the lexical containment rule used by the tests. */
+function insideOrEqualHelper(root: string, dir: string): boolean {
+  const r = path.resolve(root);
+  const d = path.resolve(dir);
+  return d === r || d.startsWith(r + path.sep);
+}

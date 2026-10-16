@@ -3,20 +3,30 @@
 // The agent session should open on a project that already exists, runs and has a
 // live URL, so the user sees a preview the moment Design Mode starts. This module
 // does the mechanical part the prompt describes: create a minimal, runnable Vite
-// app skeleton, write `.design-studio.json`, install its deps, pin a loopback
-// port, start its dev server (reusing project-server.ts's ensureDevServer) and
-// drop the in-session harness plugin. The agent only fills content later.
+// multi-page skeleton (home.html + an index.html redirect + the shared app.js
+// nav + the screens.json registry), write `.design-studio.json`, install deps,
+// pin a loopback port and start its dev server (reusing
+// project-server.ts's ensureDevServer). The agent only fills content later.
+// No harness plugin is written (§5): the canvas session lives outside the
+// workspace, so the in-session harness ships via the panel's buildModeChip.
 //
 // It never clobbers: a directory that already holds a `.design-studio.json` is
 // refused, and a dev server that is already up is reused rather than restarted.
+// New directories are confined to the workspace root (§E).
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { canBindPort, ensureDevServer, isLoopbackUrl } from './project-server.ts';
 import { DEFAULT_CONFIG_PATH, resolveConfigPath } from './studio-config.ts';
+// FORK (decision 5): the in-session harness ships via the panel's buildModeChip
+// (and designSessionPrompt), not a plugin — plugin discovery is project-scoped
+// while a canvas session runs outside the workspace dir. The module/import stay
+// here, deliberately dead, for the future plugin path.
 import { writeHarnessPlugin } from './harness-plugin.ts';
 import { DESIGN_SYSTEMS, type DesignSystemPreset } from '../shared/design-systems.ts';
+import { SCREENS_FILENAME, writeScreens, type Screen } from './screens.ts';
+import { isInsideOrEqual, resolveWorkspaceRoot } from './workspace-root.ts';
 
 /**
  * Loopback ports scanned for a free one; pinned into the dev command. The range
@@ -63,6 +73,12 @@ export type ScaffoldOptions = {
    * deterministic; production uses the wide default range with a random offset.
    */
   portRange?: PortRange;
+  /**
+   * Override the resolved workspace root (spec §3) for scaffold confinement.
+   * Tests inject this to stay hermetic and independent of the machine's
+   * Documents layout; production resolves it via DS_WORKSPACE_ROOT / probing.
+   */
+  workspaceRoot?: string;
 };
 
 export type ScaffoldResult =
@@ -135,7 +151,13 @@ function packageJson(name: string, port: number): string {
   )}\n`;
 }
 
-function indexHtml(name: string, brief: string): string {
+/**
+ * The canvas home screen. This is where the pre-fork hero logic lives now:
+ * the brief seeds the lede slot and everything else is the skeleton the agent
+ * fills. The shared bottom nav (app.js) is included here for parity with the
+ * screens the agent adds later.
+ */
+function homeHtml(name: string, brief: string): string {
   const lede = brief
     ? esc(brief)
     : 'Replace this hero with the brief&#39;s opening moment and keep every value a token.';
@@ -158,9 +180,11 @@ function indexHtml(name: string, brief: string): string {
     </header>
 
     <main>
+      <!-- Add a screen: create <file>.html, then add it to screens.json AND to
+           the DS_SCREENS array in app.js. Keep every value a token. -->
       <!-- HERO SLOT: the agent replaces this block with the brief's opening moment. -->
       <section class="hero" id="hero">
-        <p class="eyebrow">Design project</p>
+        <p class="eyebrow">Design canvas</p>
         <h1 class="hero__title">${esc(name)}</h1>
         <p class="hero__lede">${lede}</p>
         <div class="hero__actions">
@@ -177,10 +201,74 @@ function indexHtml(name: string, brief: string): string {
     </main>
 
     <footer class="site-footer">
-      <p>Built with the Design Studio harness.</p>
+      <p>Built with the Design Canvas harness.</p>
     </footer>
+    <script src="./app.js" defer></script>
   </body>
 </html>
+`;
+}
+
+/**
+ * The Vite default entry stays valid: `vite build` needs an index.html at the
+ * root, while the canvas opens home.html (the seeded screen) directly. A
+ * meta-refresh redirects any / visit to home.html; the dev command is NOT
+ * touched.
+ */
+function indexRedirectHtml(name: string): string {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="refresh" content="0; url=./home.html" />
+    <title>${esc(name)}</title>
+  </head>
+  <body>
+    <p>Opening <a href="./home.html">${esc(name)}</a>…</p>
+  </body>
+</html>
+`;
+}
+
+/**
+ * The shared bottom nav every screen includes. Deliberately dead simple (fork
+ * rule): it renders the SCREENS array baked in at scaffold time — NO runtime
+ * screens.json fetch. THE AGENT OWNS BOTH FILES: when a screen is added,
+ * update screens.json AND this array here, then re-run npm run dev.
+ */
+function appJs(screens: ReadonlyArray<{ id: string; file: string; title: string }>): string {
+  return `/* app.js — Design Canvas shared bottom nav (scaffold-generated).
+   Dead simple by design: the screen list below is baked in at scaffold time,
+   not fetched from screens.json. When you add a screen:
+     1. create <file>.html in this workspace,
+     2. add the entry to screens.json,
+     3. add the SAME entry to DS_SCREENS below.
+   All three must stay in sync. */
+const DS_SCREENS = ${JSON.stringify(screens, null, 2)};
+(function () {
+  'use strict';
+  if (!Array.isArray(DS_SCREENS) || DS_SCREENS.length <= 1) return; // one screen needs no nav
+  var page = (location.pathname.split('/').pop() || 'index.html');
+  var nav = document.createElement('nav');
+  nav.className = 'ds-nav';
+  nav.setAttribute('aria-label', 'Screens');
+  for (var i = 0; i < DS_SCREENS.length; i += 1) {
+    var s = DS_SCREENS[i];
+    var a = document.createElement('a');
+    a.href = s.file;
+    a.textContent = s.title;
+    if (s.file === page) a.setAttribute('aria-current', 'page');
+    nav.appendChild(a);
+  }
+  var style = document.createElement('style');
+  style.textContent =
+    '.ds-nav{position:fixed;left:0;right:0;bottom:0;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;padding:10px 16px;background:var(--surface,#161b22);border-top:1px solid var(--border,#262d36);z-index:50}' +
+    '.ds-nav a{color:var(--muted,#8b949e);text-decoration:none;padding:4px 10px;border-radius:6px;font-size:0.875rem}' +
+    '.ds-nav a:hover,.ds-nav a[aria-current="page"]{color:var(--fg,#e6edf3);background:var(--bg,#0e1116)}';
+  document.head.appendChild(style);
+  document.body.appendChild(nav);
+})();
 `;
 }
 
@@ -430,6 +518,21 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
     return { ok: false, error: 'type must be a non-empty string' };
   }
 
+  // Scaffold confinement (§E): creating a NEW directory is allowed only inside
+  // the resolved workspace root — the panel always passes workspace-root dirs;
+  // this guards an accidental design project landing in some unrelated folder.
+  // An EXISTING directory elsewhere is accepted (the user's own project).
+  const existed = await fs.stat(dir).then((s) => s.isDirectory()).catch(() => false);
+  if (!existed) {
+    const root = options.workspaceRoot ?? (await resolveWorkspaceRoot());
+    if (!isInsideOrEqual(root, dir)) {
+      return {
+        ok: false,
+        error: `refusing to create a new design directory outside the Design Canvas workspace root (${root}) — pass a dir under it, or an existing directory`,
+      };
+    }
+  }
+
   try {
     await fs.mkdir(dir, { recursive: true });
   } catch (error) {
@@ -466,15 +569,21 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
     url,
     command: 'npm run dev',
     entry: 'index.html',
+    pagesRoot: '.',
     harness,
   };
 
+  // The seeded registry entry mirrors what the agent must keep in sync when
+  // adding screens (screens.json + the DS_SCREENS array baked into app.js).
+  const seedScreen: Screen = { id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 };
   const files: Array<[string, string]> = [
     ['package.json', packageJson(name, port)],
-    ['index.html', indexHtml(name, brief)],
+    ['home.html', homeHtml(name, brief)],
+    ['index.html', indexRedirectHtml(name)],
     ['tokens.css', preset ? presetTokensCss(preset) : TOKENS_CSS],
     ['styles.css', STYLES_CSS],
     ['DESIGN.md', preset ? presetDesignMd(preset) : DESIGN_MD],
+    ['app.js', appJs([seedScreen])],
   ];
 
   const written: string[] = [];
@@ -496,13 +605,19 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
     return { ok: false, error: `could not write project files: ${error instanceof Error ? error.message : String(error)}` };
   }
 
-  // The in-session plugin (idempotent; never clobbers a non-generated file).
+  // The screens registry (§A) — validated and written through screens.ts, the
+  // same module the /screens routes use.
   try {
-    const plugin = await writeHarnessPlugin(dir);
-    written.push(plugin.path);
+    await writeScreens(dir, { version: 1, screens: [seedScreen] });
+    written.push(SCREENS_FILENAME);
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : 'could not write harness plugin' };
+    return { ok: false, error: `could not write the screens registry: ${error instanceof Error ? error.message : String(error)}` };
   }
+
+  // FORK (decision 5): NO harness plugin write. Canvas sessions run outside the
+  // workspace dir and plugin discovery is project-scoped, so the in-session
+  // harness ships via the panel's buildModeChip / designSessionPrompt instead.
+  // (writeHarnessPlugin stays imported above, intentionally dead — see note.)
 
   // Install the project's own dependencies when they are missing. `vite` is the
   // design project's dependency, not the extension's.
