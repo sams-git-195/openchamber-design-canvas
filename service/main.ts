@@ -309,8 +309,10 @@ function wireBrowserHooks(browser: Browser): void {
 /**
  * V4-10 export-png / export-pdf: the existing single-slot D4 job with
  * screens:[id] and one format; the shell toast arrives when the job settles.
+ * Exported for the hermetic joined-job pin (tests/v4-service.test.ts drives it
+ * through a spawned import of this module with a stub Browser).
  */
-async function runMenuExport(browser: Browser, screen: string, format: 'png' | 'pdf'): Promise<void> {
+export async function runMenuExport(browser: Browser, screen: string, format: 'png' | 'pdf'): Promise<void> {
   const dir = browser.currentWorkspaceDir();
   if (!dir) return;
   const { config } = await readStudioConfig(dir);
@@ -341,6 +343,14 @@ async function runMenuExport(browser: Browser, screen: string, format: 'png' | '
     formats: [format],
     browser,
   });
+  // F6 (V4 QA): the D4 slot is GLOBAL — a menu export fired while any other
+  // export runs JOINS that foreign job, and the old poll then reported
+  // "Export failed: no result" for a screen the joined job never had. Say
+  // what actually happened instead.
+  if (started.joined === true) {
+    await browser.pushToast('warn', 'Another export is running — try again');
+    return;
+  }
   // Poll the D4 status the same way the panel's /canvas export does (700 ms),
   // bounded at 120 s; the toast closes the loop in the canvas (V4-10).
   const deadline = Date.now() + 120_000;
@@ -542,9 +552,22 @@ async function startAsyncScaffold(options: {
   return { ok: true, jobId: job.id, dir: job.dir, url: job.url };
 }
 
-/** GET /scaffold/status body (unknown job = 200 business failure, house rule). */
-function scaffoldStatus(id: string): Json {
-  if (!scaffoldJob || scaffoldJob.id !== id) return { ok: false, error: 'unknown scaffold job' };
+/** Cross-platform absolute-dir equality for the F10 job/dir match (win32 is
+ *  case-insensitive; separators normalize through path.resolve). */
+function sameAbsoluteDir(a: string, b: string): boolean {
+  const left = path.resolve(a);
+  const right = path.resolve(b);
+  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
+/** GET /scaffold/status body (unknown job = 200 business failure, house rule).
+ *  F10 (V4 QA): the poll must name the job's OWN dir — an id/dir pair that
+ *  does not match the single-slot job answers like an unknown job, so a stale
+ *  or foreign poller can never read another workspace's scaffold progress. */
+function scaffoldStatus(id: string, dir: string): Json {
+  if (!scaffoldJob || scaffoldJob.id !== id || !sameAbsoluteDir(scaffoldJob.dir, dir)) {
+    return { ok: false, error: 'unknown scaffold job' };
+  }
   const job = scaffoldJob;
   return {
     state: job.state,
@@ -756,7 +779,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'dir must be absolute and job is required' });
         return;
       }
-      sendJson(res, 200, scaffoldStatus(jobParam));
+      sendJson(res, 200, scaffoldStatus(jobParam, dir));
       return;
     }
 
@@ -1446,6 +1469,13 @@ const server = http.createServer(async (req, res) => {
         try {
           const browser = await ensureBrowser(target);
           const nav = await browser.open(target);
+          // F8 (V4 QA): the registry watch follows the canvas that is actually
+          // open. A successful legacy {url} open used to leave the previous
+          // workspace's fs.watch running against a window that moved on (a
+          // stale applyRegistryChange could warm-push into it). Re-target the
+          // watch when this open names a dir; stop it otherwise.
+          if (dir) startRegistryWatch(dir);
+          else stopRegistryWatch();
           // navigateGuarded dropped its bringToFront (V4-8); the user-facing
           // legacy open still raises on a settled navigation, exactly the old
           // observable behavior, now routed through the explicit focus seam.
@@ -1557,9 +1587,12 @@ const server = http.createServer(async (req, res) => {
           await browser.restoreWorkspaceView({ screens: viewScreens, mode, camera: view.camera });
           setLastWorkspace({ dir: dirValue, screens: registry.screens, mode, activeScreen: active, view });
           // V4-4: the watcher owns THIS workspace now (replacing any other
-          // dir's watch); the dedupe key seeds with what we just pushed.
-          lastPushedRegistry = JSON.stringify(registry);
+          // dir's watch). F3 (V4 QA): the dedupe seed goes in AFTER
+          // startRegistryWatch — start RESETS lastPushedRegistry to '', so the
+          // old seed-then-start order was always clobbered and the first watch
+          // tick re-pushed the registry the open had just pushed.
           startRegistryWatch(dirValue);
+          lastPushedRegistry = JSON.stringify(registry);
           // V4-13 (P2): dock only on user-initiated opens (focus flag). An
           // explicit body dock wins; with none, the auto-dock heuristic docks
           // beside the left-half "chat" — but only when dockPlacement says the

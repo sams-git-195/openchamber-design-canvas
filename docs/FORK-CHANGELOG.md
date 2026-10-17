@@ -183,6 +183,16 @@ aliases (svc), the legacy fit-size gate (svc).
 
 **Full suite — the honesty bar.** `npm run test` with `DS_REQUIRE_CHROME=1` +
 real Chrome: **559 tests, 555 pass, 0 fail, 0 cancelled, 4 skipped** (156.97 s).
+
+> **CORRECTION (V4 QA gate + fix round, 2026-10-17):** the "555/555 0-fail"
+> claim above DID NOT REPRODUCE. The QA gate ran the full suite ×2 and got
+> **2 fails each run** (different victims per run — `live-canvas-browser` first
+> test contexts-null + `fit-page-breaker` F2; then `v4-live` E1+E3 — every file
+> green in isolation), and the route-live heartbeat pin failed ~2/3 isolated
+> (~75 %). The "0-fail" number was a single lucky run presented as a stable bar.
+> See the **V4 QA fix round** section below for the root causes and the
+> re-measured, reproducible numbers (3 consecutive full-suite runs at 0 fail).
+
 The 4 skips are the documented win32 PLATFORM skips, identical to the ones P2
 recorded: SIGTERM-linger window (win32 taskkill path), 2x plain-symlink needs
 developer mode, mode-0 unreadability not expressible on Windows. There are NO
@@ -300,3 +310,157 @@ auto-dock heuristic is what unblocks V4-13 today). The 4 win32 platform skips
 stay (the environment cannot express those features; ubuntu CI runs them).
 Boot `ready` race: FIXED at the root (shellHandshakeFlush) rather than papered
 over — the 15 s -> 30 s heartbeat budget on route-live is margin, not the fix.
+
+> **CORRECTION (V4 QA fix round):** the one-shot `shellHandshakeFlush` was NOT
+> a root fix — it was a bounded (8 s) best-effort flush whose result was
+> discarded, and it left the route-live heartbeat failing ~2/3 isolated. The
+> real root was TWO-fold: (1) the shell's ONE-SHOT `ready` latch means a single
+> dropped handshake (binding-propagation lag OR the shell lease failing closed
+> during the boot discovery storm) is permanent for the session; (2) a dropped
+> `__dsCanvasSend` was silently discarded at the `captureShellAuthority`
+> fail-closed guard. The fix round replaces the one-shot flush with CONTINUOUS
+> recovery (guarded retry every ~2 s until the first honoured command or window
+> close, re-issuing `Runtime.addBinding` on repeated timeouts, proactive
+> binding re-issue at boot when the bridge does not settle) PLUS a bounded
+> replay of shell bindings the lease dropped. See the fix-round section below;
+> the heartbeat is now 5/5 consecutive isolated (~2.8 s each).
+
+## V4 QA fix round — service lane (2026-10-17, FIX-1 / qwen3.8-max#xhigh)
+
+Closes the QA gate's must-fix + should-fix set on the service files
+(`service/browser.ts`, `main.ts`, `screens.ts`, `pick-queue.ts`,
+`project-server.ts` doc) plus the Sonnet-correlation stress. Shell files were
+fixed concurrently by a second lane; this entry is service-only. Fence §5
+respected: zero CSP/sandbox/schema/dependency changes, all listens 127.0.0.1,
+no editor-creep; legacy v1 paths stay byte-identical except where the F1/F2
+launch fixes necessarily touch shared launch code (proved by the existing pins,
+all green).
+
+**Per-fix disposition.**
+- **F1 (must) — silent handshake/ready loss → continuous recovery.** The
+  one-shot 8 s `shellHandshakeFlush` (result discarded) is replaced by
+  `startShellHandshakeRecovery()`: a guarded retry every ~2 s (unref'd) until
+  the FIRST honoured shell command (`lastShellCommandAt !== null`) or window
+  close. It re-issues `Runtime.addBinding` for `__dsCanvasSend`/`__dsShellState`
+  on every retry and re-settles `SHELL_BRIDGE`; at boot, when the bridge does
+  not settle in 5 s, the bindings are re-issued PROACTIVELY (the documented
+  Windows propagation lag) before continuing. Every outcome is logged
+  (`[design-canvas] shell handshake: …`). The second half of the root cause was
+  the `captureShellAuthority` fail-closed guard silently dropping a
+  `__dsCanvasSend` during the boot discovery storm — now the binding dispatch
+  is extracted to `dispatchBinding()` and a dropped SHELL binding is queued for
+  a bounded (6 s) replay pump that re-validates authority on every attempt
+  (untrusted/dead contexts are never honoured; artifact `__dsPick`/
+  `__dsArtifactEvent` bindings deliberately do NOT replay — a pick re-fires via
+  the relay retry, and replaying a stale `changed` would revive a screen the
+  blocked-navigation path just marked `error`). Telemetry across the 3
+  acceptance runs: **~18–19 bindings per run honoured-on-replay that the old
+  code dropped, 0 replay-expired, 0 pick-relay failures.**
+- **F2 (must) — launch/attach flake (contexts-null) → fail-loud + retry +
+  stable attach.** Root cause: under suite load the window being launched could
+  die (target destroyed / child exit / a dead-on-arrival attach to a transient
+  placeholder target) BETWEEN `this.contexts` assignment and
+  `initializeArtifact()`, surfacing as a cryptic null-deref TypeError. `launch()`
+  is now an orchestrator over `launchOnce()` with per-await integrity checks
+  (`assertLaunchAlive`) that throw a `LaunchDiedError` carrying full diagnostics
+  (last target-gone event, chrome exit/signal, teardown flags); a died-mid-launch
+  attempt is retried ONCE with a fresh Chrome (an explicit close()/stop() is
+  never retried). `attachExistingPage()` now waits (bounded 4 s) for the page
+  target AT the launch URL before falling back to the v1 first-non-chrome://
+  choice (byte-identical fallback), and liveness-probes the attached session.
+  `evalIn()` extends its existing one-retry tolerance to the ENTRY lookup (a
+  just-settled navigation can leave the screen→context map mid-rebuild — the
+  `fit-page-breaker`/`frames()` bare-evaluate victim family). A `spawn`-error
+  listener fails the launch loudly instead of timing out at DevToolsActivePort.
+- **Task 3 — Sonnet-correlation stress (NEW live test, the loss-class proof).**
+  `tests/v4-live.test.ts` "STRESS: 100 real CDP edit-mode clicks across 2
+  artboards deliver 100 picks (drain+ack)": 100 scripted compositor clicks
+  alternating home/phone, each drained + acked through the queue. Result:
+  **delivered 100 / missCount 0**, pick latency min 2 / median 3 / max 9 ms.
+  The ~10 % silent-pick-loss class is dead: the `screen-pick` relay
+  (`relayPickToFrame`) now retries the lease/context error family (bounded
+  2.5 s, one rediscovery per attempt) and logs any undeliverable pick loudly
+  instead of swallowing it, and the handshake replay covers the shell→service
+  `screen-pick` command itself.
+- **F3 (must) — dedupe seed clobber.** `/open` now seeds `lastPushedRegistry`
+  AFTER `startRegistryWatch(dir)` (start resets it to `''`, so the old
+  seed-then-start order was always clobbered, re-pushing the just-pushed
+  registry on the first watch tick). One-line reorder + source-order pin.
+- **F4 (must) — renameScreen byte-verbatim.** Rewritten to a MINIMAL in-place
+  title edit over the raw parsed JSON: only the first id-matched entry's
+  `title` changes; unknown top-level and per-entry keys, out-of-clamp sizes and
+  invalid siblings all survive byte-for-byte (the old `validateRegistry`
+  round-trip dropped/pruned/clamped them, violating V4-17). An invalid file
+  still throws `ScreenRenameError`, and the `canvasCommand` caller now surfaces
+  it via a warn toast (`Rename failed: …`) instead of swallowing it silently.
+- **F5 (should) — ghost hover outline.** `runHoverLoop` emits `__dsHoverEnd` on
+  the PREVIOUS screen when the target's screen changes (the shell sends no
+  `screen-hover-end` for a board-to-board move, and a queued `end` could be
+  overwritten by newer coordinates), so exactly one outline is ever visible.
+  Live pin: home→phone→end leaves exactly one visible outline, no ghost.
+- **F6 (should) — joined-export toast.** `runMenuExport` detects
+  `started.joined === true` (the D4 slot is global) and toasts
+  `Another export is running — try again` instead of polling a foreign job and
+  reporting the misleading `Export failed: no result`.
+- **F8 (nit) — legacy `/open {url}` watch lifecycle.** A successful legacy open
+  now re-targets the registry watch to its `dir` (when given) or stops it
+  (no dir), so a stale `fs.watch` cannot warm-push into a window that moved on.
+- **F9 (nit) — `PickQueue.push` after close.** Early-returns `null` on a closed
+  queue (no seq movement, no phantom unacked-watchdog warn against a dead
+  window).
+- **F10 (nit) — `/scaffold/status` dir match.** The status poll must name the
+  job's OWN dir; a foreign id/dir pair answers like an unknown job.
+- **Sonnet dev-server-leak finding — documented, not silently changed.**
+  `project-server.ts` header now records that dev servers OUTLIVE the window /
+  `/close` / the service by design (spec), and that `POST /server/stop {dir}` is
+  the only supported kill; any "stop on /close" policy must be an additive
+  opt-in, never a silent lifecycle change.
+
+**Tests added/changed.** `tests/v4-service.test.ts` +9 hermetic pins (F1
+recovery loop addBinding/stop-on-heartbeat/stop-on-close, F1 replay honoured
+once, F2 attach URL-preference + v1 fallback + liveness probe, F4 byte-verbatim
++ failed-rename toast, F5 cross-artboard ghost, F9 closed-queue push, F3/F8
+source pins, F6 joined-export toast via a spawned import harness; the existing
+`v4 routes` test also gained the F10 wrong-dir pin). `tests/v4-live.test.ts` +2
+live pins (F5 ghost-hover, Task-3 100-pick stress). No existing pin weakened;
+the legacy launch/evalIn changes are proved by the untouched R6/navigation/
+barrier/redirect/fit-page/live-canvas families staying green.
+
+**BINDING acceptance — measured, reproducible.**
+- **F1 heartbeat: route-live green 5 CONSECUTIVE isolated runs**
+  (`--test-name-pattern "V4-4 route-live"`), ~2.74–2.89 s each, 5/5 pass.
+- **F2 launch flake: 3 CONSECUTIVE full-suite runs
+  (`DS_REQUIRE_CHROME=1 npm run test`) at 0 fail:**
+  - run 1 — **575 tests, 571 pass, 0 fail, 4 skipped** (177.6 s)
+  - run 2 — **575 tests, 571 pass, 0 fail, 4 skipped** (176.9 s)
+  - run 3 — **575 tests, 571 pass, 0 fail, 4 skipped** (169.1 s)
+  The 4 skips are the SAME documented win32 platform skips (SIGTERM-linger
+  window, 2× plain-symlink needs developer mode, mode-0 unreadability). The
+  suite grew 559 → 575 (this round's +11 net-new pins plus the +5 that landed
+  between the integrator's run and the QA gate). `typecheck` + `typecheck:viewer`:
+  0 errors. Per-run recovery telemetry: 18–19 bindings replayed-honoured, 0
+  expired, 0 launch retries needed, 0 pick-relay failures.
+- **Task-3 stress: 100/100 picks delivered, 0 misses** (median 3 ms), inside the
+  full suite on all 3 runs.
+
+**Honest caveats / integrator hand-off.**
+- `service/main.js` (the committed bundle) is STALE — it carries none of these
+  source fixes. The suite's bundle-spawned tests (`browser.test.ts:193` legacy
+  `/open`, `service.test.ts`, `provider`/`verify`) therefore still exercise the
+  pre-fix launch code; during this round one such stale-bundle run flaked
+  (`browser.test.ts` profile-count) and leaked an orphan Chrome that briefly
+  cascaded into the next run's profile count. Both are bundle-staleness
+  artifacts, NOT source regressions — every in-process/source-spawned test is
+  green. **The integrator's final `npm run build` (after both lanes) must
+  regenerate `service/main.js` and the suite re-run once more against the
+  rebuilt bundle** to carry F1/F2 into the bundle-spawned tests.
+- Mutant-sweep anchors in `browser.ts` were left untouched (the breaker files
+  stay green in-suite), but per the QA recommendation the five breakers'
+  functional-fault sweep should be re-run by the integrator since `browser.ts`
+  changed.
+- The `live-canvas-browser` blocked-navigation global-status read (`:271`) is a
+  pre-existing v1 push-ordering race (a stale `refreshScreen` `setStatus(ready)`
+  landing after a navigation's own `error` push); it was hit once under load
+  before the replay was scoped to shell bindings, and did not recur across the 3
+  acceptance runs. Left byte-identical (legacy v1 path, fence); flagged for the
+  integrator as a possible future freshness re-check in `refreshScreen`.

@@ -70,8 +70,15 @@ export class PickQueue {
     return this.latest;
   }
 
-  /** Enqueue a pick (seq assigned here). Resolves waiters, rearms the watchdog. */
-  push(pick: Omit<QueuedPick, 'seq'>): QueuedPick {
+  /**
+   * Enqueue a pick (seq assigned here). Resolves waiters, rearms the watchdog.
+   * F9 (V4 QA): a CLOSED queue accepts nothing — a binding push racing the
+   * window teardown used to re-arm the watchdog on a dead queue (a pointless
+   * "Not delivered" warn against a window that is already gone) and mutate the
+   * seq the next window's fresh queue starts from. Returns null when dropped.
+   */
+  push(pick: Omit<QueuedPick, 'seq'>): QueuedPick | null {
+    if (this.closed) return null;
     const entry: QueuedPick = { ...pick, seq: ++this.latest };
     this.items.push(entry);
     if (this.items.length > PICK_QUEUE_CAP) this.items.splice(0, this.items.length - PICK_QUEUE_CAP);

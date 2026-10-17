@@ -66,6 +66,39 @@ const CDP_TIMEOUT_MS = 30_000;
 const NAVIGATE_TIMEOUT_MS = 30_000;
 const LAUNCH_TIMEOUT_MS = 20_000;
 
+// ---- F2 (V4 QA): launch flake — fail loud, retry once -------------------------
+/** Total launch attempts: a window that dies mid-launch (nothing user-visible
+ *  existed yet) is retried exactly once before the error surfaces. */
+const LAUNCH_ATTEMPTS = 2;
+/** Bounded wait for a page target AT the launch URL before falling back to the
+ *  v1 target choice (attach race: a transient placeholder target that dies
+ *  mid-launch was one contexts-null flake class under suite load). */
+const ATTACH_STABLE_MS = 4_000;
+/** Post-attach liveness probe: a session that cannot answer a trivial evaluate
+ *  is dead on arrival and fails the attempt loudly instead of bleeding a
+ *  null-context TypeError out of the ArtifactContexts boot. */
+const ATTACH_PROBE_EXPR = 'true';
+
+/** The window being launched died before the launch completed. Carries the
+ *  collected diagnostics; `launch()` retries it once, then rethrows loud. */
+class LaunchDiedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LaunchDiedError';
+  }
+}
+
+/** F1 (V4 QA): shell-binding replay window — a shell→service message that
+ *  arrives while the shell lease fails closed (the boot discovery storm) is
+ *  retried for this long instead of being dropped silently. The one-shot
+ *  `ready` latch in the shell made such a drop permanent for the session
+ *  (heartbeat null forever = the route-live flake and part of the silent
+ *  pick-loss class). */
+const SHELL_REPLAY_WINDOW_MS = 6_000;
+const SHELL_REPLAY_STEP_MS = 60;
+/** Bound on queued replays (recovery lane; a storm beyond this drops loudly). */
+const SHELL_REPLAY_MAX = 64;
+
 /** App-window geometry, `DS_WINDOW` = "x,y,w,h". */
 export type WindowSpec = { x: number; y: number; width: number; height: number };
 
@@ -1409,6 +1442,33 @@ export class Browser {
   private registryError: string | null = null;
   /** V4-15/E17: when the last shell→service message arrived (bridge health probe). */
   private lastShellCommandAt: number | null = null;
+  // ---- F1 (V4 QA): continuous shell-handshake recovery -------------------------
+  /** Armed while no shell command has been honoured yet for the current window;
+   *  retries the guarded handshake every ~2 s (unref'd), re-issuing the shell
+   *  Runtime.addBinding calls when flushes repeatedly time out. Stops at the
+   *  first honoured command (lastShellCommandAt !== null) or window close. */
+  private handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+  private handshakeAttempts = 0;
+  /** Test seam: the recovery cadence (product default ~2 s per the QA fix). */
+  private handshakeRecoveryIntervalMs = 2_000;
+  // ---- F1 (V4 QA): bounded replay of shell bindings dropped by the lease -------
+  private shellReplay: Array<{
+    context: ArtifactContexts;
+    name: string;
+    value: unknown;
+    session: string | undefined;
+    executionContextId: unknown;
+    deadline: number;
+  }> = [];
+  private shellReplayPump: ReturnType<typeof setTimeout> | null = null;
+  // ---- F2 (V4 QA): launch-death diagnostics -------------------------------------
+  /** Set by close()/stop(): an explicit teardown request — a launch failure
+   *  under it is NEVER retried (the user/service asked for the window gone). */
+  private closeRequested = false;
+  /** F2: recorded window-death event for the launch diagnostics. */
+  private lastTargetGone: { kind: string; targetId?: string; sessionId?: string; at: number } | null = null;
+  /** Test seam for the F2 attach-stability wait (product: ATTACH_STABLE_MS). */
+  private attachStableMs = ATTACH_STABLE_MS;
   /** V4-6: latest-wins hover coalescing — one evaluate in flight, never more. */
   private hoverInFlight = false;
   private hoverPending: { screen: string; x: number; y: number } | 'end' | null = null;
@@ -1775,6 +1835,9 @@ export class Browser {
       throw new Error(`refusing to launch the live window at a non-http(s) URL: ${url}`);
     }
     this.requestedUrl = url;
+    // F2: an explicit close/stop from a PREVIOUS window must not veto the
+    // retry logic of THIS launch.
+    this.closeRequested = false;
     if (!this.starting) {
       this.starting = this.launch().catch((error) => {
         this.starting = null;
@@ -1784,7 +1847,71 @@ export class Browser {
     return this.starting;
   }
 
+  /**
+   * F2 (V4 QA) launch orchestration: the QA gate caught `this.contexts`
+   * going null BETWEEN its assignment and `initializeArtifact()` under suite
+   * load — the window being launched died (target destroyed / child exit /
+   * dead-on-arrival attach) while the boot sequence was awaiting, and the
+   * concurrent teardown turned the launch into a cryptic null-deref TypeError.
+   * Now every boot step is integrity-checked and fails LOUD with the collected
+   * death diagnostics (last target event, chrome exit/signal, teardown flags),
+   * and — because nothing user-visible existed yet — a died-mid-launch attempt
+   * is retried ONCE with a fresh Chrome before the error surfaces. An explicit
+   * close()/stop() during the launch is never retried.
+   */
   private async launch(): Promise<void> {
+    const failures: string[] = [];
+    for (let attempt = 1; attempt <= LAUNCH_ATTEMPTS; attempt += 1) {
+      this.lastTargetGone = null;
+      this.lastShellCommandAt = null;
+      try {
+        await this.launchOnce();
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const windowDied =
+          error instanceof LaunchDiedError ||
+          this.closedAt !== null ||
+          this.quitPromise !== null ||
+          /CDP closed|CDP socket|CDP timeout|Session closed|No such target|not attached|Invalid session|Target closed/i.test(message);
+        const diagnostic = `attempt ${attempt}: ${message}${windowDied ? this.launchDeathDetail() : ''}`;
+        failures.push(diagnostic);
+        console.log(`[design-canvas] launch ${diagnostic}`);
+        const userClosed = this.closeRequested;
+        if (userClosed || !windowDied || attempt >= LAUNCH_ATTEMPTS) {
+          throw new Error(`live window launch failed after ${attempt} attempt(s) — ${failures.join(' | ')}`);
+        }
+        // Clear the corpse (chrome kill, profile reap, viewer close, flag
+        // resets) before the retry — but keep THIS launch as the in-flight
+        // start() promise so a concurrent start() joins the retry instead of
+        // spawning a second Chrome.
+        const inFlight = this.starting;
+        await this.stop().catch(() => undefined);
+        this.closeRequested = userClosed;
+        if (this.starting === null) this.starting = inFlight;
+      }
+    }
+  }
+
+  /** Human-readable death facts for the fail-loud launch error (F2). */
+  private launchDeathDetail(): string {
+    const chrome = this.chrome;
+    const parts: string[] = [
+      this.lastTargetGone
+        ? `last window-death event: ${this.lastTargetGone.kind}${this.lastTargetGone.targetId ? ` targetId=${this.lastTargetGone.targetId}` : ''}${this.lastTargetGone.sessionId ? ` sessionId=${this.lastTargetGone.sessionId}` : ''} at ${new Date(this.lastTargetGone.at).toISOString()}`
+        : 'no target-gone/child-exit event observed',
+      chrome ? `chrome exitCode=${chrome.exitCode} signalCode=${chrome.signalCode} pid=${chrome.pid ?? 'n/a'}` : 'chrome handle already cleared',
+      `closedAt=${this.closedAt === null ? 'null' : new Date(this.closedAt).toISOString()}`,
+      `quitting=${this.quitting}`,
+      `closeRequested=${this.closeRequested}`,
+      `debuggingPort=${this.debuggingPort ?? 'null'}`,
+      `targetId=${this.targetId ?? 'null'}`,
+      `sessionId=${this.sessionId ?? 'null'}`,
+    ];
+    return ` [${parts.join('; ')}]`;
+  }
+
+  private async launchOnce(): Promise<void> {
     if (!isWebSafeUrl(this.requestedUrl)) {
       throw new Error('launch() needs a web-safe --app URL');
     }
@@ -1823,6 +1950,14 @@ export class Browser {
     });
     chrome.unref();
     this.chrome = chrome;
+    // F2: a spawn failure (ENOENT/EACCES on the resolved Chrome path) must
+    // fail the launch loudly, not time out at DevToolsActivePort — and an
+    // unhandled 'error' event on a ChildProcess would crash the service.
+    let spawnError: Error | null = null;
+    chrome.on('error', (error) => {
+      spawnError = error;
+      this.lastTargetGone = { kind: 'child-spawn-error', at: Date.now() };
+    });
     chrome.on('exit', () => {
       // The child dying on its own = the live window is gone (user closed it,
       // or quit Chrome). stop() clears this.chrome before its own kill lands, so
@@ -1831,11 +1966,13 @@ export class Browser {
       // process is left behind. Never auto-relaunched; the UI reads
       // `state().windowOpen`.
       if (this.chrome !== chrome) return;
+      // F2: record the death for the launch diagnostics before tearing down.
+      this.lastTargetGone = { kind: 'child-exit', at: Date.now() };
       this.closedAt = Date.now();
       void this.quit();
     });
 
-    const port = await this.waitForPort(profile, chrome);
+    const port = await this.waitForPort(profile, chrome, () => spawnError);
     this.debuggingPort = port;
     const version = (await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json())) as {
       webSocketDebuggerUrl?: string;
@@ -1863,15 +2000,55 @@ export class Browser {
     if (!(await this.attachExistingPage(cdp))) await this.attachNewPage(cdp);
     const session = this.requireSession();
 
-    this.contexts = new ArtifactContexts(cdp, session, ARTIFACT_SCRIPTS, () => { this.frameEventsChanged(); }, url);
-    this.contexts.activeScreenId = this.activeScreenId;
-    await this.contexts.enable(session);
-    await this.contexts.discover();
-    await this.shellBridgeSettled();
-    await this.contexts.initializeArtifact();
-    // Integrator (boot 'ready' race — see shellHandshakeFlush): guarantee the
-    // handshake arrives even when the page mounted before bindings propagated.
-    await this.shellHandshakeFlush();
+    // F2: boot the artifact machinery against a LOCAL handle and integrity-
+    // check after every await — a window death mid-boot (target destroyed,
+    // child exit, an explicit stop) races these awaits and used to surface as
+    // a null-deref TypeError out of `this.contexts`.
+    const contexts = new ArtifactContexts(cdp, session, ARTIFACT_SCRIPTS, () => { this.frameEventsChanged(); }, url);
+    this.contexts = contexts;
+    contexts.activeScreenId = this.activeScreenId;
+    const alive = (): boolean => this.contexts === contexts && this.cdp === cdp && this.closedAt === null && !this.quitting;
+    await contexts.enable(session);
+    this.assertLaunchAlive(alive, 'after ArtifactContexts.enable');
+    await contexts.discover();
+    this.assertLaunchAlive(alive, 'after ArtifactContexts.discover');
+    let bridged = await this.shellBridgeSettled();
+    this.assertLaunchAlive(alive, 'after shellBridgeSettled');
+    if (!bridged) {
+      // F1 (V4 QA): SHELL_BRIDGE answers false while `__dsShellState` is not a
+      // function in the shell's root context — the documented Windows
+      // propagation lag (the addBinding response lands before the binding does).
+      // Repair ACTIVELY instead of proceeding into a binding-less session:
+      // re-issue the shell bindings (idempotent; re-add forces propagation into
+      // the pre-existing context) and give the bridge one more short settle.
+      // Without this the launch used to stall its way through the 8 s flush —
+      // and with the flush now bounded, tests and users would see a shell with
+      // no bridge for the first seconds of the session (breaker A4's
+      // 'the shell bridge persists', v4-live E3/E4 under suite load).
+      this.logHandshake('bridge did not settle at boot — re-issuing shell bindings');
+      for (const name of ['__dsCanvasSend', '__dsShellState']) {
+        await cdp.send('Runtime.addBinding', { name }, session).catch(() => undefined);
+      }
+      bridged = await this.shellBridgeSettled(2500);
+      this.assertLaunchAlive(alive, 'after boot binding re-issue');
+      this.logHandshake(`boot binding re-issue: bridge ${bridged ? 'installed' : 'STILL unavailable (recovery watchdog continues)'}`);
+    }
+    await contexts.initializeArtifact();
+    this.assertLaunchAlive(alive, 'after ArtifactContexts.initializeArtifact');
+    // F1 (V4 QA): the one-shot bounded flush is now the FIRST attempt of a
+    // continuous recovery — see startShellHandshakeRecovery. The initial bound
+    // is short so boot latency does not grow; the watchdog carries the rest.
+    const flushed = await this.shellHandshakeFlush(2_500);
+    this.assertLaunchAlive(alive, 'after shellHandshakeFlush');
+    this.logHandshake(`initial flush ${flushed ? 'reported sent' : 'timed out'}${flushed ? '' : ' — arming continuous recovery'}`);
+    this.startShellHandshakeRecovery();
+  }
+
+  /** F2: throw a diagnostic LaunchDiedError when the launch integrity check
+   *  fails (the window being launched died during a boot await). */
+  private assertLaunchAlive(alive: () => boolean, phase: string): void {
+    if (alive()) return;
+    throw new LaunchDiedError(`the live window died mid-launch (${phase})${this.launchDeathDetail()}`);
   }
 
   /** Create a fresh page target and attach to it (last-resort fallback). */
@@ -1888,26 +2065,50 @@ export class Browser {
    * non-internal page is the window; the about:blank-preference is gone because
    * the window is never launched at a placeholder. Returns false when Chrome
    * reports no page target at all, so the caller can fall back to creating one.
+   *
+   * F2 (V4 QA): under suite load the DevToolsActivePort file can predate a
+   * STABLE app-window target — attaching to a transient placeholder (or one
+   * about to be replaced) gets the session torn down mid-launch (one of the
+   * contexts-null flake classes). So: bounded wait for a page target AT the
+   * launch URL, the v1 choice (first non-chrome:// page) as the fallback, and
+   * a liveness probe on the attached session so a dead-on-arrival attach fails
+   * this attempt loudly instead of nulling out later.
    */
   private async attachExistingPage(cdp: CdpClient): Promise<boolean> {
-    const res = await cdp.send('Target.getTargets');
-    const infos = Array.isArray(res.targetInfos)
-      ? (res.targetInfos as Array<{ targetId?: unknown; type?: unknown; url?: unknown }>)
-      : [];
-    const pages = infos.filter((info) => info.type === 'page');
-    const chosen = pages.find((info) => !String(info.url ?? '').startsWith('chrome://')) ?? pages[0];
+    const deadline = Date.now() + this.attachStableMs;
+    let pages: Array<{ targetId?: unknown; type?: unknown; url?: unknown }> = [];
+    let chosen: { targetId?: unknown; type?: unknown; url?: unknown } | undefined;
+    for (;;) {
+      const res = await cdp.send('Target.getTargets');
+      const infos = Array.isArray(res.targetInfos)
+        ? (res.targetInfos as Array<{ targetId?: unknown; type?: unknown; url?: unknown }>)
+        : [];
+      pages = infos.filter((info) => info.type === 'page');
+      // The `--app` window is the target sitting at (or loading) the launch URL.
+      chosen = pages.find((info) => String(info.url ?? '') === this.launchUrl);
+      if (chosen || Date.now() >= deadline) break;
+      await delay(50);
+    }
+    if (!chosen) chosen = pages.find((info) => !String(info.url ?? '').startsWith('chrome://')) ?? pages[0];
     if (!chosen || typeof chosen.targetId !== 'string') return false;
     this.targetId = chosen.targetId;
     const attached = await cdp.send('Target.attachToTarget', { targetId: this.targetId, flatten: true });
     this.sessionId = String(attached.sessionId ?? '');
+    // Wait-for-target-stable: prove the session answers before the boot
+    // sequence builds on it (a target that dies here fails the attempt with a
+    // real CDP error the retry orchestrator understands).
+    await cdp.send('Runtime.evaluate', { expression: ATTACH_PROBE_EXPR, returnByValue: true }, this.sessionId);
     return true;
   }
 
-  private async waitForPort(profile: string, chrome: ChildProcess): Promise<number> {
+  private async waitForPort(profile: string, chrome: ChildProcess, spawnError?: () => Error | null): Promise<number> {
     const file = path.join(profile, 'DevToolsActivePort');
     const deadline = Date.now() + LAUNCH_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (chrome.exitCode !== null) throw new Error(`Chrome exited early (${chrome.exitCode})`);
+      // F2: surface a spawn failure (ENOENT/EACCES) the moment it is known.
+      const spawn = spawnError?.();
+      if (spawn) throw new Error(`Chrome failed to spawn: ${spawn.message}`);
       try {
         const text = await fs.readFile(file, 'utf8');
         const port = Number((text.split('\n')[0] ?? '').trim());
@@ -1927,53 +2128,21 @@ export class Browser {
         const value=JSON.parse(params.payload);
         const context=this.contexts;
         if(!context)return;
-        // Artboard branch (spec §D): picks and events are honoured from ANY
-        // trusted artifact context; the screen id comes from the service-side
-        // executionContextId→screenId map, never from the payload itself.
-        const screen=context.screenForContext(session,params.executionContextId);
-        if(screen&&context.matches(context.artifact(screen),session,params.executionContextId)) {
-          if(params.name==='__dsPick'&&validPick(value)){this.lastPick={...value,screen};this.pickSeq+=1;/* V4-5: every honoured pick ALSO enters the ordered queue GET /picks drains (its own seq; lastPick/pickSeq stay back-compat). */this.enqueueElementPick(screen,value);}
-          if(params.name==='__dsArtifactEvent'&&value&&['dismiss','changed','height-dirty','wheel','camera-zoom'].includes(value.type)){
-            if(value.type==='dismiss'&&this.canvasFlags.menu)void this.shellEval('__dsCanvas.dismissMenu()').catch(()=>undefined);
-            if(value.type==='changed')void this.refreshScreen(screen);
-            // Height machinery is active-screen-only in v1 (spec §C).
-            if(value.type==='height-dirty'&&screen===this.activeScreenId)this.queueLayout();
-            if(value.type==='camera-zoom'&&validCameraZoom(value)&&!this.captureInFlight){
-              const artifact=context.artifact(screen);
-              void this.transaction(async()=>{
-                if(this.contexts!==context||context.artifact(screen)!==artifact||this.captureInFlight)return;
-                if(value.action==='wheel'){
-                  await this.shellEval(`(()=>{const f=document.getElementById('ds-frame-${screen}'),r=f.getBoundingClientRect(),c=document.getElementById('canvas').getBoundingClientRect();if(![r.x,r.y,r.width,r.height,c.x,c.y,f.clientWidth,f.clientHeight].every(Number.isFinite)||r.width<=0||r.height<=0||f.clientWidth<=0||f.clientHeight<=0)return false;return typeof __dsCanvas.zoomCamera==='function'&&__dsCanvas.zoomCamera({action:'wheel',deltaY:${value.deltaY},x:r.x+${value.x}*r.width/f.clientWidth-c.x,y:r.y+${value.y}*r.height/f.clientHeight-c.y})})()`);
-                }else await this.shellEval(`typeof __dsCanvas.zoomCamera==='function'&&__dsCanvas.zoomCamera({action:${JSON.stringify(value.action)}})`);
-              }).catch(()=>undefined);
-            }
-            if(value.type==='wheel'&&[value.x,value.y,value.deltaX,value.deltaY].every(n=>typeof n==='number'&&Number.isFinite(n)&&Math.abs(n)<=8192)){
-              const artifact=context.artifact(screen);
-              void this.transaction(async()=>{if(this.layoutState.mode!=='page'||screen!==this.activeScreenId||context.artifact(screen)!==artifact)return;
-                await this.shellEval(`(()=>{const f=document.getElementById('ds-frame-${screen}'),r=f.getBoundingClientRect(),c=document.getElementById('canvas').getBoundingClientRect();return __dsCanvas.handleCanvasInput({type:'wheel',deltaX:${value.deltaX},deltaY:${value.deltaY},x:r.x+${value.x}*r.width/f.clientWidth-c.x,y:r.y+${value.y}*r.height/f.clientHeight-c.y,zoom:false})})()`);
-              }).catch(()=>undefined);
-            }
-          }
-        } else if(context.matches(context.shell(),session,params.executionContextId)) {
-          const authority=context.captureShellAuthority(session,params.executionContextId);
-          if(!authority)return;
-          if(params.name==='__dsCanvasSend')void this.canvasCommand(value,authority).catch(()=>undefined);
-          if(params.name==='__dsShellState'&&value){
-            void this.transaction(async()=>{
-            if(!context.shellAuthorityCurrent(authority))return;
-            if(typeof value.menu==='boolean'&&typeof value.pan==='boolean'){
-              this.canvasFlags={menu:value.menu,pan:value.pan};
-              void this.evalIn(`window.__dsViewerFlags=${JSON.stringify(this.canvasFlags)}`,false).catch(()=>undefined);
-            } else if(value.pick&&[value.pick.x,value.pick.y].every((n:unknown)=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=8192)){
-              // Legacy pan-layer pick payload; v2 artboard picks arrive as
-              // canvasCommand 'screen-pick'. Honour an optional screen, else
-              // the active artboard.
-              const pickScreen=typeof value.pick.screen==='string'&&SCREEN_ID_RE.test(value.pick.screen)?value.pick.screen:this.activeScreenId;
-              void this.evalIn(`window.__dsPickAt(${value.pick.x},${value.pick.y})`,false,pickScreen??undefined).catch(()=>undefined);
-            }
-            }).catch(()=>undefined);
-          }
-        }
+        const name=String(params.name??'');
+        if(this.dispatchBinding(context,name,value,session,params.executionContextId))return;
+        // F1 (V4 QA): the message was dropped ONLY because its execution
+        // context authority is transiently unresolvable — the shell lease
+        // fails closed while a discovery pass is in flight (the boot load
+        // storm restarts it constantly), and an artboard frame can be
+        // unmapped between two discovery passes. Dropping silently here is
+        // the loss class the QA gate killed: the shell's ONE-SHOT `ready`
+        // latch makes a dropped handshake permanent (heartbeat null for the
+        // whole session — the route-live flake), and a dropped __dsPick is a
+        // user click that vanishes without a trace (Sonnet probe-b's ~10%
+        // edit-mode pick loss). Bounded replay: re-dispatch until authority
+        // materialises — revalidated on EVERY attempt, so an untrusted or
+        // dead context is never honoured — then drop loudly.
+        this.queueBindingReplay(context,name,value,session,params.executionContextId);
       } catch {
         /* malformed payload from the page */
       }
@@ -1985,11 +2154,126 @@ export class Browser {
     // process) in the Dock. Discovery events name the target; detach names the
     // session, so match either against ours.
     cdp.on('Target.targetDestroyed', (params) => {
-      this.handleTargetGone(String(params.targetId ?? ''), undefined);
+      this.handleTargetGone(String(params.targetId ?? ''), undefined, 'target-destroyed');
     });
     cdp.on('Target.detachedFromTarget', (params) => {
-      this.handleTargetGone(String(params.targetId ?? ''), typeof params.sessionId === 'string' ? params.sessionId : undefined);
+      this.handleTargetGone(String(params.targetId ?? ''), typeof params.sessionId === 'string' ? params.sessionId : undefined, 'session-detached');
     });
+  }
+
+  /**
+   * Dispatch ONE Runtime.bindingCalled payload (extracted verbatim from the
+   * old inline handler so the immediate path stays byte-identical). Returns
+   * TRUE when the message was honoured or semantically consumed under full
+   * authority; FALSE ONLY when the execution-context authority could not be
+   * resolved right now — the caller's cue for the bounded F1 replay.
+   * Authority is revalidated at EVERY dispatch (immediate or replayed), so a
+   * replay can never honour an untrusted or dead context.
+   */
+  private dispatchBinding(context: ArtifactContexts, name: string, value: any, session: string | undefined, executionContextId: unknown): boolean {
+    // Artboard branch (spec §D): picks and events are honoured from ANY
+    // trusted artifact context; the screen id comes from the service-side
+    // executionContextId→screenId map, never from the payload itself.
+    const screen=context.screenForContext(session,executionContextId);
+    if(screen&&context.matches(context.artifact(screen),session,executionContextId)) {
+      if(name==='__dsPick'&&validPick(value)){this.lastPick={...value,screen};this.pickSeq+=1;/* V4-5: every honoured pick ALSO enters the ordered queue GET /picks drains (its own seq; lastPick/pickSeq stay back-compat). */this.enqueueElementPick(screen,value);}
+      if(name==='__dsArtifactEvent'&&value&&['dismiss','changed','height-dirty','wheel','camera-zoom'].includes(value.type)){
+        if(value.type==='dismiss'&&this.canvasFlags.menu)void this.shellEval('__dsCanvas.dismissMenu()').catch(()=>undefined);
+        if(value.type==='changed')void this.refreshScreen(screen);
+        // Height machinery is active-screen-only in v1 (spec §C).
+        if(value.type==='height-dirty'&&screen===this.activeScreenId)this.queueLayout();
+        if(value.type==='camera-zoom'&&validCameraZoom(value)&&!this.captureInFlight){
+          const artifact=context.artifact(screen);
+          void this.transaction(async()=>{
+            if(this.contexts!==context||context.artifact(screen)!==artifact||this.captureInFlight)return;
+            if(value.action==='wheel'){
+              await this.shellEval(`(()=>{const f=document.getElementById('ds-frame-${screen}'),r=f.getBoundingClientRect(),c=document.getElementById('canvas').getBoundingClientRect();if(![r.x,r.y,r.width,r.height,c.x,c.y,f.clientWidth,f.clientHeight].every(Number.isFinite)||r.width<=0||r.height<=0||f.clientWidth<=0||f.clientHeight<=0)return false;return typeof __dsCanvas.zoomCamera==='function'&&__dsCanvas.zoomCamera({action:'wheel',deltaY:${value.deltaY},x:r.x+${value.x}*r.width/f.clientWidth-c.x,y:r.y+${value.y}*r.height/f.clientHeight-c.y})})()`);
+            }else await this.shellEval(`typeof __dsCanvas.zoomCamera==='function'&&__dsCanvas.zoomCamera({action:${JSON.stringify(value.action)}})`);
+          }).catch(()=>undefined);
+        }
+        if(value.type==='wheel'&&[value.x,value.y,value.deltaX,value.deltaY].every(n=>typeof n==='number'&&Number.isFinite(n)&&Math.abs(n)<=8192)){
+          const artifact=context.artifact(screen);
+          void this.transaction(async()=>{if(this.layoutState.mode!=='page'||screen!==this.activeScreenId||context.artifact(screen)!==artifact)return;
+            await this.shellEval(`(()=>{const f=document.getElementById('ds-frame-${screen}'),r=f.getBoundingClientRect(),c=document.getElementById('canvas').getBoundingClientRect();return __dsCanvas.handleCanvasInput({type:'wheel',deltaX:${value.deltaX},deltaY:${value.deltaY},x:r.x+${value.x}*r.width/f.clientWidth-c.x,y:r.y+${value.y}*r.height/f.clientHeight-c.y,zoom:false})})()`);
+          }).catch(()=>undefined);
+        }
+      }
+      return true;
+    }
+    if(name!=='__dsCanvasSend'&&name!=='__dsShellState') {
+      // __dsPick / __dsArtifactEvent from a frame that is not a trusted
+      // artifact context right now. F1 replay is DELIBERATELY NOT applied to
+      // these: (a) a pick's in-frame trigger (__dsPickAt) is already retried
+      // by relayPickToFrame, so the __dsPick binding re-fires from a valid
+      // context; (b) __dsArtifactEvent 'changed' is an idempotent refresh
+      // signal the next real event re-delivers — replaying a stale one AFTER a
+      // blocked navigation settled to 'error' would refresh the still-loaded
+      // previous document and revive the screen to 'ready' (the exact
+      // live-canvas-browser blocked-navigation race). Silent drop here is the
+      // byte-identical v1 behavior; only the SHELL bindings below replay.
+      return true;
+    }
+    const authority=context.captureShellAuthority(session,executionContextId);
+    if(!authority)return false;
+    if(name==='__dsCanvasSend')void this.canvasCommand(value,authority).catch(()=>undefined);
+    if(name==='__dsShellState'&&value){
+      void this.transaction(async()=>{
+      if(!context.shellAuthorityCurrent(authority))return;
+      if(typeof value.menu==='boolean'&&typeof value.pan==='boolean'){
+        this.canvasFlags={menu:value.menu,pan:value.pan};
+        void this.evalIn(`window.__dsViewerFlags=${JSON.stringify(this.canvasFlags)}`,false).catch(()=>undefined);
+      } else if(value.pick&&[value.pick.x,value.pick.y].every((n:unknown)=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=8192)){
+        // Legacy pan-layer pick payload; v2 artboard picks arrive as
+        // canvasCommand 'screen-pick'. Honour an optional screen, else
+        // the active artboard.
+        const pickScreen=typeof value.pick.screen==='string'&&SCREEN_ID_RE.test(value.pick.screen)?value.pick.screen:this.activeScreenId;
+        void this.evalIn(`window.__dsPickAt(${value.pick.x},${value.pick.y})`,false,pickScreen??undefined).catch(()=>undefined);
+      }
+      }).catch(()=>undefined);
+    }
+    return true;
+  }
+
+  /** F1: queue one dropped binding message for the bounded replay pump. */
+  private queueBindingReplay(context: ArtifactContexts, name: string, value: unknown, session: string | undefined, executionContextId: unknown): void {
+    // Without a session there is nothing to revalidate the authority against.
+    if (session === undefined) return;
+    if (this.shellReplay.length >= SHELL_REPLAY_MAX) {
+      console.log(`[design-canvas] binding replay queue full — dropping ${name} from session ${session} (loud, not silent)`);
+      return;
+    }
+    this.shellReplay.push({ context, name, value, session, executionContextId, deadline: Date.now() + SHELL_REPLAY_WINDOW_MS });
+    this.scheduleBindingReplayPump();
+  }
+
+  private scheduleBindingReplayPump(): void {
+    if (this.shellReplayPump) return;
+    const timer = setTimeout(() => {
+      this.shellReplayPump = null;
+      this.runBindingReplayPump();
+    }, SHELL_REPLAY_STEP_MS);
+    timer.unref?.();
+    this.shellReplayPump = timer;
+  }
+
+  /** One replay pass, in arrival order (the pump is single-flight, so the
+   *  relative order of dropped messages is preserved when they land). */
+  private runBindingReplayPump(): void {
+    const still: typeof this.shellReplay = [];
+    for (const entry of this.shellReplay) {
+      if (this.contexts !== entry.context || this.cdp === null || this.closedAt !== null) continue; // teardown: drop
+      if (Date.now() >= entry.deadline) {
+        console.log(`[design-canvas] binding ${entry.name} dropped after ${SHELL_REPLAY_WINDOW_MS} ms without context authority (F1 replay expired)`);
+        continue;
+      }
+      if (this.dispatchBinding(entry.context, entry.name, entry.value, entry.session, entry.executionContextId)) {
+        console.log(`[design-canvas] binding ${entry.name} honoured on replay (authority had failed closed)`);
+        continue;
+      }
+      still.push(entry);
+    }
+    this.shellReplay = still;
+    if (this.shellReplay.length) this.scheduleBindingReplayPump();
   }
 
   /**
@@ -1997,9 +2281,11 @@ export class Browser {
    * macOS keeps the app alive after the last window closes) and remove the
    * throwaway profile. Ignored while an intentional teardown is already running.
    */
-  private handleTargetGone(targetId: string, sessionId: string | undefined): void {
+  private handleTargetGone(targetId: string, sessionId: string | undefined, kind: string): void {
     if (this.quitting) return;
     if (this.targetId === null || (targetId !== this.targetId && sessionId !== this.sessionId)) return;
+    // F2: record the death for the launch diagnostics before tearing down.
+    this.lastTargetGone = { kind, ...(targetId ? { targetId } : {}), ...(sessionId ? { sessionId } : {}), at: Date.now() };
     this.closedAt = Date.now();
     void this.quit();
   }
@@ -2057,8 +2343,11 @@ export class Browser {
    * while unsent and latches on success, so when the original arrived first
    * this is a pure no-op; the `ready` handler (shellBridgeSettled + discover
    * + initializeArtifact + pushes) is idempotent and reload-safe by design.
-   * Bounded (8 s) so a dead window cannot hang boot — the flush is fire-and-
-   * forget at the launch site.
+   * F1 (V4 QA): no longer the whole fix — the launch site runs it with a
+   * SHORT bound as attempt #1 and then arms startShellHandshakeRecovery(),
+   * which keeps retrying (and re-issues the shell bindings) until the first
+   * honoured shell command or window close. A bounded flush alone left a
+   * timed-out boot silently bricked for the rest of the session.
    */
   private async shellHandshakeFlush(timeoutMs=8000):Promise<boolean>{
     const deadline=Date.now()+timeoutMs;
@@ -2070,6 +2359,86 @@ export class Browser {
       if(Date.now()>=deadline)return false;
       await delay(100);
     }
+  }
+
+  // ---- F1 (V4 QA): continuous shell-handshake recovery --------------------------
+
+  /**
+   * The QA gate found the one-shot 8 s `shellHandshakeFlush` insufficient:
+   * its result was discarded, a flush that timed out (binding propagation
+   * lag) left the session silently bricked, and a handshake the shell LATCHED
+   * as sent but the service dropped (lease fail-closed — see dispatchBinding's
+   * replay) never stamped the heartbeat either. Recovery is now continuous:
+   * a guarded retry every ~2 s (unref'd, so it never holds the process open)
+   * until the FIRST honoured shell command (lastShellCommandAt !== null) or
+   * window close. Repeated flush timeouts re-issue the shell Runtime.addBinding
+   * calls (addBinding is idempotent and re-propagates into the pre-existing
+   * root context — the exact Windows lag this file documents above
+   * shellBridgeSettled) and re-settle SHELL_BRIDGE before the next handshake
+   * attempt. Every outcome is logged.
+   */
+  private startShellHandshakeRecovery(): void {
+    this.stopShellHandshakeRecovery();
+    const tick = async (): Promise<void> => {
+      this.handshakeTimer = null;
+      if (this.lastShellCommandAt !== null) {
+        this.logHandshake(`recovery stopped: first honoured shell command after ${this.handshakeAttempts} retry(ies)`);
+        this.handshakeAttempts = 0;
+        return;
+      }
+      if (!this.cdp || this.closedAt !== null || this.quitting) {
+        this.logHandshake(`recovery stopped: window closed after ${this.handshakeAttempts} retry(ies)`);
+        this.handshakeAttempts = 0;
+        return;
+      }
+      this.handshakeAttempts += 1;
+      // Every watchdog attempt follows at least one timed-out flush (the
+      // launch-site one, or the previous tick's) — that IS the "repeated
+      // timeout" the QA fix re-issues the binding for: the addBinding call is
+      // idempotent and re-propagates into the pre-existing root context (the
+      // documented Windows lag), and SHELL_BRIDGE re-settles on top of it.
+      {
+        const cdp = this.cdp;
+        const session = this.sessionId;
+        if (cdp && session) {
+          for (const name of ['__dsCanvasSend', '__dsShellState']) {
+            await cdp.send('Runtime.addBinding', { name }, session).catch(() => undefined);
+          }
+        }
+        const bridged = await this.shellBridgeSettled(1500).catch(() => false);
+        this.logHandshake(`retry ${this.handshakeAttempts}: re-issued shell bindings, bridge ${bridged ? 'installed' : 'still unavailable'}`);
+      }
+      const sent = await this.shellHandshakeFlush(2000).catch(() => false);
+      this.logHandshake(`retry ${this.handshakeAttempts}: handshake flush ${sent ? 'reported sent' : 'timed out'}`);
+      if (this.lastShellCommandAt !== null) {
+        this.logHandshake(`recovery stopped: first honoured shell command after ${this.handshakeAttempts} retry(ies)`);
+        this.handshakeAttempts = 0;
+        return;
+      }
+      if (!this.cdp || this.closedAt !== null || this.quitting) {
+        this.logHandshake(`recovery stopped: window closed after ${this.handshakeAttempts} retry(ies)`);
+        this.handshakeAttempts = 0;
+        return;
+      }
+      const timer = setTimeout(() => { void tick(); }, this.handshakeRecoveryIntervalMs);
+      timer.unref?.();
+      this.handshakeTimer = timer;
+    };
+    void tick();
+  }
+
+  /** Disarm the recovery loop (teardown, or the heartbeat came alive). */
+  private stopShellHandshakeRecovery(): void {
+    if (this.handshakeTimer) {
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
+    }
+    this.handshakeAttempts = 0;
+  }
+
+  /** F1 diagnostics: every flush outcome is logged (QA acceptance). */
+  private logHandshake(message: string): void {
+    console.log(`[design-canvas] shell handshake: ${message}`);
   }
   /**
    * shellEval that waits for a shell lease instead of failing mid-load. The
@@ -2268,6 +2637,11 @@ export class Browser {
     // V4-15/E17 instrumentation: every honoured shell→service message stamps
     // the bridge's heartbeat (/state.shellBridge.lastCommandAt).
     this.lastShellCommandAt=Date.now();
+    // F1: the first honoured command is the recovery loop's success condition.
+    if(this.handshakeTimer){
+      this.logHandshake(`recovery stopped: first honoured shell command (${String((command as {type?:unknown}).type??'unknown')}) after ${this.handshakeAttempts} retry(ies)`);
+      this.stopShellHandshakeRecovery();
+    }
     const value=command as {type?:string;width?:number;height?:number;id?:string;mode?:string;preset?:string;screen?:string;x?:number;y?:number;camera?:unknown;additive?:unknown;action?:unknown;title?:unknown};
     // Per-screen layout machinery is active-screen-only in v1 (spec §C): a
     // message naming another screen is accepted but applied only when it is
@@ -2317,8 +2691,12 @@ export class Browser {
     else if(value.type==='screen-pick'&&typeof screen==='string'&&[value.x,value.y].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=8192)){
       // Edit-mode artboard click: run the picker INSIDE that frame's context.
       // V4-5: `additive` (shift-click) rides through to the in-frame payload.
-      const additive=value.additive===true;
-      void this.evalIn(`window.__dsPickAt(${value.x},${value.y},${additive?'true':'false'})`,false,screen).catch(()=>undefined);
+      // F1/F2 chain (Sonnet probe-b correlation): the relay is no longer a
+      // single swallowed evalIn — a frame context transiently unavailable
+      // (discovery churn) used to drop the user's click silently (~10% of
+      // edit-mode clicks under smoke load). relayPickToFrame retries the
+      // lease/context error family and logs what it could not deliver.
+      void this.relayPickToFrame(screen,value.x!,value.y!,value.additive===true);
     }
     else if(value.type==='screen-activate'&&typeof screen==='string'&&this.screens.has(screen)){
       await this.setActive(screen);
@@ -2343,7 +2721,13 @@ export class Browser {
     // pushes. Documented race: an agent write in the same ~5 ms window wins.
     else if(value.type==='screen-rename'&&typeof screen==='string'&&this.screens.has(screen)&&typeof value.title==='string'&&value.title.trim()!==''&&value.title.length<=120){
       const dir=this.workspaceDir;
-      if(dir)void renameScreen(dir,screen,value.title).catch(()=>undefined);
+      // F4 (V4 QA): a failed rename must SURFACE — the old `.catch(()=>{})`
+      // turned an invalid/unwritable screens.json into a silent no-op while
+      // the user watched their new title never commit. Warn toast instead.
+      if(dir)void renameScreen(dir,screen,value.title).catch((error)=>{
+        const message=error instanceof Error?error.message:String(error);
+        void this.pushToast('warn',`Rename failed: ${message}`.slice(0,300));
+      });
     }
     // FORK-MERGE (P2 seam): spec §C does not enumerate 'mode-request'; the
     // shell edit/play affordances need a way to ASK for a mode change, so the
@@ -2375,10 +2759,53 @@ export class Browser {
   // ---- V4-6 hover coalescing -------------------------------------------------
 
   /**
+   * F1/F2 chain (Sonnet probe-b correlation, QA task 3): deliver one
+   * edit-mode click into its artboard frame. The single swallowed `evalIn`
+   * this replaces was the service-side half of the silent pick-loss class:
+   * when the frame's execution context was transiently unavailable (the
+   * discovery storm of a load/HMR pass), the click vanished without a trace.
+   * Now the lease/context error family retries — same classification as
+   * shellEvalSettled, with one rediscovery per attempt — bounded at 2.5 s,
+   * and every undeliverable pick is logged loudly instead of dropped silently.
+   * A `false` answer (no element at the point / overlay) is a legitimate
+   * in-frame miss, logged at the same seam.
+   */
+  private async relayPickToFrame(screen: string, x: number, y: number, additive: boolean): Promise<void> {
+    const expression=`window.__dsPickAt(${x},${y},${additive?'true':'false'})`;
+    const deadline=Date.now()+2500;
+    for(;;){
+      try {
+        const picked=await this.evalIn(expression,false,screen);
+        if(picked===false)console.log(`[design-canvas] pick relay: __dsPickAt found no pickable element at (${x},${y}) in "${screen}"`);
+        return;
+      } catch (error) {
+        const message=error instanceof Error?error.message:String(error);
+        if(!/artifact context is unavailable|uniqueContextId not found|execution context|authority was revoked/i.test(message)||Date.now()>=deadline){
+          console.log(`[design-canvas] pick relay to "${screen}" FAILED (loud, was silent before F1/F2): ${message}`);
+          return;
+        }
+        await this.contexts?.discover().catch(()=>undefined);
+        await delay(60);
+      }
+    }
+  }
+
+  /**
    * Latest-wins hover pump (spec V4-6): exactly one evaluate in flight per
    * service, newer coordinates REPLACE the queued one, everything is dropped
    * while a capture is in flight. 200 hover messages in one second therefore
    * cost only as many evaluates as the frame can answer.
+   *
+   * F5 (V4 QA): the latest-wins overwrite alone could strand a GHOST outline
+   * — a queued 'end' (or a plain cross-artboard move, for which the shell
+   * emits NO screen-hover-end at all) got replaced by newer coordinates, and
+   * the PREVIOUS screen's #__ds-hover-outline stayed visible forever. The
+   * retirement intent is therefore owned by the loop, not the queue slot:
+   * runHoverLoop emits __dsHoverEnd on the previous screen whenever the
+   * target's screen changes, which covers both the direct cross-artboard
+   * sequence and any 'end' a later coordinate overwrote (the equivalent of
+   * making 'end' non-overwritable, without the flicker of ending and
+   * immediately re-hovering the SAME screen).
    */
   private queueHover(target: { screen: string; x: number; y: number } | 'end'): void {
     if (this.captureInFlight || !this.cdp) return;
@@ -2400,7 +2827,17 @@ export class Browser {
         this.lastHoverScreen = null;
         if (screen) await this.evalIn('window.__dsHoverEnd&&window.__dsHoverEnd()', false, screen).catch(() => undefined);
       } else {
+        const previous = this.lastHoverScreen;
         this.lastHoverScreen = target.screen;
+        // F5 (V4 QA): crossing artboards retires the old outline FIRST — the
+        // shell never sends an end for a board-to-board move, and a queued
+        // 'end' may have been overwritten by these very coordinates. Without
+        // this the previous board keeps a visible hover box (Sonnet smoke F1:
+        // exactly one outline may be visible at a time).
+        if (previous && previous !== target.screen) {
+          await this.evalIn('window.__dsHoverEnd&&window.__dsHoverEnd()', false, previous).catch(() => undefined);
+          if (this.captureInFlight || !this.cdp) continue;
+        }
         await this.evalIn(
           `window.__dsHoverAt&&window.__dsHoverAt(${target.x},${target.y})`,
           false,
@@ -3302,9 +3739,24 @@ export class Browser {
     // A world destroyed between context resolution and send is the same
     // navigation storm as on the shell side: re-discover once (cheap, the
     // frame tree is cached in CDP) and retry before surfacing the error.
+    // F2 (V4 QA): the ENTRY lookup gets the same one-retry tolerance — under
+    // suite load a just-settled navigation can leave the screen→context map
+    // mid-rebuild (screenFrames repopulating while the old world's contexts
+    // are already destroyed), and the instant 'artifact context is
+    // unavailable' throw rotated suite victims (fit-page-breaker F1/F2 bare
+    // `frames()` evaluates; QA run-1 saw the same family). A genuinely dead
+    // or unembeddable frame still surfaces the SAME error one beat later —
+    // the contract is unchanged, only the transient window is absorbed.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const context=this.contexts?.artifact(screen);
-      if(!context||!this.contexts)throw new Error('artifact context is unavailable; check embedding permissions and retry');
+      if(!context||!this.contexts){
+        if(attempt===0){
+          await this.contexts?.discover().catch(()=>undefined);
+          await delay(80);
+          continue;
+        }
+        throw new Error('artifact context is unavailable; check embedding permissions and retry');
+      }
       try {
         return await this.contexts.evaluate(context,expression,awaitPromise);
       } catch (error) {
@@ -3437,6 +3889,9 @@ export class Browser {
    * fresh window with a new profile.
    */
   async close(): Promise<void> {
+    // F2: an explicit close request is never "retried" by the launch
+    // orchestrator — record the intent before any teardown starts.
+    this.closeRequested = true;
     if (this.chrome === null && this.cdp === null) {
       this.closedAt = Date.now();
       return;
@@ -3472,6 +3927,18 @@ export class Browser {
     });
     this.hoverPending = null;
     this.lastHoverScreen = null;
+    // F1: the handshake-recovery loop and the binding-replay queue belong to
+    // the dying window — and the heartbeat starts clean for the next launch
+    // (the fresh-queue comment above already claimed this intent for the
+    // queue; lastShellCommandAt was the half that never got reset, which
+    // would have made a RELAUNCH's recovery loop stop before it started).
+    this.stopShellHandshakeRecovery();
+    this.shellReplay = [];
+    if (this.shellReplayPump) {
+      clearTimeout(this.shellReplayPump);
+      this.shellReplayPump = null;
+    }
+    this.lastShellCommandAt = null;
     const cdp = this.cdp;
     if (cdp) {
       if (this.targetId) {
@@ -3559,9 +4026,21 @@ export class Browser {
    */
   async stop(opts: { kill?: boolean } = {}): Promise<void> {
     const kill = opts.kill ?? true;
+    // F2: an explicit stop is never retried by the launch orchestrator. (The
+    // orchestrator's own between-attempts cleanup restores the prior value.)
+    this.closeRequested = true;
     if(kill&&!this.quitPromise&&(this.chrome||this.cdp)){await this.close();}
     this.contexts?.close();this.contexts=null;
     await this.viewer?.close();this.viewer=null;
+    // F1: window-scoped recovery state dies with the window (same intent as
+    // doQuit's reset; stop() may run without a quit ever having happened).
+    this.stopShellHandshakeRecovery();
+    this.shellReplay = [];
+    if (this.shellReplayPump) {
+      clearTimeout(this.shellReplayPump);
+      this.shellReplayPump = null;
+    }
+    this.lastShellCommandAt = null;
     // Join an in-flight window-close teardown so a relaunch never races it.
     if (this.quitPromise) {
       await this.quitPromise;

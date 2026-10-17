@@ -5,10 +5,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createServer } from 'node:net';
 
 /** Integrator: probe-bind candidate ports so blind random draws can never
@@ -667,6 +667,12 @@ test('v4 routes: malformed → 400, workspace-marker guards → 400, business fa
       await pause(80);
     }
     assert.equal(state, 'done', `the job settles (saw: ${seenStates})`);
+    // F10 (V4 QA): the status poll must name the job's OWN dir — the same job
+    // id with a foreign dir answers like an unknown job.
+    const wrongDir = await (await api(`/scaffold/status?dir=${encodeURIComponent(plain)}&job=${asyncRes.jobId}`)).json() as { ok?: boolean; error?: string; state?: string };
+    assert.deepEqual(wrongDir, { ok: false, error: 'unknown scaffold job' }, 'F10: a foreign dir cannot read the job');
+    const rightDir = await (await api(`/scaffold/status?dir=${encodeURIComponent(inside)}&job=${asyncRes.jobId}`)).json() as { state?: string };
+    assert.equal(rightDir.state, 'done', 'F10: the job\'s own dir still reads it');
     const homeRegistry = JSON.parse(await readFile(path.join(inside, 'screens.json'), 'utf8')) as { screens: unknown[] };
     assert.equal(homeRegistry.screens.length, 1, 'exactly one workspace, files already written behind the response');
 
@@ -774,3 +780,304 @@ test('V4-15: per-screen Retry ensures a loopback dev server FIRST and shows the 
   assert.equal(plainNav, 'home', 'retry still navigates without the hook');
 });
 
+// ---- V4 QA fix round (F1–F10) hermetic pins --------------------------------------
+
+test('F1: handshake recovery re-issues shell addBinding after repeated timeouts and stops at the first honoured command', async () => {
+  const { browser, internal } = stubbedBrowser();
+  const calls: Array<{ method: string; params: Record<string, unknown>; session?: string }> = [];
+  internal.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}, session?: string) => {
+      calls.push({ method, params, session });
+      return {};
+    },
+    on: () => () => undefined,
+  };
+  internal.sessionId = 'shell-session';
+  internal.closedAt = null;
+  internal.quitting = false;
+  internal.lastShellCommandAt = null;
+  internal.handshakeRecoveryIntervalMs = 30;
+  internal.shellHandshakeFlush = async () => false; // every flush times out
+  internal.shellBridgeSettled = async () => true;
+  (browser as unknown as { startShellHandshakeRecovery: () => void }).startShellHandshakeRecovery();
+  await pause(250); // several failed retries
+  internal.lastShellCommandAt = Date.now(); // the first honoured shell command
+  await pause(250); // let any in-flight tick finish and the loop observe the heartbeat
+  const adds = calls.filter((c) => c.method === 'Runtime.addBinding');
+  assert.ok(adds.length >= 2, `repeated flush timeouts re-issue the shell bindings (saw ${adds.length})`);
+  assert.deepEqual([...new Set(adds.map((a) => a.params.name))].sort(), ['__dsCanvasSend', '__dsShellState']);
+  assert.ok(adds.every((a) => a.session === 'shell-session'), 're-issued on the shell session');
+  assert.equal(internal.handshakeTimer, null, 'the loop disarmed at the honoured heartbeat');
+  const countAtStop = calls.length;
+  await pause(200);
+  assert.equal(calls.length, countAtStop, 'nothing more is sent after the heartbeat came alive');
+
+  // Window close also stops the loop (a dead window cannot hang recovery).
+  internal.cdp = {
+    send: async (method: string, params: Record<string, unknown> = {}, session?: string) => {
+      calls.push({ method, params, session });
+      return {};
+    },
+    on: () => () => undefined,
+  };
+  internal.closedAt = null;
+  internal.quitting = false;
+  internal.lastShellCommandAt = null;
+  (browser as unknown as { startShellHandshakeRecovery: () => void }).startShellHandshakeRecovery();
+  await pause(80);
+  internal.cdp = null; // the window died
+  internal.closedAt = Date.now();
+  await pause(250);
+  assert.equal(internal.handshakeTimer, null, 'the loop disarmed at window close');
+  const countAtClose = calls.length;
+  await pause(150);
+  assert.equal(calls.length, countAtClose, 'a closed window schedules no further attempts');
+});
+
+test('F1: a shell binding dropped by the fail-closed lease is replayed, never silently lost', async () => {
+  const { browser, internal } = stubbedBrowser();
+  openFakeWorkspace(internal);
+  const commands: unknown[] = [];
+  internal.canvasCommand = async (command: unknown) => { commands.push(command); };
+  // A lease that fails closed for the first ~120 ms, exactly like a boot
+  // discovery storm: captureShellAuthority answers null while `discovering`.
+  let authorised = false;
+  internal.contexts = {
+    shellAuthorityCurrent: () => authorised,
+    shell: () => null,
+    artifact: () => null,
+    screenForContext: () => null,
+    matches: () => false,
+    captureShellAuthority: () => (authorised ? { context: {}, revision: 1 } : null),
+    activeScreenId: null,
+  };
+  const dispatch = browser as unknown as {
+    dispatchBinding: (context: unknown, name: string, value: unknown, session: string | undefined, id: unknown) => boolean;
+    queueBindingReplay: (context: unknown, name: string, value: unknown, session: string | undefined, id: unknown) => void;
+  };
+  const context = internal.contexts;
+  const honouredNow = dispatch.dispatchBinding(context, '__dsCanvasSend', { type: 'ready' }, 'shell-session', 7);
+  assert.equal(honouredNow, false, 'the fail-closed lease refuses the message (the old code dropped it HERE forever)');
+  assert.equal(commands.length, 0);
+  dispatch.queueBindingReplay(context, '__dsCanvasSend', { type: 'ready' }, 'shell-session', 7);
+  await pause(80);
+  assert.equal(commands.length, 0, 'still fail-closed: nothing honoured yet');
+  authorised = true; // the storm settles
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && commands.length === 0) await pause(20);
+  assert.equal(commands.length, 1, 'the replayed ready landed once authority materialised');
+  assert.deepEqual(commands[0], { type: 'ready' });
+  await pause(200);
+  assert.equal(commands.length, 1, 'honoured exactly once (no duplicate replay)');
+});
+
+test('F2: attachExistingPage prefers the target at the launch URL, keeps the v1 fallback, and probes the session', async () => {
+  const browser = new Browser();
+  const internal = browser as unknown as Record<string, unknown> & {
+    attachExistingPage: (cdp: unknown) => Promise<boolean>;
+    launchUrl: string;
+    targetId: string;
+    sessionId: string;
+    attachStableMs: number;
+  };
+  internal.launchUrl = 'http://127.0.0.1:4321/canvas/deadbeef';
+  internal.attachStableMs = 150;
+  const sent: Array<{ method: string; params: Record<string, unknown>; session?: string }> = [];
+  const makeCdp = (targets: Array<{ targetId: string; type: string; url: string }>) => ({
+    send: async (method: string, params: Record<string, unknown> = {}, session?: string) => {
+      sent.push({ method, params, session });
+      if (method === 'Target.getTargets') return { targetInfos: targets };
+      if (method === 'Target.attachToTarget') return { sessionId: `ses-${String(params.targetId)}` };
+      return { result: { value: true } };
+    },
+    on: () => () => undefined,
+  });
+
+  // A transient placeholder is listed FIRST; the app window (URL match) must win.
+  const ok = await internal.attachExistingPage(makeCdp([
+    { targetId: 't-blank', type: 'page', url: 'about:blank' },
+    { targetId: 't-app', type: 'page', url: internal.launchUrl },
+  ]));
+  assert.equal(ok, true);
+  assert.equal(internal.targetId, 't-app', 'the launch-URL target wins over a transient placeholder');
+  assert.equal(internal.sessionId, 'ses-t-app');
+  assert.ok(sent.some((c) => c.method === 'Runtime.evaluate' && c.session === 'ses-t-app'), 'the attached session is liveness-probed before the boot builds on it');
+
+  // No URL match anywhere: the v1 choice (first non-chrome:// page) is kept.
+  const browser2 = new Browser();
+  const i2 = browser2 as unknown as Record<string, unknown> & { attachExistingPage: (cdp: unknown) => Promise<boolean>; launchUrl: string; targetId: string; attachStableMs: number };
+  i2.launchUrl = 'http://127.0.0.1:4321/canvas/other';
+  i2.attachStableMs = 120;
+  const ok2 = await i2.attachExistingPage(makeCdp([
+    { targetId: 't-ntp', type: 'page', url: 'chrome://new-tab-page/' },
+    { targetId: 't-x', type: 'page', url: 'http://127.0.0.1:9/x' },
+  ]));
+  assert.equal(ok2, true);
+  assert.equal(i2.targetId, 't-x', 'fallback keeps the v1 first-non-chrome:// choice byte-identical');
+});
+
+test('F4: renameScreen keeps unknown keys, unclamped sizes and invalid siblings byte-identical', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'v4-rename-raw-'));
+  const raw = {
+    version: 1,
+    $schema: 'https://example.invalid/screens.schema.json',
+    generatedBy: 'agent',
+    screens: [
+      { id: 'home', file: 'home.html', title: 'Home', width: 120, height: 800, tags: ['hero', 'v2'], notes: { draft: true } },
+      { id: 'BAD ENTRY', file: 'x.html', width: 'wide', height: 400 },
+      { id: 'phone', file: 'phone.html', title: 'Phone', width: 390, height: 844 },
+    ],
+  };
+  await writeFile(path.join(dir, SCREENS_FILENAME), JSON.stringify(raw, null, 2), 'utf8');
+  const next = await renameScreen(dir, 'phone', 'Phone portrait');
+  const onDisk = JSON.parse(await readFile(path.join(dir, SCREENS_FILENAME), 'utf8')) as typeof raw;
+  assert.equal(onDisk.$schema, raw.$schema, 'unknown TOP-LEVEL keys survive (the old impl dropped them)');
+  assert.equal(onDisk.generatedBy, 'agent');
+  const home = onDisk.screens[0]!;
+  assert.equal(home.width, 120, 'an out-of-clamp size is NOT rewritten (the reader clamps for display only)');
+  assert.deepEqual(home.tags, ['hero', 'v2'], 'unknown ENTRY keys survive');
+  assert.deepEqual(home.notes, { draft: true });
+  assert.deepEqual(onDisk.screens[1], raw.screens[1], 'an invalid sibling is NOT removed by a rename');
+  assert.equal(onDisk.screens[2]!.title, 'Phone portrait', 'only the matched entry title changed');
+  assert.equal(home.title, 'Home', 'siblings keep their titles');
+  // The returned view is the normalized reader contract (clamped, valid-only).
+  assert.equal(next.screens.find((s) => s.id === 'phone')?.title, 'Phone portrait');
+  assert.equal(next.screens.every((s) => s.width >= 200), true, 'the RETURNED view stays normalized');
+  await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+});
+
+test('F4: a failed inbound rename surfaces a warn toast (never a silent no-op)', async () => {
+  const { browser, internal, toasts } = stubbedBrowser();
+  const dir = await mkdtemp(path.join(tmpdir(), 'v4-ren-toast-'));
+  await writeFile(path.join(dir, SCREENS_FILENAME), '{broken json', 'utf8');
+  openFakeWorkspace(internal, dir);
+  const canvasCommand = (browser as unknown as { canvasCommand: (c: unknown, a: unknown) => Promise<void> }).canvasCommand.bind(browser);
+  await canvasCommand({ type: 'screen-rename', screen: 'home', title: 'New name' }, {});
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && !toasts.some((t) => t.kind === 'warn')) await pause(30);
+  const warn = toasts.find((t) => t.kind === 'warn');
+  assert.ok(warn, 'the invalid-file rename toasted a warn (F4: never silent)');
+  assert.match(warn!.text, /^Rename failed: screens\.json/, 'the toast carries the actionable reason');
+  await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+});
+
+test('F5: crossing artboards retires the previous hover outline; an overwritten end still lands', async () => {
+  const { browser, internal, evalCalls } = stubbedBrowser();
+  openFakeWorkspace(internal);
+  const canvasCommand = (browser as unknown as { canvasCommand: (c: unknown, a: unknown) => Promise<void> }).canvasCommand.bind(browser);
+  await canvasCommand({ type: 'screen-hover', screen: 'home', x: 10, y: 10 }, {});
+  await pause(40);
+  assert.ok(evalCalls.some((c) => c.expr.includes('__dsHoverAt(10,10)') && c.screen === 'home'), 'home hovers');
+  evalCalls.length = 0;
+  // A board-to-board move: the shell sends NO screen-hover-end for these —
+  // the service must retire the old outline itself (the ghost class).
+  await canvasCommand({ type: 'screen-hover', screen: 'phone', x: 5, y: 5 }, {});
+  await pause(40);
+  const endIdx = evalCalls.findIndex((c) => c.expr.includes('__dsHoverEnd') && c.screen === 'home');
+  const atIdx = evalCalls.findIndex((c) => c.expr.includes('__dsHoverAt(5,5)') && c.screen === 'phone');
+  assert.ok(endIdx >= 0, 'F5: the PREVIOUS screen got __dsHoverEnd on the crossing');
+  assert.ok(atIdx >= 0 && endIdx < atIdx, 'end-on-home precedes hoverAt-on-phone');
+
+  // A queued 'end' OVERWRITTEN by newer coordinates for another screen must
+  // still retire the old screen (the end intent is non-overwritable in effect).
+  evalCalls.length = 0;
+  let release: () => void = () => undefined;
+  internal.evalIn = async (expr: string, _a: boolean, screen?: string) => {
+    evalCalls.push({ expr, screen });
+    if (expr.includes('__dsHoverAt') && screen === 'phone') await new Promise<void>((resolve) => { release = resolve; });
+    return true;
+  };
+  void canvasCommand({ type: 'screen-hover', screen: 'phone', x: 6, y: 6 }, {});
+  await pause(20); // hoverAt(phone) in flight (blocked below)
+  void canvasCommand({ type: 'screen-hover-end' }, {}); // queued 'end' …
+  void canvasCommand({ type: 'screen-hover', screen: 'home', x: 7, y: 7 }, {}); // … overwritten by home coords
+  release();
+  await pause(80);
+  assert.ok(evalCalls.some((c) => c.expr.includes('__dsHoverEnd') && c.screen === 'phone'), 'F5: the overwritten end still retired phone');
+  assert.ok(evalCalls.some((c) => c.expr.includes('__dsHoverAt(7,7)') && c.screen === 'home'), 'and the newest hover still lands');
+});
+
+test('F9: a closed PickQueue refuses pushes (no seq movement, no phantom watchdog warn)', async () => {
+  const toasts: Array<{ kind: string; text: string }> = [];
+  const queue = new PickQueue((kind, text) => toasts.push({ kind, text }));
+  const first = queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 1, additive: false, ...fakePicked() });
+  assert.ok(first, 'an open queue accepts pushes');
+  queue.ack(1, 'x');
+  queue.close();
+  const after = queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 2, additive: false, ...fakePicked() });
+  assert.equal(after, null, 'F9: push after close is refused');
+  assert.equal(queue.lastSeq, 1, 'the seq never moves on a closed queue');
+  await pause(2800);
+  assert.equal(toasts.filter((t) => t.kind === 'warn').length, 0, 'no watchdog warn is armed by a post-close push');
+});
+
+test('F3/F8 source pins: the /open dedupe seed lands after startRegistryWatch; legacy {url} stops/re-targets the watch', async () => {
+  const src = await readFile(path.join(root, 'service', 'main.ts'), 'utf8');
+  // F3: seed AFTER start (startRegistryWatch resets the key; the old order was
+  // always clobbered). Paired behavioral twin: the v4-live route-live watch pin.
+  const region = src.slice(src.indexOf('V4-4: the watcher owns THIS workspace'));
+  const startIdx = region.indexOf('startRegistryWatch(dirValue);');
+  const seedIdx = region.indexOf('lastPushedRegistry = JSON.stringify(registry);');
+  assert.ok(startIdx >= 0 && seedIdx >= 0, 'both lines exist in the /open workspace handler');
+  assert.ok(seedIdx > startIdx, 'F3: the dedupe seed lands AFTER the watch start');
+  assert.ok(
+    /setLastWorkspace\(\{ dir: dirValue, screens: \[\], mode, activeScreen: null, view \}\);\s*startRegistryWatch\(dirValue\);/.test(src),
+    'the no-screens branch still starts the watch unseeded',
+  );
+  // F8: a successful legacy {url} open re-targets (dir) or stops (no dir) the watch.
+  const legacy = src.slice(
+    src.indexOf('// { url } — the original single-page flow'),
+    src.indexOf('// { dir, screen? } — the canvas workspace flow'),
+  );
+  assert.ok(legacy.includes('if (dir) startRegistryWatch(dir);'), 'F8: a legacy open WITH a dir re-targets the watch');
+  assert.ok(legacy.includes('else stopRegistryWatch();'), 'F8: a legacy open WITHOUT a dir stops the watch');
+  const watchIdx = legacy.indexOf('startRegistryWatch(dir)');
+  const sendIdx = legacy.indexOf('sendJson(res, 200, { ok: true, url: nav.url');
+  assert.ok(watchIdx >= 0 && sendIdx > watchIdx, 'the watch decision runs on the SUCCESS path only');
+});
+
+test('F6: a menu export that JOINS a foreign running job toasts "Another export is running — try again"', { timeout: 60_000 }, async () => {
+  const port = await pickFreePort(43000, 900);
+  const dir = await mkdtemp(path.join(tmpdir(), 'v4-menu-export-'));
+  await writeFile(path.join(dir, '.design-studio.json'), JSON.stringify({ version: 1, name: 'menu', type: 'hi-fi', url: 'http://127.0.0.1:9/', command: 'npm run dev', entry: 'index.html' }), 'utf8');
+  await writeFile(path.join(dir, SCREENS_FILENAME), JSON.stringify({ version: 1, screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }] }), 'utf8');
+  // Child harness: importing main.ts boots the service module in-process (its
+  // listen side effect rides the throwaway port env), occupies the single D4
+  // export slot with a never-settling job, then drives the REAL runMenuExport
+  // with a stub browser and reports the toasts it produced.
+  const script = [
+    'const dir = process.env.HARNESS_DIR;',
+    'const main = await import(process.env.HARNESS_MAIN);',
+    'const exp = await import(process.env.HARNESS_EXPORT);',
+    'const stuck = { state: async () => ({ windowOpen: true, screens: [] }), capture: () => new Promise(() => {}), printScreenToPdf: () => new Promise(() => {}) };',
+    "const occupied = exp.startExportJob({ dir, screens: [{ id: 'other', url: 'http://127.0.0.1:9/other.html', width: 300, height: 300, state: 'loading' }], formats: ['png'], browser: stuck });",
+    'const toasts = [];',
+    'const fake = { currentWorkspaceDir: () => dir, state: async () => ({ windowOpen: true, screens: [] }), pushToast: async (kind, text) => { toasts.push({ kind, text }); return true; } };',
+    "await main.runMenuExport(fake, 'home', 'png');",
+    'console.log(JSON.stringify({ toasts, occupiedJoined: occupied.joined ?? false }));',
+    'process.exit(0);',
+  ].join('\n');
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    env: {
+      ...process.env,
+      OPENCHAMBER_SERVICE_PORT: String(port),
+      OPENCHAMBER_SERVICE_TOKEN: TOKEN,
+      HARNESS_DIR: dir,
+      HARNESS_MAIN: pathToFileURL(path.join(root, 'service', 'main.ts')).href,
+      HARNESS_EXPORT: pathToFileURL(path.join(root, 'service', 'export.ts')).href,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (d) => { stdout += String(d); });
+  child.stderr.on('data', (d) => { stderr += String(d); });
+  const code = await new Promise<number | null>((resolve) => child.on('exit', resolve));
+  await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  assert.equal(code, 0, `harness exited cleanly (stderr: ${stderr.slice(0, 800)})`);
+  const line = stdout.trim().split('\n').find((l) => l.startsWith('{'));
+  const result = JSON.parse(line ?? 'null') as { toasts: Array<{ kind: string; text: string }>; occupiedJoined: boolean } | null;
+  assert.ok(result, `harness printed its report (stdout: ${stdout.slice(0, 400)})`);
+  assert.equal(result!.occupiedJoined, false, 'the occupying job started fresh (not a join itself)');
+  assert.deepEqual(result!.toasts, [{ kind: 'warn', text: 'Another export is running — try again' }], 'F6: the joined menu export says the truth instead of "Export failed: no result"');
+});

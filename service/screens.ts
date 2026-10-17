@@ -259,12 +259,26 @@ export class ScreenRenameError extends Error {}
 
 /**
  * Rename one registry entry IN PLACE (V4-17): a single-entry read-modify-write
- * of screens.json — re-read immediately before the write, mutate only that
- * entry's `title`, keep everything else byte-verbatim when possible, and write
- * atomically (tmp+rename). Documented race (spec): an agent write landing in
- * the same ~5 ms window wins; the V4-4 watcher converges both directions.
- * The title must be a non-empty string of at most 120 characters (the §3
- * screen-rename message caps it too).
+ * of screens.json — re-read immediately before the write, mutate ONLY the
+ * first entry whose `id` matches, and write atomically (tmp+rename).
+ *
+ * F4 (V4 QA): the edit is MINIMAL over the raw parsed JSON. The old impl
+ * round-tripped the whole file through `validateRegistry` and rewrote a
+ * NORMALIZED registry — dropping unknown/extra keys (top-level and per-entry),
+ * removing sibling entries the reader considers invalid, and clamping sizes.
+ * That violated V4-17's "keep everything else byte-verbatim": screens.json is
+ * agent-owned data and a title rename is not a licence to reformat or prune
+ * it. Now every byte of data the parse produced survives except the matched
+ * entry's `title`; serialization uses the house 2-space format like every
+ * other registry write. A file that does not PARSE (or has no `screens`
+ * array, or no matching id) still throws ScreenRenameError — the caller must
+ * surface it (browser.ts toasts a warn), never swallow it.
+ *
+ * Documented race (spec): an agent write landing in the same ~5 ms window
+ * wins; the V4-4 watcher converges both directions. The title must be a
+ * non-empty string of at most 120 characters (the §3 screen-rename message
+ * caps it too). Returns the NORMALIZED view of the renamed registry (the
+ * reader's contract) — the file itself keeps its raw shape.
  */
 export async function renameScreen(root: string, id: string, title: string): Promise<ScreensRegistry> {
   if (!SCREEN_ID_PATTERN.test(id)) throw new ScreenRenameError(`id must match ${SCREEN_ID_PATTERN.source}`);
@@ -287,24 +301,25 @@ export async function renameScreen(root: string, id: string, title: string): Pro
   const list = (parsed as { screens?: unknown }).screens;
   if (!Array.isArray(list)) throw new ScreenRenameError(`${SCREENS_FILENAME} has no "screens" array`);
   let found = false;
-  const next = list.map((entry) => {
+  for (const entry of list) {
     if (entry && typeof entry === 'object' && !Array.isArray(entry) && (entry as { id?: unknown }).id === id) {
+      // First match wins, exactly like the reader's dedupe — renaming never
+      // touches a shadowed duplicate or any other entry.
+      (entry as Record<string, unknown>).title = clean;
       found = true;
-      return { ...(entry as Record<string, unknown>), title: clean };
+      break;
     }
-    return entry;
-  });
+  }
   if (!found) throw new ScreenRenameError(`screen "${id}" is not in ${SCREENS_FILENAME}`);
-  const registry = validateRegistry({ ...(parsed as object), screens: next }, root);
   const tmp = path.join(path.resolve(root), `.${SCREENS_FILENAME}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
   try {
-    await fs.writeFile(tmp, `${JSON.stringify(registry, null, 2)}\n`, 'utf8');
+    await fs.writeFile(tmp, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
     await fs.rename(tmp, abs);
   } catch (error) {
     await fs.rm(tmp, { force: true }).catch(() => undefined);
     throw new ScreenRenameError(`could not write ${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return registry;
+  return normalizeScreens(parsed, root);
 }
 
 /** True when a screens.json file exists at the workspace root. */

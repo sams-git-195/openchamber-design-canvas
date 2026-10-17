@@ -589,3 +589,147 @@ test('V4-4 route-live: agent screens appear within ~3s, corrupt registry is LOUD
     await import('node:fs/promises').then(({ rm }) => rm(ws, { recursive: true, force: true }).catch(() => undefined));
   }
 });
+
+// ---- V4 QA fix round: live pins ---------------------------------------------------
+
+// F5 (V4 QA / Sonnet smoke F1): the ghost hover outline. A board-to-board hover
+// move sends NO screen-hover-end (the shell's emitter only ends on leave/mode
+// change), and the service's latest-wins queue could overwrite a queued end —
+// so the PREVIOUS artboard kept a visible #__ds-hover-outline forever. The fix
+// retires the old screen inside runHoverLoop; this pin walks home → phone →
+// end and demands exactly one visible outline at every stop.
+test('F5 live: a cross-artboard hover sequence leaves EXACTLY ONE visible outline (no ghost)', { timeout: 150_000 }, async (t) => {
+  if (!(await liveTest(t))) return;
+  await liveCanvas(async (browser, base) => {
+    await browser.openWorkspace({
+      screens: REGISTRY.slice(0, 2).map((s) => ({ id: s.id, url: base + s.url, width: s.width, height: s.height, title: s.title })),
+      baseUrl: base,
+      mode: 'edit',
+    });
+    await pause(2000);
+    const visible = (screen: string) =>
+      browser.evaluate("(()=>{const o=document.getElementById('__ds-hover-outline');return !!o&&o.style.display!=='none'})()", screen) as Promise<boolean>;
+
+    await shell(browser, '__dsCanvasSend(JSON.stringify({type:"screen-hover",screen:"home",x:120,y:60}))');
+    const d1 = Date.now() + 3000;
+    while (Date.now() < d1 && !(await visible('home'))) await pause(30);
+    assert.equal(await visible('home'), true, 'home shows its hover outline');
+
+    // Cross to phone with NO screen-hover-end in between (the exact ghost recipe).
+    await shell(browser, '__dsCanvasSend(JSON.stringify({type:"screen-hover",screen:"phone",x:100,y:60}))');
+    const d2 = Date.now() + 3000;
+    while (Date.now() < d2 && !(await visible('phone'))) await pause(30);
+    assert.equal(await visible('phone'), true, 'phone shows its hover outline');
+    assert.equal(await visible('home'), false, 'F5: the home outline is GONE (the ghost class is dead)');
+
+    // An explicit end retires the last one.
+    await shell(browser, '__dsCanvasSend(JSON.stringify({type:"screen-hover-end"}))');
+    const d3 = Date.now() + 2000;
+    while (Date.now() < d3 && (await visible('phone'))) await pause(30);
+    assert.equal(await visible('phone'), false, 'screen-hover-end hides the last outline');
+  });
+});
+
+// ---- Task 3 (QA ↔ Sonnet probe-b correlation): the silent pick-loss class ---------
+//
+// Sonnet's smoke saw ~3/30 edit-mode clicks never reach /picks despite a fresh
+// hover outline, unreproducible in controlled runs — the same suspect chain as
+// F1/F2 (binding propagation / fail-closed lease drops / one-shot swallowed
+// pick relay). This is the proof the class is dead: 100 scripted REAL CDP
+// clicks alternating across two artboards, each drained+acked through the
+// queue. Every click must produce exactly one kind:'element' pick from its own
+// board; a single lost, doubled, or misattributed pick fails the run and the
+// miss list names it.
+test('STRESS: 100 real CDP edit-mode clicks across 2 artboards deliver 100 picks (drain+ack, zero loss)', { timeout: 300_000 }, async (t) => {
+  if (!(await liveTest(t))) return;
+  await liveCanvas(async (browser, base) => {
+    await browser.openWorkspace({
+      screens: REGISTRY.slice(0, 2).map((s) => ({ id: s.id, url: base + s.url, width: s.width, height: s.height, title: s.title })),
+      baseUrl: base,
+      mode: 'edit',
+    });
+    // Both boards must be READY before the count starts — a click into a
+    // still-loading board is the one documented legitimate miss.
+    const readyDeadline = Date.now() + 25_000;
+    for (;;) {
+      const st = browser.getState();
+      if (st.screens.length === 2 && st.screens.every((s) => s.state === 'ready')) break;
+      if (Date.now() >= readyDeadline) {
+        assert.fail(`boards never settled: ${JSON.stringify(st.screens.map((s) => [s.id, s.state]))}`);
+      }
+      await pause(100);
+    }
+    const internal = browser as unknown as {
+      cdp: { send: (m: string, p: object, s?: string) => Promise<unknown> };
+      sessionId: string;
+    };
+    // The fixture's #b button spans (40,40)-(240,120) in frame CSS px on BOTH
+    // boards (the phone board is 390 wide) — one point per board, recomputed
+    // into shell viewport px on every click (the camera may micro-move).
+    const BOARDS = [
+      { id: 'home', fx: 120, fy: 60 },
+      { id: 'phone', fx: 120, fy: 60 },
+    ] as const;
+    const misses: Array<{ i: number; screen: string; note: string }> = [];
+    const latencies: number[] = [];
+    let since = 0;
+    let delivered = 0;
+    for (let i = 0; i < 100; i += 1) {
+      const board = BOARDS[i % 2]!;
+      const point = (await shell(
+        browser,
+        `(()=>{const f=document.getElementById('ds-frame-${board.id}');const r=f.getBoundingClientRect();return {x:r.x+${board.fx}*r.width/f.clientWidth,y:r.y+${board.fy}*r.height/f.clientHeight};})()`,
+      )) as { x: number; y: number };
+      assert.ok(
+        Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.y >= 0 && point.x <= 1400 && point.y <= 900,
+        `click ${i}: the ${board.id} button maps inside the window viewport (got ${JSON.stringify(point)})`,
+      );
+      const t0 = Date.now();
+      for (const type of ['mousePressed', 'mouseReleased']) {
+        await internal.cdp.send(
+          'Input.dispatchMouseEvent',
+          { type, x: point.x, y: point.y, button: 'left', buttons: 1, clickCount: 1 },
+          internal.sessionId,
+        );
+      }
+      // Drain+ack: exactly one pick must arrive for THIS click (bounded 5 s).
+      let got: { seq: number; screen: string; kind: string; selector?: string } | null = null;
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline && !got) {
+        const page = await browser.getPicks(since, 500);
+        if (page.picks.length > 0) {
+          got = page.picks[0] as { seq: number; screen: string; kind: string; selector?: string };
+          if (page.picks.length > 1) {
+            misses.push({ i, screen: board.id, note: `one click produced ${page.picks.length} queued picks` });
+          }
+          since = page.picks[page.picks.length - 1]!.seq;
+        }
+      }
+      if (!got) {
+        misses.push({ i, screen: board.id, note: 'no pick reached /picks within 5 s (SILENT LOSS)' });
+        continue;
+      }
+      if (got.screen !== board.id || got.kind !== 'element' || got.selector !== '#b') {
+        misses.push({ i, screen: board.id, note: `wrong pick: ${JSON.stringify(got)}` });
+      }
+      browser.ackPicks(got.seq, `stress ${i}`);
+      delivered += 1;
+      latencies.push(Date.now() - t0);
+      await pause(25);
+    }
+    const sorted = [...latencies].sort((a, b) => a - b);
+    console.info(JSON.stringify({
+      stress: '100 CDP edit-mode clicks across 2 artboards',
+      delivered,
+      missCount: misses.length,
+      misses,
+      pickMs: sorted.length
+        ? { min: sorted[0], median: sorted[Math.floor(sorted.length / 2)], max: sorted[sorted.length - 1] }
+        : null,
+    }));
+    assert.deepEqual(misses, [], `every click delivered exactly its own pick (lost/wrong: ${misses.length})`);
+    assert.equal(delivered, 100, 'all 100 picks drained from the queue');
+    const tail = await browser.getPicks(since, 300);
+    assert.equal(tail.picks.length, 0, 'nothing lingers un-drained after the final ack');
+  });
+});

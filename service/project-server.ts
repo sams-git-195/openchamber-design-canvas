@@ -26,6 +26,18 @@
 // the LAN and is retired; hand-written project commands follow the same
 // loopback rule. The reachability probe here still checks both loopback
 // literals (127.0.0.1 and ::1), whichever one a server answers on.
+//
+// Lifecycle note (V4 QA / Sonnet smoke finding — DOCUMENTED, deliberately NOT
+// changed): dev servers OUTLIVE the canvas window, `POST /close`, and the
+// service process itself. That is the spec'd design ("servers outlive the
+// service"): the project's `npm run dev` belongs to the user's workspace, not
+// to one canvas session, and the next open reuses the running server instead
+// of paying another cold boot. The ONLY supported kill is the explicit
+// `POST /server/stop {dir}` (the panel's Stop control / Design-Mode-OFF
+// escape hatch), which stops exactly the recorded, fingerprint-verified
+// process group for that dir. If a "stop dev servers on /close" policy is
+// ever wanted, it must be an additive opt-in (menu/route/env), never a
+// silent lifecycle change here.
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createServer } from 'node:net';
