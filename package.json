@@ -14,13 +14,13 @@
     "live-preview",
     "ai-agent"
   ],
-  "homepage": "https://github.com/lastonoga/openchamber-design-studio#readme",
+  "homepage": "https://github.com/sams-git-195/openchamber-design-canvas#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lastonoga/openchamber-design-studio.git"
+    "url": "https://github.com/sams-git-195/openchamber-design-canvas.git"
   },
   "bugs": {
-    "url": "https://github.com/lastonoga/openchamber-design-studio/issues"
+    "url": "https://github.com/sams-git-195/openchamber-design-canvas/issues"
   },
   "openchamber": {
     "apiVersion": 1,

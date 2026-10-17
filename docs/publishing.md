@@ -62,15 +62,16 @@ theirs, not ours. To ask, email `feedback@openchamber.dev` with the subject
 `OpenChamber extension for the directory` and this body:
 
 ```text
-Extension name: OpenChamber Design Studio
-Repository URL: https://github.com/lastonoga/openchamber-design-studio
+Extension name: OpenChamber Design Canvas
+Repository URL: https://github.com/sams-git-195/openchamber-design-canvas
 Category: Tools
-What it does: A design harness for OpenChamber. It brings your running app into
-the chat as a live browser you can point at, and turns what you click into chat
-references, so the agent changes the design while you watch. It ships Design
-Mode, a live preview window, Cmd/Ctrl-click pick → chat reference, a
-per-project harness plugin, a DESIGN.md / tokens.css preset catalog, project
-scaffolding, and a .design-studio.json project config.
+What it does: A local design canvas for OpenChamber. `/canvas <brief>` in any
+chat opens a real Chrome art-wall — live HTML screens as side-by-side artboards
+at their own sizes — where you point at elements and they land in the composer
+as references, so the agent edits the design while you watch. Edit and Play
+modes, variants and responsive sets on one canvas, drag-to-arrange, PNG/PDF
+export, and gate-backed critique. Local-first: the designs are plain files in
+your own folder and git.
 ```
 
 `Category` is one of `Tools`, `Usage`, `Themes`.
