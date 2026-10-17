@@ -1,10 +1,10 @@
 {
-  "at": "2026-10-17T18:15:10.284Z",
+  "at": "2026-10-17T21:25:33.011Z",
   "results": [
     {
       "name": "scaffold workspace (warm-editorial)",
       "status": "PASS",
-      "note": "http://127.0.0.1:5219/"
+      "note": "http://127.0.0.1:5534/"
     },
     {
       "name": "scaffold token bridge (E5): styles.css vars all declared",
@@ -74,7 +74,7 @@
     {
       "name": "4th screen added live appears ≤3 s (V4-4 watch)",
       "status": "PASS",
-      "note": "about appeared in 630 ms"
+      "note": "about appeared in 626 ms"
     },
     {
       "name": "corrupt screens.json surfaces registryError in /state (V4-4)",

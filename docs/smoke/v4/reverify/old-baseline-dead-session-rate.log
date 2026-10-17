@@ -1,0 +1,13 @@
+old1 delay=0 readyAt=809ms delivered=0/8 res=[null,null,null,null,null,null,null,null] bridge={"authority":true,"lastCommandAt":1792274213574} states=ready,ready,ready
+old2 delay=0 readyAt=772ms delivered=8/8 res=[8,6,5,5,4,4,4,6] bridge={"authority":true,"lastCommandAt":1792274225157} states=ready,ready,ready
+old3 delay=0 readyAt=690ms delivered=8/8 res=[6,5,4,6,5,4,5,4] bridge={"authority":true,"lastCommandAt":1792274227954} states=ready,ready,ready
+old4 delay=0 readyAt=759ms delivered=8/8 res=[9,5,4,5,4,5,5,5] bridge={"authority":true,"lastCommandAt":1792274230761} states=ready,ready,ready
+old5 delay=0 readyAt=691ms delivered=8/8 res=[9,7,5,4,5,5,4,6] bridge={"authority":true,"lastCommandAt":1792274233577} states=ready,ready,ready
+old6 delay=0 readyAt=728ms delivered=8/8 res=[8,6,5,5,4,4,5,4] bridge={"authority":true,"lastCommandAt":1792274236413} states=ready,ready,ready
+old7 delay=0 readyAt=691ms delivered=8/8 res=[9,7,5,4,5,5,5,4] bridge={"authority":true,"lastCommandAt":1792274239209} states=ready,ready,ready
+old8 delay=0 readyAt=13697ms delivered=0/8 res=[null,null,null,null,null,null,null,null] bridge={"authority":true,"lastCommandAt":null} states=ready,ready,ready
+old9 delay=0 readyAt=722ms delivered=8/8 res=[8,6,6,5,5,4,4,5] bridge={"authority":true,"lastCommandAt":1792274281364} states=ready,ready,ready
+old10 delay=0 readyAt=684ms delivered=8/8 res=[9,6,5,4,4,4,5,5] bridge={"authority":true,"lastCommandAt":1792274284165} states=ready,ready,ready
+old11 delay=0 readyAt=772ms delivered=8/8 res=[8,6,4,4,4,5,5,4] bridge={"authority":true,"lastCommandAt":1792274286939} states=ready,ready,ready
+old12 delay=0 readyAt=680ms delivered=8/8 res=[9,6,6,6,4,6,5,5] bridge={"authority":true,"lastCommandAt":1792274289772} states=ready,ready,ready
+FINISHED

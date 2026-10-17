@@ -1,5 +1,5 @@
 {
-  "url": "http://127.0.0.1:5219/home.html",
+  "url": "http://127.0.0.1:5534/home.html",
   "title": "cozy-brew",
   "lastPick": null,
   "pickSeq": 0,
@@ -10,7 +10,7 @@
     {
       "id": "home",
       "title": "cozy-brew",
-      "url": "http://127.0.0.1:5219/home.html",
+      "url": "http://127.0.0.1:5534/home.html",
       "width": 1280,
       "height": 800,
       "active": true,
@@ -19,7 +19,7 @@
     {
       "id": "phone",
       "title": "Checkout — Cozy Brew (phone)",
-      "url": "http://127.0.0.1:5219/phone.html",
+      "url": "http://127.0.0.1:5534/phone.html",
       "width": 390,
       "height": 844,
       "active": false,
@@ -28,7 +28,7 @@
     {
       "id": "tall",
       "title": "Menu — Cozy Brew (tall)",
-      "url": "http://127.0.0.1:5219/tall.html",
+      "url": "http://127.0.0.1:5534/tall.html",
       "width": 390,
       "height": 1600,
       "active": false,
@@ -37,11 +37,11 @@
   ],
   "activeScreen": "home",
   "lastPickScreen": null,
-  "dir": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-2GMr94\\cozy-brew",
+  "dir": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-WlrfaN\\cozy-brew",
   "registryError": null,
   "shellBridge": {
     "authority": true,
-    "lastCommandAt": null
+    "lastCommandAt": 1792272319670
   },
   "bridgeActive": false
 }
