@@ -110,7 +110,9 @@ README.md (fork purpose, Claude-canvas parity, OS matrix, disable-original guida
 
 ## Phase plan (Alibaba models per AGENTS.md) — GATES LOCKED
 
-**Model governance rule (user directive 2026-10-17):** spec authoring/approval and all code review/approval belong to the biggest Alibaba agents — **Qwen 3.8 flash @ xhigh (max effort)** for spec gates + adversarial code review; **Deepseek v4-pro #max** for planned implementation; **Deepseek flash** only for scoped visual/browser checks. No phase ships past a gate the Qwen reviewer has not approved.
+**Model governance rule (user directive 2026-10-17, corrected 2026-10-17b):** spec authoring/approval and all code review/approval belong to the biggest Alibaba agents — **Qwen 3.8 @ max effort** for spec gates + adversarial code review; **Deepseek v4-pro #max** for planned implementation; **Deepseek flash** only for scoped visual/browser checks. No phase ships past a gate the Qwen reviewer has not approved.
+
+**MODEL CORRECTION (2026-10-17b):** the orchestrator initially read "Qwen 3.8 max" as `qwen3.8-flash#xhigh`. The correct model is **`alibaba-token-plan/qwen3.8-max`** (a distinct, larger model; its top effort variant is also `xhigh`). Everything already built under flash#xhigh (P1-shell/browser, P1.5 gate, P2-A, V4-A/B/C/D, V4 integrator) stands as-is — it passed its own gates — but **all remaining implementation, rework, and the final code-QA gate run on `qwen3.8-max#xhigh`**, and any V4 defect the QA gate finds is fixed by max, not flash.
 
 | Phase | Scope | Model | Gate |
 |---|---|---|---|
