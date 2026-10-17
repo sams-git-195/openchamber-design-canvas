@@ -44,14 +44,14 @@ test('the shell carries edit mode, the artboard hover affordance, and per-artboa
 
 test('V4-9 art-wall CSS: dot grid, shadows, counter-scaled headers, and the notice/toast/menu surfaces', () => {
   const rendered = html();
-  assert.match(rendered, /background:oklch\(0\.17 0 0\) radial-gradient\(circle,oklch\(1 0 0 \/ \.07\) 1px,transparent 1\.2px\)/, 'dot-grid canvas background at the exact spec value');
+  assert.match(rendered, /background:oklch\(0\.17 0 0\) radial-gradient\(circle,oklch\(1 0 0 \/ \.11\) 1\.25px,transparent 1\.5px\)/, 'dot-grid canvas background at the exact spec value (F9: raised from the near-invisible .07/1px)');
   assert.match(rendered, /box-shadow:0 1px 2px rgb\(0 0 0\/\.4\),0 12px 32px rgb\(0 0 0\/\.35\)/, 'artboard shadow pair at the exact spec value');
   assert.doesNotMatch(rendered, /\.ds-artboard\{[^}]*outline:1px solid/, 'the inactive 1 px outline is gone');
-  assert.match(rendered, /\.ds-artboard\[data-active=true\]\{outline:2px solid #4f8cff;outline-offset:2px\}/);
-  assert.match(rendered, /data-mode=edit\] \.ds-artboard:hover\{outline:1px solid rgb\(79 140 255\/\.6\)\}/, 'edit hover is the soft blue artboard-level outline');
+  assert.match(rendered, /\.ds-artboard\[data-active=true\]\{outline:calc\(2px \/ var\(--cam-scale,1\)\) solid #4f8cff;outline-offset:calc\(2px \/ var\(--cam-scale,1\)\)\}/);
+  assert.match(rendered, /data-mode=edit\] \.ds-artboard:hover\{outline:calc\(1px \/ var\(--cam-scale,1\)\) solid rgb\(79 140 255\/\.6\)\}/, 'edit hover is the soft blue artboard-level outline');
   // Counter-scaled plain-text headers (E10 fix): scale 1/cam reads --cam-scale.
   assert.match(rendered, /\.ds-artboard>\.ds-ab-title,\.ds-artboard>\.ds-ab-size\{[^}]*transform:scale\(calc\(1 \/ var\(--cam-scale,1\)\)\)/);
-  assert.match(rendered, /\.ds-artboard>\.ds-ab-title\{[^}]*transform-origin:bottom left[^}]*max-width:calc\(var\(--w,100%\) \* var\(--cam-scale,1\)\)/);
+  assert.match(rendered, /\.ds-artboard>\.ds-ab-title\{[^}]*transform-origin:bottom left[^}]*max-width:calc\(var\(--w,100%\) \* var\(--cam-scale,1\) - var\(--ab-size-w,84px\)\)/);
   assert.match(rendered, /\.ds-artboard>\.ds-ab-size\{[^}]*transform-origin:bottom right[^}]*font-variant-numeric:tabular-nums/);
   assert.doesNotMatch(rendered, /\.ds-ab-title[^{]*\{[^}]*background:var\(--muted\)/, 'no pill backgrounds behind plain-text headers');
   // V4-7 handoff, V4-4 pulse ring, and the controller-rendered surfaces.
@@ -61,6 +61,48 @@ test('V4-9 art-wall CSS: dot grid, shadows, counter-scaled headers, and the noti
   assert.match(rendered, /\.ds-notice\{/); assert.match(rendered, /\.ds-toast\{[^}]*bottom:24px/);
   assert.match(rendered, /\.ds-context-menu\{[^}]*position:fixed[^}]*z-index:7/);
   assert.match(rendered, /aria-label="Design canvas[^"]*Shift 1 fits all screens[^"]*Right-click a screen for options/);
+});
+
+test('design-review pins (Sonnet F3/F6/F7/F9/F10 + rename overflow): reserved size label, device-px outlines, error card, grouped menu, clamped rename field', () => {
+  const rendered = html();
+  // F9: dot grid raised from oklch(1 0 0 / .07) 1px — the old value must be gone.
+  assert.doesNotMatch(rendered, /oklch\(1 0 0 \/ \.07\)/, 'the near-invisible .07 dot grid is retired');
+  // F6: the active outline counter-scales to a constant 2 DEVICE px at every
+  // zoom (pin scale: at --cam-scale 0.12 calc(2px/0.12) ≈ 16.7 natural px →
+  // 2px rendered; same at 3x). The edit-hover 1px outline counter-scales too.
+  assert.match(rendered, /outline:calc\(2px \/ var\(--cam-scale,1\)\) solid #4f8cff/, 'active outline is 2 device px at fit-all (was 0.59px at 37%)');
+  // F3: the title reserves the size label's slot; the controller-set compact
+  // tier (<140 device px of board width) hides the label and frees the clamp.
+  assert.match(rendered, /--ab-size-w,84px/, 'the size label width is reserved out of the title budget');
+  assert.match(rendered, /\.ds-artboard\[data-header-compact=true\]>\.ds-ab-size\{display:none\}/);
+  assert.match(rendered, /\.ds-artboard\[data-header-compact=true\]>\.ds-ab-title\{max-width:calc\(var\(--w,100%\) \* var\(--cam-scale,1\)\)\}/);
+  // F7: styled, keyboard-focusable Retry; demoted CSP detail line; compact
+  // zoom tier keeps only the counter-scaled button below 0.5.
+  assert.match(rendered, /\.ds-ab-retry\{padding:8px 14px;border:1px solid var\(--border\);border-radius:calc\(var\(--radius\) \* \.6\);background:var\(--secondary\);color:var\(--secondary-foreground\);font-size:13px;line-height:1;cursor:pointer\}/);
+  assert.match(rendered, /\.ds-ab-retry:focus-visible\{outline:2px solid #4f8cff;outline-offset:2px\}/);
+  assert.match(rendered, /\.ds-ab-card-detail\{[^}]*font-size:12px[^}]*color:var\(--muted-foreground\)/);
+  assert.match(rendered, /\.canvas\[data-zoom-compact=true\] \.ds-ab-card-copy,\.canvas\[data-zoom-compact=true\] \.ds-ab-card-detail\{display:none\}/);
+  assert.match(rendered, /\.canvas\[data-zoom-compact=true\] \.ds-ab-retry\{transform:scale\(calc\(1 \/ var\(--cam-scale,1\)\)\);transform-origin:center\}/);
+  assert.equal((rendered.match(/class="ds-ab-card-detail" hidden/g) ?? []).length, 2, 'every baked overlay carries the hidden detail line');
+  assert.doesNotMatch(rendered, /\.ds-ab-retry\{color:var\(--foreground\)\}/, 'the bare-white-text Retry is gone');
+  // Rename overflow defect: the field clamps to the artboard's on-screen width
+  // with a 120px usable floor and ellipsis.
+  assert.match(rendered, /\.ds-ab-rename\{[^}]*width:clamp\(120px,calc\(var\(--w,220px\) \* var\(--cam-scale,1\)\),220px\)[^}]*text-overflow:ellipsis/);
+  assert.doesNotMatch(rendered, /\.ds-ab-rename\{[^}]*width:220px;/, 'the fixed 220px rename field is retired');
+  // Cheap minors from the same review: F14 pulse counter-scaled + shortened,
+  // F16 no UA focus ring after a mouse click on the wall, F11 header ring.
+  assert.match(rendered, /\.ds-artboard\[data-new=true\]\{animation:ds-new-pulse \.8s ease-out\}/);
+  assert.match(rendered, /100%\{box-shadow:0 0 0 calc\(8px \/ var\(--cam-scale,1\)\) rgb\(79 140 255\/0\)/, 'the new-board ring is 8 device px, not a 16px camera-space slab');
+  assert.doesNotMatch(rendered, /0 0 0 16px rgb\(79 140 255\/0\)/, 'the heavy 16px pulse ring is retired');
+  assert.match(rendered, /\.canvas:focus:not\(:focus-visible\)\{outline:none\}/);
+  assert.match(rendered, /\.ds-artboard>\.ds-ab-title:focus\{outline:none\}/);
+  assert.match(rendered, /\.ds-artboard>\.ds-ab-title:focus-visible\{outline:2px solid #4f8cff;outline-offset:2px;border-radius:4px\}/);
+  // F10: separators + subtle per-action icons; Rename… keeps the last group.
+  assert.match(rendered, /\.ds-menu-sep\{height:1px;margin:4px 2px;flex:none;background:var\(--border\)\}/);
+  assert.match(rendered, /\.ds-menu-item\{display:flex;align-items:center;gap:8px/);
+  for (const [action, glyph] of [['send-to-chat', '↗'], ['zoom', '◎'], ['reload', '↻'], ['reset-position', '⌂'], ['export-png', '⇩'], ['export-pdf', '⇩'], ['copy-path', '⧉'], ['rename', '✎']] as const) {
+    assert.ok(rendered.includes(`.ds-menu-item[data-action=${action}]::before{content:"${glyph}"}`), `icon for ${action}`);
+  }
 });
 
 test('hostile titles and script terminators cannot break out; bad ids are refused; unknown secrets are omitted', () => {

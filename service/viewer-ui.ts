@@ -86,7 +86,7 @@ function renderArtboard(screen: PlacedScreen, cell: { x: number; y: number }, in
     + `<button type="button" class="ds-ab-title">${header}</button>`
     + `<span class="ds-ab-size">${screen.width}×${screen.height}</span>`
     + `<iframe id="ds-frame-${id}" data-ds-screen="${id}" name="__dsArtifact:${id}" referrerpolicy="no-referrer" sandbox="${FRAME_SANDBOX}" src="${escapeAttribute(screen.url)}"></iframe>`
-    + `<div class="ds-ab-state" data-state="loading"><p class="ds-ab-card-copy" role="status">Loading this screen.</p><button type="button" class="ds-ab-retry" hidden>Retry</button></div>`
+    + `<div class="ds-ab-state" data-state="loading"><p class="ds-ab-card-copy" role="status">Loading this screen.</p><p class="ds-ab-card-detail" hidden></p><button type="button" class="ds-ab-retry" hidden>Retry</button></div>`
     + `<button type="button" class="ds-ab-menu" aria-label="Screen options">⋯</button>`
     + `</section>`;
 }
@@ -136,37 +136,64 @@ export function renderViewerHtml(config: ViewerConfig): string {
 // pill / context menu the controller renders. The dot grid's background-size
 // and -position are rewritten by paint(); the counter-scale reads --cam-scale
 // (set on #camera by paint) so headers stay a constant ~13 readable px at every
-// zoom, clamped by max-width calc(var(--w) * var(--cam-scale)) so a header can
-// never exceed its artboard's on-screen width.
+// zoom, and the title's max-width calc(var(--w) * var(--cam-scale) -
+// var(--ab-size-w,84px)) reserves the size label's slot so the two can never
+// collide (F3); below 140 device px of board width the controller flips
+// data-header-compact and the label yields entirely.
 const CANVAS_GEOMETRY = String.raw`
 html,body{margin:0;width:100%;height:100%}
 body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 #toolbar-root{flex:none;min-width:0}
-.canvas{position:relative;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden;touch-action:none;background:oklch(0.17 0 0) radial-gradient(circle,oklch(1 0 0 / .07) 1px,transparent 1.2px);background-size:24px 24px;background-position:0 0}
+.canvas{position:relative;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden;touch-action:none;background:oklch(0.17 0 0) radial-gradient(circle,oklch(1 0 0 / .11) 1.25px,transparent 1.5px);background-size:24px 24px;background-position:0 0}
 .canvas[data-layout=fit]{touch-action:auto}
+/* F16: a mouse click on the canvas must not leave the UA focus ring around
+   the whole art wall; keyboard focus keeps its visible ring. */
+.canvas:focus:not(:focus-visible){outline:none}
 .camera{position:absolute;top:0;left:0;transform-origin:0 0}
 iframe{display:block;border:0;width:100%;height:100%}
 .camera[hidden],.pan-layer[hidden],.state[hidden],[hidden]{display:none}
 .pan-layer{position:absolute;inset:0;z-index:4;cursor:grab;touch-action:none}
 .canvas.dragging,.canvas.dragging .pan-layer{cursor:grabbing}
 .ds-artboard{position:absolute;box-sizing:border-box;background:var(--card);box-shadow:0 1px 2px rgb(0 0 0/.4),0 12px 32px rgb(0 0 0/.35)}
-.canvas[data-mode=edit] .ds-artboard:hover{outline:1px solid rgb(79 140 255/.6)}
-.ds-artboard[data-active=true]{outline:2px solid #4f8cff;outline-offset:2px}
-.ds-artboard[data-new=true]{animation:ds-new-pulse 1.2s ease-out}
+.canvas[data-mode=edit] .ds-artboard:hover{outline:calc(1px / var(--cam-scale,1)) solid rgb(79 140 255/.6)}
+.ds-artboard[data-active=true]{outline:calc(2px / var(--cam-scale,1)) solid #4f8cff;outline-offset:calc(2px / var(--cam-scale,1))}
+.ds-artboard[data-new=true]{animation:ds-new-pulse .8s ease-out}
 .ds-artboard>.ds-ab-title,.ds-artboard>.ds-ab-size{position:absolute;bottom:100%;margin:0 0 8px;padding:0;display:inline-flex;align-items:center;line-height:1;transform:scale(calc(1 / var(--cam-scale,1)))}
-.ds-artboard>.ds-ab-title{left:0;transform-origin:bottom left;max-width:calc(var(--w,100%) * var(--cam-scale,1));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;font-size:13px;font-weight:500;color:var(--foreground);opacity:.85;cursor:pointer}
+.ds-artboard>.ds-ab-title{left:0;transform-origin:bottom left;max-width:calc(var(--w,100%) * var(--cam-scale,1) - var(--ab-size-w,84px));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;font-size:13px;font-weight:500;color:var(--foreground);opacity:.85;cursor:pointer}
 .ds-artboard>.ds-ab-title:hover{opacity:1}
+/* F11: no rectangular white UA ring left on the header after Esc/rename —
+   keyboard users get a blue ring that matches the artboard radius instead. */
+.ds-artboard>.ds-ab-title:focus{outline:none}
+.ds-artboard>.ds-ab-title:focus-visible{outline:2px solid #4f8cff;outline-offset:2px;border-radius:4px}
 .ds-artboard>.ds-ab-size{right:0;transform-origin:bottom right;white-space:nowrap;font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted-foreground)}
+/* F3: below 140 device px of board width (data-header-compact, set by paint)
+   the size label would out-measure the board itself — it yields to the title,
+   which then gets the full on-screen width as its ellipsis budget. */
+.ds-artboard[data-header-compact=true]>.ds-ab-size{display:none}
+.ds-artboard[data-header-compact=true]>.ds-ab-title{max-width:calc(var(--w,100%) * var(--cam-scale,1))}
 .ds-ab-menu{position:absolute;top:2px;right:2px;z-index:5;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;padding:0;border:1px solid var(--border);border-radius:6px;background:var(--popover);color:var(--muted-foreground);font-size:14px;line-height:1;cursor:pointer;opacity:0;transform:scale(calc(1 / var(--cam-scale,1)));transform-origin:top right}
 .ds-artboard:hover>.ds-ab-menu,.ds-artboard:focus-within>.ds-ab-menu,.ds-ab-menu:focus-visible{opacity:1}
 .ds-ab-menu:hover{color:var(--foreground)}
-.ds-ab-rename{position:absolute;bottom:100%;left:0;z-index:5;margin:0 0 4px;padding:2px 6px;width:220px;font-size:13px;color:var(--foreground);background:var(--card);border:1px solid #4f8cff;border-radius:6px;transform:scale(calc(1 / var(--cam-scale,1)));transform-origin:bottom left}
+/* Task-9 (DEFECT-rename-input-overflow): the inline rename field never exceeds
+   the artboard's on-screen width, with a 120px usable floor; the counter-scale
+   means natural px here ARE device px. */
+.ds-ab-rename{position:absolute;bottom:100%;left:0;z-index:5;margin:0 0 4px;padding:2px 6px;box-sizing:border-box;width:clamp(120px,calc(var(--w,220px) * var(--cam-scale,1)),220px);text-overflow:ellipsis;font-size:13px;color:var(--foreground);background:var(--card);border:1px solid #4f8cff;border-radius:6px;transform:scale(calc(1 / var(--cam-scale,1)));transform-origin:bottom left}
 .ds-ab-state{position:absolute;inset:0;z-index:3;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;background:var(--card);padding:16px}
 .ds-ab-state[data-state=loading]::before{content:"";width:28px;height:28px;border-radius:50%;border:2px solid var(--border);border-top-color:var(--primary);animation:ds-spin .9s linear infinite}
 .ds-ab-card-copy{max-width:480px;margin:0;overflow-wrap:anywhere;color:var(--muted-foreground)}
-.ds-ab-retry{color:var(--foreground)}
+/* F7: CSP/X-Frame-Options jargon is demoted to this secondary line; Retry is a
+   real secondary button (border + 8x14 padding, keyboard-focus ring). */
+.ds-ab-card-detail{max-width:480px;margin:0;font-size:12px;line-height:1.4;color:var(--muted-foreground);opacity:.75;overflow-wrap:anywhere}
+.ds-ab-retry{padding:8px 14px;border:1px solid var(--border);border-radius:calc(var(--radius) * .6);background:var(--secondary);color:var(--secondary-foreground);font-size:13px;line-height:1;cursor:pointer}
+.ds-ab-retry:hover{background:var(--accent);color:var(--accent-foreground)}
+.ds-ab-retry:focus-visible{outline:2px solid #4f8cff;outline-offset:2px}
+/* F7 fit-all legibility: below 0.5 zoom (data-zoom-compact, set by paint) the
+   card drops its prose and the Retry button counter-scales to a constant
+   device size — readable and clickable at 12% where 7px text was not. */
+.canvas[data-zoom-compact=true] .ds-ab-card-copy,.canvas[data-zoom-compact=true] .ds-ab-card-detail{display:none}
+.canvas[data-zoom-compact=true] .ds-ab-retry{transform:scale(calc(1 / var(--cam-scale,1)));transform-origin:center}
 @keyframes ds-spin{to{transform:rotate(360deg)}}
-@keyframes ds-new-pulse{0%{box-shadow:0 0 0 0 rgb(79 140 255/.55),0 1px 2px rgb(0 0 0/.4),0 12px 32px rgb(0 0 0/.35)}100%{box-shadow:0 0 0 16px rgb(79 140 255/0),0 1px 2px rgb(0 0 0/.4),0 12px 32px rgb(0 0 0/.35)}}
+@keyframes ds-new-pulse{0%{box-shadow:0 0 0 0 rgb(79 140 255/.55),0 1px 2px rgb(0 0 0/.4),0 12px 32px rgb(0 0 0/.35)}100%{box-shadow:0 0 0 calc(8px / var(--cam-scale,1)) rgb(79 140 255/0),0 1px 2px rgb(0 0 0/.4),0 12px 32px rgb(0 0 0/.35)}}
 .canvas[data-mode=edit] .ds-artboard>iframe{pointer-events:none}
 .canvas[data-mode=edit] .ds-artboard{cursor:crosshair}
 .canvas[data-agent-input] .ds-artboard>iframe{pointer-events:auto}
@@ -184,8 +211,21 @@ iframe{display:block;border:0;width:100%;height:100%}
 .ds-notice-text{overflow-wrap:anywhere}
 .ds-toast{position:absolute;left:50%;bottom:24px;z-index:6;transform:translateX(-50%);max-width:min(80%,560px);padding:8px 16px;border:1px solid var(--border);border-radius:9999px;background:var(--popover);color:var(--popover-foreground);font-size:13px;line-height:1.3;text-align:center;box-shadow:0 12px 32px rgb(0 0 0/.35);pointer-events:none}
 .ds-context-menu{position:fixed;z-index:7;min-width:180px;display:flex;flex-direction:column;gap:2px;padding:6px;border:1px solid var(--border);border-radius:var(--radius);background:var(--popover);box-shadow:0 12px 32px rgb(0 0 0/.35)}
-.ds-menu-item{padding:6px 10px;border:0;border-radius:calc(var(--radius) * .6);background:transparent;color:var(--popover-foreground);font-size:13px;line-height:1.2;text-align:left;cursor:pointer}
+.ds-menu-item{display:flex;align-items:center;gap:8px;padding:6px 10px;border:0;border-radius:calc(var(--radius) * .6);background:transparent;color:var(--popover-foreground);font-size:13px;line-height:1.2;text-align:left;cursor:pointer}
 .ds-menu-item:hover,.ds-menu-item:focus{background:var(--accent);color:var(--accent-foreground);outline:none}
+.ds-menu-item:focus-visible{outline:2px solid #4f8cff;outline-offset:-2px}
+/* F10: 1px group separators and subtle per-action glyphs (text presentation,
+   65% opacity — icons decorate, the labels carry the meaning). */
+.ds-menu-sep{height:1px;margin:4px 2px;flex:none;background:var(--border)}
+.ds-menu-item::before{flex:none;width:16px;text-align:center;font-size:13px;opacity:.65}
+.ds-menu-item[data-action=send-to-chat]::before{content:"↗"}
+.ds-menu-item[data-action=zoom]::before{content:"◎"}
+.ds-menu-item[data-action=reload]::before{content:"↻"}
+.ds-menu-item[data-action=reset-position]::before{content:"⌂"}
+.ds-menu-item[data-action=export-png]::before{content:"⇩"}
+.ds-menu-item[data-action=export-pdf]::before{content:"⇩"}
+.ds-menu-item[data-action=copy-path]::before{content:"⧉"}
+.ds-menu-item[data-action=rename]::before{content:"✎"}
 .state{position:absolute;inset:0;display:grid;place-items:center;text-align:center;background:var(--background)}
 .state-body{max-width:100%;overflow-wrap:anywhere}
 .sr{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}

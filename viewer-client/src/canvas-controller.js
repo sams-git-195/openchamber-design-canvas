@@ -10,9 +10,18 @@ export function initCanvas(initialConfig) {
   const presets = {desktop:{width:1280,height:800},large:{width:1920,height:1080},tablet:{width:768,height:1024},mobile:{width:390,height:844}};
   const GRID_GAP=48, FLOW_BUDGET=3200, POS_CLAMP=32768, MIN_EXTENT=64, MAX_EXTENT=65536, MAX_SCREENS=12, EMIT_DEBOUNCE_MS=400;
   const NOTICE_MAX=3, NOTICE_TEXT_MAX=300, TOAST_MS=2000, NEW_PULSE_MS=1200, MODE_PENDING_MS=1500, HOVER_MIN_STEP=3, DOT=24, DOT_MIN_SCALE=.3;
+  // Design-review (Sonnet) fixes: F3 header compact tier (device px of board
+  // width below which the size label yields to the title), F7 error-card
+  // compact tier (below this zoom the card shows only the styled Retry
+  // button), and the F2 menu viewport margin.
+  const HEADER_COMPACT_W=140, ERROR_COMPACT_SCALE=.5, MENU_EDGE=8;
   const SCREEN_ID=/^[a-z0-9][a-z0-9-]{0,30}$/;
-  const BOARD_COPY={loading:'Loading this screen.',ready:'',error:'This screen could not be displayed. Check that the dev server is running and the page allows embedding.'};
-  const SCREEN_MENU=[['send-to-chat','Send to chat'],['zoom','Zoom to screen'],['reload','Reload screen'],['reset-position','Reset position'],['export-png','Export PNG'],['export-pdf','Export PDF'],['copy-path','Copy file path'],['rename','Rename…']];
+  const BOARD_COPY={loading:'Loading this screen.',ready:'',error:'Dev server unreachable — Reload to restart it.'};
+  const EMBED_HINT='If it is running, check CSP / X-Frame-Options embedding permissions.';
+  // F10: grouped menu — dividers between the groups, subtle CSS icons keyed by
+  // data-action (viewer-ui geometry), Rename… alone in the LAST group. The
+  // action strings are the frozen §3 screen-menu union, verbatim.
+  const SCREEN_MENU=[[['send-to-chat','Send to chat']],[['zoom','Zoom to screen'],['reload','Reload screen']],[['reset-position','Reset position'],['export-png','Export PNG'],['export-pdf','Export PDF'],['copy-path','Copy file path']],[['rename','Rename…']]];
   const bootConfig=initialConfig||{};
   let pages = [], currentUrl = '', currentTitle = 'Preview';
   let screens = [], active = '', shellMode = 'edit', cellCenters = new Map();
@@ -103,9 +112,29 @@ export function initCanvas(initialConfig) {
     }
     return {width:maxX-minX,height:maxY-minY,cells,centers};
   }
+  // F7: the error card leads with the likely cause; embedding-permission
+  // jargon (the service's CSP/X-Frame-Options copy) is demoted verbatim to a
+  // secondary detail line. Specific diagnostics keep the primary slot untouched
+  // (seam 5: never clobber a service message).
+  function errorCopy(msg){
+    const text=typeof msg==='string'?msg.trim():'';
+    // Empty OR the generic default (seam 5 passes BOARD_COPY.error through as
+    // the message) both mean "no specific diagnostic": lead with the likely
+    // cause and keep the embedding hint as the secondary line.
+    if(!text||text===BOARD_COPY.error)return {primary:BOARD_COPY.error,detail:EMBED_HINT};
+    if(/CSP|X-Frame-Options/i.test(text))return {primary:BOARD_COPY.error,detail:text};
+    return {primary:text,detail:''};
+  }
   function renderBoardState(b,s){
     b.overlay.hidden=s.state==='ready';b.overlay.dataset.state=s.state;
-    b.copy.textContent=s.state==='ready'?'':(s.message||BOARD_COPY[s.state]||'');
+    if(s.state==='error'){
+      const c=errorCopy(s.message);
+      b.copy.textContent=c.primary;
+      if(b.detail){b.detail.textContent=c.detail;b.detail.hidden=!c.detail;}
+    }else{
+      b.copy.textContent=s.state==='ready'?'':(s.message||BOARD_COPY[s.state]||'');
+      if(b.detail){b.detail.textContent='';b.detail.hidden=true;}
+    }
     b.action.hidden=s.state!=='error';
   }
   function menuButtonFor(section){
@@ -168,7 +197,10 @@ export function initCanvas(initialConfig) {
     if(!title||!size||!frame||!overlay)return null;
     const copy=overlay.querySelector('.ds-ab-card-copy'),action=overlay.querySelector('.ds-ab-retry');
     if(!copy||!action)return null;
-    const board={section,title,size,frame,overlay,copy,action,menu:menuButtonFor(section)};
+    // F7 detail line is optional: pre-fix bakes (and hand-rolled test DOMs)
+    // carry only copy + retry; renderBoardState tolerates its absence.
+    const detail=overlay.querySelector('.ds-ab-card-detail');
+    const board={section,title,size,frame,overlay,copy,detail,action,menu:menuButtonFor(section)};
     wireBoard(id,board);return board;
   }
   function createBoard(id){
@@ -183,10 +215,11 @@ export function initCanvas(initialConfig) {
     frame.setAttribute('sandbox','allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-pointer-lock');
     const overlay=document.createElement('div');overlay.className='ds-ab-state';overlay.dataset.state='loading';
     const copy=document.createElement('p');copy.className='ds-ab-card-copy';copy.setAttribute('role','status');
+    const detail=document.createElement('p');detail.className='ds-ab-card-detail';detail.hidden=true;
     const action=document.createElement('button');action.type='button';action.className='ds-ab-retry';action.textContent='Retry';
-    overlay.appendChild(copy);overlay.appendChild(action);
+    overlay.appendChild(copy);overlay.appendChild(detail);overlay.appendChild(action);
     section.appendChild(title);section.appendChild(size);section.appendChild(frame);section.appendChild(overlay);
-    const board={section,title,size,frame,overlay,copy,action};
+    const board={section,title,size,frame,overlay,copy,detail,action};
     board.menu=menuButtonFor(section);
     wireBoard(id,board);
     return board;
@@ -248,6 +281,13 @@ export function initCanvas(initialConfig) {
     // scales headers by 1/--cam-scale, so labels stay ~13px readable at every
     // zoom); the dot grid translates with the camera and hides below 0.3.
     if(camera.style.setProperty)camera.style.setProperty('--cam-scale',String(view.scale));
+    // F3/F7 compact tiers track the live scale: below HEADER_COMPACT_W device
+    // px of board width the size label hides and the title gets the full clamp
+    // (CSS data-header-compact); below ERROR_COMPACT_SCALE the error cards drop
+    // their prose and keep only the counter-scaled Retry button (CSS
+    // data-zoom-compact). Pure presentation — no camera math is touched.
+    canvas.dataset.zoomCompact=view.scale<ERROR_COMPACT_SCALE?'true':'false';
+    for(const [id,b] of boards){const s=screens.find(v=>v.id===id);if(s)b.section.dataset.headerCompact=s.width*view.scale<HEADER_COMPACT_W?'true':'false';}
     canvas.style.backgroundSize=(DOT*view.scale)+'px '+(DOT*view.scale)+'px';
     canvas.style.backgroundPosition=x+'px '+y+'px';
     canvas.style.backgroundImage=view.scale<DOT_MIN_SCALE?'none':'';
@@ -433,6 +473,27 @@ export function initCanvas(initialConfig) {
     }
     return true;
   }
+  // F2: the menu is position:fixed and placed from clientX/Y viewport coords,
+  // so it is scroll-safe by construction. After the append measures it, the
+  // preferred bottom-right-of-cursor spot flips to the left of / above the
+  // cursor when the far edge would clip, and finally clamps inside an 8px
+  // viewport margin (window resize re-runs this on the open menu).
+  function positionMenu(menu,x,y){
+    menu.style.left=Math.round(x)+'px';menu.style.top=Math.round(y)+'px';
+    const de=document.documentElement;
+    const vw=finite(window.innerWidth)?window.innerWidth:(de&&finite(de.clientWidth)?de.clientWidth:0);
+    const vh=finite(window.innerHeight)?window.innerHeight:(de&&finite(de.clientHeight)?de.clientHeight:0);
+    if(!vw||!vh)return;
+    const r=typeof menu.getBoundingClientRect==='function'?menu.getBoundingClientRect():null;
+    const w=r&&finite(r.width)?r.width:0,h=r&&finite(r.height)?r.height:0;
+    if(!w||!h)return;
+    const maxX=Math.max(MENU_EDGE,vw-w-MENU_EDGE),maxY=Math.max(MENU_EDGE,vh-h-MENU_EDGE);
+    let left=x,top=y;
+    if(left+w>vw-MENU_EDGE)left=(x-w>=MENU_EDGE)?x-w:maxX;
+    if(top+h>vh-MENU_EDGE)top=(y-h>=MENU_EDGE)?y-h:maxY;
+    left=Math.max(MENU_EDGE,Math.min(left,maxX));top=Math.max(MENU_EDGE,Math.min(top,maxY));
+    menu.style.left=Math.round(left)+'px';menu.style.top=Math.round(top)+'px';
+  }
   function openScreenMenu(section,x,y){
     if(captureState||!view.ready||!section)return false;
     const id=section.dataset.screen,s=screens.find(v=>v.id===id);
@@ -441,16 +502,22 @@ export function initCanvas(initialConfig) {
     emitHoverEnd();
     const menu=document.createElement('div');
     menu.className='ds-context-menu';menu.setAttribute('role','menu');menu.setAttribute('aria-label','Screen options');
-    menu.style.left=Math.round(x)+'px';menu.style.top=Math.round(y)+'px';
     const items=[];
-    for(const [action,label] of SCREEN_MENU){
-      const item=document.createElement('button');
-      item.type='button';item.className='ds-menu-item';item.setAttribute('role','menuitem');item.textContent=label;
-      item.onclick=()=>screenMenuAction(id,action,section);
-      menu.appendChild(item);items.push(item);
-    }
+    SCREEN_MENU.forEach((group,gi)=>{
+      // F10: 1px separators between groups (role=separator — never menuitems,
+      // so the items[] keyboard ring and the frozen action mapping are intact).
+      if(gi){const sep=document.createElement('div');sep.className='ds-menu-sep';sep.setAttribute('role','separator');menu.appendChild(sep);}
+      for(const [action,label] of group){
+        const item=document.createElement('button');
+        item.type='button';item.className='ds-menu-item';item.setAttribute('role','menuitem');item.textContent=label;
+        if(item.dataset)item.dataset.action=action;else item.setAttribute('data-action',action);
+        item.onclick=()=>screenMenuAction(id,action,section);
+        menu.appendChild(item);items.push(item);
+      }
+    });
     document.body.appendChild(menu);
-    contextMenu={menu,section,items,focus:0};
+    positionMenu(menu,x,y);
+    contextMenu={menu,section,items,focus:0,x,y};
     const first=items[0];
     if(first&&typeof first.focus==='function')first.focus();
     return true;
@@ -741,6 +808,8 @@ export function initCanvas(initialConfig) {
   });
   function moveCamera(direction,multiplier=1){if(!view.ready||captureState||view.layoutMode==='fit')return;view.mode='manual';const step=numToken('--pan-step')*multiplier;if(direction==='left')view.panX-=step;if(direction==='right')view.panX+=step;if(direction==='up')view.panY-=step;if(direction==='down')view.panY+=step;paint();}
   document.addEventListener('keyup',e=>{if(e.key===' '){view.space=false;paint();}});window.addEventListener('blur',()=>{view.space=false;drag=null;lastTap=null;finishBoardDrag(true);canvas.classList.remove('dragging');emitHoverEnd();paint();});
+  // F2: a window resize re-clamps the open context menu into the new viewport.
+  window.addEventListener('resize',()=>{if(contextMenu)positionMenu(contextMenu.menu,contextMenu.x,contextMenu.y);});
   canvas.addEventListener('pointerdown',e=>{
     if(!view.ready||view.layoutMode==='fit'||view.agentInput||e.button!==0||e.target.closest('.state')||e.target.closest('.ds-ab-title')||e.target.closest('.ds-ab-menu')||e.target.closest('.ds-ab-rename')||e.target.closest('.ds-ab-state'))return;
     canvas.focus();view.mode='manual';emitHoverEnd();

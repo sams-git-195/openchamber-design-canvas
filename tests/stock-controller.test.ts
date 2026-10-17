@@ -86,9 +86,10 @@ function environment(script = source.replace('export function ', 'function ') + 
       const frame = document.createElement('iframe'); frame.id = `ds-frame-${screen.id}`; frame.setAttribute('src', screen.url);
       const overlay = document.createElement('div'); overlay.className = 'ds-ab-state'; overlay.dataset.state = 'loading';
       const copy = document.createElement('p'); copy.className = 'ds-ab-card-copy';
+      const detail = document.createElement('p'); detail.className = 'ds-ab-card-detail'; detail.hidden = true;
       const action = document.createElement('button'); action.className = 'ds-ab-retry';
       const menu = document.createElement('button'); menu.className = 'ds-ab-menu';
-      overlay.appendChild(copy); overlay.appendChild(action);
+      overlay.appendChild(copy); overlay.appendChild(detail); overlay.appendChild(action);
       section.appendChild(title); section.appendChild(size); section.appendChild(frame); section.appendChild(overlay); section.appendChild(menu);
       camera.appendChild(section);
     }
@@ -388,12 +389,19 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   assert.equal(menus().length, 1, 'right-click on an artboard opens exactly one menu');
   const menu = menus()[0];
   assert.equal(menu.getAttribute('role'), 'menu');
-  assert.equal(menu.children.length, 8);
-  assert.deepEqual(menu.children.map((c: any) => c.getAttribute('role')), Array(8).fill('menuitem'));
+  // F10: 8 items in 4 groups, joined by 3 role=separator dividers — the
+  // separators are never menuitems, so the keyboard ring skips them.
+  assert.equal(menu.children.length, 11, '8 items + 3 group separators');
+  assert.deepEqual(menu.children.map((c: any) => c.getAttribute('role')),
+    ['menuitem', 'separator', 'menuitem', 'menuitem', 'separator', 'menuitem', 'menuitem', 'menuitem', 'menuitem', 'separator', 'menuitem']);
+  const itemsOf = () => menus()[0].children.filter((c: any) => c.getAttribute('role') === 'menuitem');
   // Every frozen §3 action maps to exactly {type:'screen-menu',screen,action}.
-  const fired = (index: number) => menus()[0].children[index].onclick();
-  const labels = menu.children.map((c: any) => c.textContent);
+  const fired = (index: number) => itemsOf()[index].onclick();
+  const labels = itemsOf().map((c: any) => c.textContent);
   assert.deepEqual(labels, ['Send to chat', 'Zoom to screen', 'Reload screen', 'Reset position', 'Export PNG', 'Export PDF', 'Copy file path', 'Rename…']);
+  assert.deepEqual(itemsOf().map((c: any) => c.dataset.action),
+    ['send-to-chat', 'zoom', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path', 'rename'],
+    'data-action drives the subtle CSS icons; Rename… stays last, in its own group');
   for (const [index, action] of [[0, 'send-to-chat'], [2, 'reload'], [3, 'reset-position'], [4, 'export-png'], [5, 'export-pdf'], [6, 'copy-path']] as const) {
     openVia(section);
     assert.equal(menus().length, 1);
@@ -453,6 +461,98 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   assert.equal(menus().length, 0, 'play mode: right-click inside the frame stays native');
   openVia(e.elementOf('home', '.ds-ab-title'));
   assert.equal(menus().length, 1, 'play mode: header chrome still opens the menu');
+});
+
+test('the context menu never clips: it flips at the edges, clamps inside the viewport, and re-clamps on resize (Sonnet F2)', () => {
+  const e = environment();
+  e.api.setStatus({ state: 'ready' });
+  // Give every controller-created div (the menu) a measured 220×300 box.
+  const origCreate = e.document.createElement;
+  e.document.createElement = (tag: string) => { const n = origCreate(tag); if (String(tag).toLowerCase() === 'div') n.rect = { x: 0, y: 0, left: 0, top: 0, width: 220, height: 300 }; return n; };
+  e.window.innerWidth = 800; e.window.innerHeight = 720;
+  const openAt = (x: number, y: number) => { for (const entry of e.events) if (entry.owner === 'canvas' && entry.type === 'contextmenu') entry.fn({ target: e.sectionOf('home'), clientX: x, clientY: y, button: 2, preventDefault() {} }); };
+  const menu = () => e.body.children.filter((c: any) => String(c.className) === 'ds-context-menu')[0];
+  // Comfortable spot: the raw cursor coords survive (8px margin untouched).
+  openAt(100, 100);
+  assert.equal(menu().style.left, '100px'); assert.equal(menu().style.top, '100px');
+  // Bottom-right corner (Sonnet measured 69px past right / 65px below): flips
+  // to the left of and above the cursor.
+  openAt(780, 700);
+  assert.equal(menu().style.left, '560px', 'flips left of the cursor (780-220)');
+  assert.equal(menu().style.top, '400px', 'flips above the cursor (700-300)');
+  assert.ok(560 + 220 <= 800 - 8 && 400 + 300 <= 720 - 8, 'the whole menu is inside the viewport margin');
+  // No flip room (flip would land past the left edge): clamps to vw-w-8.
+  e.window.innerWidth = 300;
+  openAt(200, 700);
+  assert.equal(menu().style.left, '72px', 'clamped to 300-220-8');
+  assert.equal(menu().style.top, '400px');
+  // Resize re-clamps the OPEN menu with its stored anchor (scroll-safe: the
+  // menu is position:fixed and anchored in viewport coords).
+  e.window.innerWidth = 800;
+  e.fire('window', 'resize', {});
+  assert.equal(menu().style.left, '200px', 'the wider viewport fits the original spot again');
+  assert.equal(menu().style.top, '400px');
+});
+
+test('headers reserve the size label, and compact tiers follow the zoom (Sonnet F3/F7)', () => {
+  const e = environment(undefined, true, { screens: [home, other, phone], viewport: { width: 1280, height: 800 }, mode: 'edit' });
+  e.api.setStatus({ state: 'ready' });
+  // Pin scale 0.12 (the stress-grid fit-all): 1280*0.12=153.6 device px keeps
+  // the label; 768*0.12=92.2 and 390*0.12=46.8 fall under the 140px floor.
+  e.api.restoreCamera({ mode: 'manual', scale: 0.12, panX: 0, panY: 0 });
+  assert.equal(e.sectionOf('home').dataset.headerCompact, 'false');
+  assert.equal(e.sectionOf('other').dataset.headerCompact, 'true', 'below 140 device px the size label yields to the title');
+  assert.equal(e.sectionOf('phone').dataset.headerCompact, 'true');
+  assert.equal(e.$('canvas').dataset.zoomCompact, 'true', 'error cards drop prose below 0.5 zoom');
+  e.api.restoreCamera({ mode: 'manual', scale: 0.5, panX: 0, panY: 0 });
+  assert.equal(e.$('canvas').dataset.zoomCompact, 'false');
+  assert.equal(e.sectionOf('other').dataset.headerCompact, 'false', '768*0.5=384 device px restores the label');
+  assert.equal(e.sectionOf('phone').dataset.headerCompact, 'false', '390*0.5=195 >= 140');
+  // Boundary: exactly 140 device px is NOT compact (floor is "below 140").
+  e.api.restoreCamera({ mode: 'manual', scale: 0.5, panX: 0, panY: 0 });
+  assert.equal(e.sectionOf('home').dataset.headerCompact, 'false');
+});
+
+test('error cards lead with the likely cause; CSP jargon is demoted, specifics survive (Sonnet F7)', () => {
+  const e = environment();
+  e.api.setStatus({ state: 'ready' });
+  const overlay = e.sectionOf('other').querySelector('.ds-ab-state');
+  const copy = overlay.querySelector('.ds-ab-card-copy');
+  const detail = overlay.querySelector('.ds-ab-card-detail');
+  const retry = overlay.querySelector('.ds-ab-retry');
+  assert.ok(detail && retry, 'the overlay carries the detail line and a real Retry button');
+  // The service's embedding-permissions copy (browser.ts:2630/2683) is demoted
+  // VERBATIM to the secondary line; the primary names the likely cause.
+  const svc = 'The preview could not be displayed. Check the dev server and CSP/X-Frame-Options embedding permissions.';
+  assert.equal(e.api.setScreenState('other', { state: 'error', message: svc }), true);
+  assert.equal(copy.textContent, 'Dev server unreachable — Reload to restart it.');
+  assert.equal(detail.textContent, svc);
+  assert.equal(detail.hidden, false);
+  assert.equal(retry.hidden, false, 'Retry is visible on error');
+  // A specific diagnostic (port, path) keeps the primary slot — seam 5 stands.
+  e.api.setScreenState('other', { state: 'error', message: 'dev server refused at 127.0.0.1:5999' });
+  assert.equal(copy.textContent, 'dev server refused at 127.0.0.1:5999');
+  assert.equal(detail.textContent, '');
+  assert.equal(detail.hidden, true);
+  // Loading clears the detail line and shows the service's progress copy.
+  e.api.setScreenState('other', { state: 'loading', message: 'Starting the dev server…' });
+  assert.equal(copy.textContent, 'Starting the dev server…');
+  assert.equal(detail.hidden, true);
+  assert.equal(retry.hidden, true);
+});
+
+test('toolbar: the name slot is workspace identity, chips truncate at 16ch, and the chip row can never scroll the toolbar (Sonnet F4/F8)', () => {
+  // F8: no §3 vehicle carries the workspace name to the shell, so the slot
+  // renders the product identity and snapshot.currentTitle stays untouched
+  // (pinned above at 'invalid screens…' → setPage title 'Confirmed').
+  assert.match(toolbarSource, /const workspaceName = 'Design Canvas';/, 'the slot stops duplicating the active screen chip (FORK-MERGE B8 wires a real name when the service lane ships one)');
+  assert.doesNotMatch(toolbarSource, /state\.screens\.find\(\(screen\) => screen\.id === state\.active\)\?\.title \|\| workspaceName/, 'the active screen title no longer feeds the workspace slot');
+  assert.match(toolbarSource, /id="workspace-name" className="min-w-0 max-w-\[24ch\] shrink truncate/);
+  // F4: 66-char titles ellipsis inside the chip; the row shrinks and clips
+  // instead of pushing the zoom cluster / status icon off-screen.
+  assert.match(toolbarSource, /className="flex min-w-0 shrink items-center gap-1 overflow-hidden"/, 'the chip row can never create the native toolbar scrollbar');
+  assert.match(toolbarSource, /<span className="max-w-\[16ch\] truncate">\{screen\.title\}<\/span>/, 'chip labels truncate at 16ch');
+  assert.match(toolbarSource, /className="min-w-0 shrink" title=\{`\$\{screen\.title\}/, 'chips themselves shrink below their content width');
 });
 
 test('agent input suppresses user pan/zoom and camera emits, and revealScreen pans minimally (V4-7)', () => {
@@ -903,7 +1003,8 @@ test('a late board error event preserves a service message; platform frames neve
   assert.equal(e.api.getScreens()[1].message, 'dev server refused at 127.0.0.1:5999');
   e.api.setScreenState('other', { state: 'ready', message: '' });
   e.fire('ds-frame-other', 'error', {});
-  assert.equal(overlay.querySelector('.ds-ab-card-copy').textContent, 'This screen could not be displayed. Check that the dev server is running and the page allows embedding.', 'without a service message the default copy still applies');
+  assert.equal(overlay.querySelector('.ds-ab-card-copy').textContent, 'Dev server unreachable — Reload to restart it.', 'without a service message the default copy still applies (F7 primary line)');
+  assert.equal(overlay.querySelector('.ds-ab-card-detail').textContent, 'If it is running, check CSP / X-Frame-Options embedding permissions.', 'the CSP hint is the demoted secondary line');
   // about:blank loads (a freshly created board) never poison the bookkeeping.
   const fresh = e.frameOf('other');
   fresh._src = 'about:blank';

@@ -61,8 +61,14 @@ export function Toolbar({ bridge }: { bridge: ToolbarBridge }) {
   const cameraDisabled = !cameraAvailable(state);
   const cameraReason = state.capturing ? 'Capture in progress. Controls are temporarily unavailable.' : !state.ready ? 'The preview is not ready.' : '';
   const pendingMode = state.modePending;
-  const workspaceName = state.currentTitle && state.currentTitle !== 'Preview' ? state.currentTitle : 'Design Canvas';
-  const title = state.screens.find((screen) => screen.id === state.active)?.title || workspaceName;
+  // F8 (design review): this slot is the WORKSPACE identity, never the active
+  // screen's title — that title already lives on the highlighted chip (and in
+  // the Screens▾ list), and showing it twice read as a bug. The frozen §3
+  // contract carries no workspace name to the shell (setPage's title is the
+  // active page/screen title; ViewerConfig bakes no name), so until the
+  // service lane adds a vehicle (FORK-MERGE B8) the slot shows the product
+  // identity, muted. snapshot.currentTitle is untouched for legacy consumers.
+  const workspaceName = 'Design Canvas';
   const statusLabel = state.capturing ? 'Capturing preview' : state.statusState === 'ready' ? 'Preview ready' : state.statusState === 'loading' ? 'Loading preview' : state.statusState === 'empty' ? 'No screens on this canvas' : 'Preview failed';
   const Status = state.capturing || state.statusState === 'loading' ? LoaderCircle : state.statusState === 'ready' ? CircleCheck : CircleAlert;
   const percentage = Number.isFinite(state.scale) ? `${Math.round(state.scale * 100)}%` : '—';
@@ -74,10 +80,9 @@ export function Toolbar({ bridge }: { bridge: ToolbarBridge }) {
   return <TooltipProvider>
     <div role="toolbar" aria-label="Design Canvas preview controls" id="stock-toolbar-scroll" className="flex h-10 w-full shrink-0 flex-nowrap items-center gap-2 overflow-x-auto overflow-y-hidden px-2" onFocusCapture={onFocus}>
       <InformationIcon icon={Palette} label="Design Canvas" />
-      {/* Workspace label: the service pushes the active screen's title through
-          setPage; the shell never learns the folder name (fixed contract), so
-          this is the best-effort name slot V4-9 specifies, truncated at 24ch. */}
-      <span id="workspace-name" className="min-w-0 max-w-[24ch] shrink truncate text-sm text-muted-foreground" title={title}>{title}</span>
+      {/* Workspace label (F8): workspace identity only — screen identity lives
+          on the chips. Truncated at 24ch, shrinkable, never the active title. */}
+      <span id="workspace-name" className="min-w-0 max-w-[24ch] shrink truncate text-sm text-muted-foreground" title={workspaceName}>{workspaceName}</span>
       <Hint text={pendingMode ? `Switching to ${pendingMode} mode…` : cameraReason || (state.mode === 'edit' ? 'Edit mode: clicking a screen picks that element for the chat' : 'Play mode: screens accept real interaction')}>
         <ToggleGroup aria-label="Interaction mode" variant="outline" size="sm" spacing={0} multiple={false} value={[pendingMode ?? state.mode]} onValueChange={(values) => requestMode(values, bridge)} disabled={disabled || !!pendingMode} className="shrink-0">
           <ToggleGroupItem value="edit" aria-label="Edit" className={pendingMode === 'edit' ? 'animate-pulse' : undefined}><Pencil aria-hidden="true" />Edit</ToggleGroupItem>
@@ -95,9 +100,12 @@ export function Toolbar({ bridge }: { bridge: ToolbarBridge }) {
             </DropdownMenuCheckboxItem>)}
           </DropdownMenuGroup>
         </DropdownMenuContent>
-      </DropdownMenu> : state.screens.length > 0 ? <div role="group" aria-label="Screens" className="flex shrink-0 items-center gap-1">
-        {state.screens.map((screen) => <Button key={screen.id} size="sm" variant={screen.id === state.active ? 'secondary' : 'ghost'} aria-pressed={screen.id === state.active} disabled={state.capturing} title={`${screen.title} · ${screen.width} × ${screen.height}`} onClick={() => { if (!bridge.getSnapshot().capturing) bridge.activateScreen(screen.id); }}>
-          {screen.state === 'error' ? <CircleAlert aria-hidden="true" /> : screen.state === 'loading' ? <LoaderCircle aria-hidden="true" className="animate-spin" /> : null}{screen.title}
+      </DropdownMenu> : state.screens.length > 0 ? <div role="group" aria-label="Screens" className="flex min-w-0 shrink items-center gap-1 overflow-hidden">
+        {/* F4: chips ellipsis at 16ch and the row shrinks/clips (min-w-0 +
+            overflow-hidden), so a 66-char title can never push the zoom
+            cluster or summon a native scrollbar over the toolbar. */}
+        {state.screens.map((screen) => <Button key={screen.id} size="sm" variant={screen.id === state.active ? 'secondary' : 'ghost'} aria-pressed={screen.id === state.active} disabled={state.capturing} className="min-w-0 shrink" title={`${screen.title} · ${screen.width} × ${screen.height}`} onClick={() => { if (!bridge.getSnapshot().capturing) bridge.activateScreen(screen.id); }}>
+          {screen.state === 'error' ? <CircleAlert aria-hidden="true" className="shrink-0" /> : screen.state === 'loading' ? <LoaderCircle aria-hidden="true" className="shrink-0 animate-spin" /> : null}<span className="max-w-[16ch] truncate">{screen.title}</span>
         </Button>)}
       </div> : null}
       <span aria-hidden="true" className="min-w-4 flex-1 shrink" />
