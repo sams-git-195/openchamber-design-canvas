@@ -677,12 +677,15 @@ async function runNpmInstall(dir: string): Promise<{ ok: true } | { ok: false; e
     };
 
     let child;
+    const win = process.platform === 'win32';
     try {
-      // FORK-WIN: on win32 `npm` is npm.cmd and a shell:false spawn needs the
-      // resolvable file name (spawning process.env.ComSpec would work too —
-      // kept shell:false either way so stdio stays attached).
-      const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-      child = spawn(npm, ['install', '--no-audit', '--no-fund'], { cwd: dir, shell: false });
+      // FORK-WIN: `npm` is a .cmd shim on win32 and Node refuses to spawn a
+      // .cmd/.bat without a shell (EINVAL since the Node 18/20 hardening).
+      // shell:true routes it through the shell; the args are a FIXED safe set
+      // (no user input) so shell concatenation carries no injection surface.
+      child = win
+        ? spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: dir, shell: true })
+        : spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: dir });
     } catch (error) {
       finish({ ok: false, error: `could not run npm install: ${error instanceof Error ? error.message : String(error)}` });
       return;

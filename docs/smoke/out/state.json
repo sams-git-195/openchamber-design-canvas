@@ -1,0 +1,33 @@
+{
+  "url": "http://localhost:5776/home.html",
+  "title": "cozy-brew",
+  "lastPick": null,
+  "pickSeq": 0,
+  "windowOpen": true,
+  "mode": "edit",
+  "modeApplied": true,
+  "screens": [
+    {
+      "id": "home",
+      "title": "cozy-brew",
+      "url": "http://localhost:5776/home.html",
+      "width": 1280,
+      "height": 800,
+      "active": true,
+      "state": "ready"
+    },
+    {
+      "id": "checkout",
+      "title": "Checkout — Cozy Brew",
+      "url": "http://localhost:5776/checkout.html",
+      "width": 390,
+      "height": 844,
+      "active": false,
+      "state": "ready"
+    }
+  ],
+  "activeScreen": "home",
+  "lastPickScreen": null,
+  "dir": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-4zxhxP\\cozy-brew",
+  "bridgeActive": false
+}

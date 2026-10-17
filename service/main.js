@@ -8624,9 +8624,9 @@ async function runNpmInstall(dir) {
       resolve(result);
     };
     let child;
+    const win = process.platform === "win32";
     try {
-      const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-      child = spawn3(npm, ["install", "--no-audit", "--no-fund"], { cwd: dir, shell: false });
+      child = win ? spawn3("npm", ["install", "--no-audit", "--no-fund"], { cwd: dir, shell: true }) : spawn3("npm", ["install", "--no-audit", "--no-fund"], { cwd: dir });
     } catch (error) {
       finish({ ok: false, error: `could not run npm install: ${error instanceof Error ? error.message : String(error)}` });
       return;

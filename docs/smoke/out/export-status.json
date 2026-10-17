@@ -1,0 +1,28 @@
+{
+  "state": "done",
+  "startedAt": "2026-10-17T14:59:02.912Z",
+  "results": [
+    {
+      "screen": "home",
+      "png": {
+        "ok": true,
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-4zxhxP\\cozy-brew\\exports\\home.png"
+      },
+      "pdf": {
+        "ok": true,
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-4zxhxP\\cozy-brew\\exports\\home.pdf"
+      }
+    },
+    {
+      "screen": "checkout",
+      "png": {
+        "ok": true,
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-4zxhxP\\cozy-brew\\exports\\checkout.png"
+      },
+      "pdf": {
+        "ok": true,
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-4zxhxP\\cozy-brew\\exports\\checkout.pdf"
+      }
+    }
+  ]
+}
