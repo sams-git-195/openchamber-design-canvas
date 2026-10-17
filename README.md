@@ -42,13 +42,29 @@ of 2026-10-14".
   `<Documents>/Design Canvas/<slug>` (the service resolves the root; `DS_WORKSPACE_ROOT`
   overrides it), scaffolds a multi-page Vite skeleton, starts its dev server and
   opens the canvas window. The chat you typed in becomes the canvas session —
-  `statusSection.requiresProject` is off for this extension.
+  `statusSection.requiresProject` is off for this extension. The setup runs as an
+  **async job** (files first, then install, then boot, polled every 2 s with
+  progress toasts — "Setting up the canvas… installing (12 s)"), so a slow cold
+  cache can never time out the chat's request cap, and the workspace binding is
+  stored the moment the files exist: a second `/canvas` never builds a twin.
 - **One canvas, N artboards.** The window lays the workspace's screens out as
   artboards in a grid; pan both axes, Ctrl/⌘+wheel zooms, fit-all frames
-  everything.
-- **Edit vs play.** Edit mode: iframe clicks become picks (`Screen: <id>` +
-  that screen's URL ride the chip). Play mode: clicks drive the real pages;
-  navigation stays inside the artboard (sandboxed, no top-navigation).
+  everything. Agent-written screens appear live — the service watches
+  `screens.json` — and a broken registry raises a banner in the canvas **and**
+  one error toast in the chat (once per distinct message, never a poll storm).
+- **Edit vs play.** Edit mode: every iframe click becomes a pick; each queued
+  pick arrives as its own reference chip (`Screen: <id>` + that screen's URL)
+  through a long-polled **pick queue** — rapid clicks are never coalesced away,
+  a hidden chat window loses nothing, and each delivered chip is acked so the
+  canvas answers with its own "Added to chat" pill. The artboard menu's **Send
+  to chat** attaches a screen-level chip (`Screen: <id> (w×h) — <file path>`).
+  Play mode: clicks drive the real pages; navigation stays inside the artboard
+  (sandboxed, no top-navigation).
+- **The canvas knows when you're busy.** While the agent works, the canvas
+  toolbar shows a "Designing…" chip; when the turn settles, fresh artboards
+  pulse in. Display-only — nothing is ever sent to the agent automatically.
+  Raising the window follows the same discipline: user-initiated opens focus
+  it; screen switches and agent navigation never steal your foreground.
 - **Screens are real HTML files.** Adding a screen means writing
   `<id>.html` and a `{ "id", "file", "title", "width", "height" }` entry in
   `screens.json` at the workspace root; `index.html` stays a redirect to

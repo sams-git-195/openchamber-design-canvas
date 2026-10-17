@@ -3,7 +3,10 @@
 // Two surfaces, one thin row, one full-page home:
 //   - "status" (chat Work Status) — the ambient mirror: the canvas row with the
 //     Start/Stop control, Design Mode toggle, play/edit toggle, active-screen
-//     dropdown, Focus and the ⌘-click hint.
+//     dropdown, Focus and the pick hint. The row also runs the pick-queue
+//     client (V4-5): every queued pick — element chips and artboard-menu screen
+//     sends (V4-10) — arrives through `GET /picks` long-polling and becomes a
+//     chip, acked to the service after delivery.
 //   - "panel" (rail panel) — a one-line pointer to the creation page.
 //   - "page" (the sidebar "Extension pages → Design Canvas" entry) — the centred
 //     creation home: the hero, the prompt composer with its type chip, and the
@@ -31,6 +34,8 @@ import {
   PANEL_SIDEBAR_HINT,
   PICK_HINT,
   ServiceUnavailable,
+  WORKSPACE_MISSING_CODE,
+  ackPicks,
   allProjectsFromSnapshot,
   canvasSessionStatus,
   closeLive,
@@ -41,7 +46,9 @@ import {
   focusLive,
   formatOpenStatus,
   getConfig,
+  getPicks,
   getServerStatus,
+  getScaffoldStatus,
   getState,
   getWorkspaces,
   host,
@@ -52,15 +59,21 @@ import {
   normalizeDirPath,
   openWorkspace,
   pathContains,
+  pickAckLabel,
   pickHintActive,
+  postAgentStatus,
   projectReady,
+  registryErrorToastMessage,
   resolveCanvasTarget,
   sameDirPath,
+  scaffoldProgressText,
   scaffoldProject,
   setMode,
   shouldStopDevServer,
+  shouldToastRegistryError,
   startDevServer,
   stopDevServer,
+  syncScreens,
   uniqueCanvasSlug,
   validateReferencePath,
   workspaceMeta,
@@ -68,9 +81,11 @@ import {
   type CanvasScreenState,
   type ExportFormat,
   type LiveState,
-  type PickPayload,
+  type PicksResult,
+  type QueuedPick,
   type RegisteredProject,
   type ScaffoldResult,
+  type ScaffoldStatus,
   type ServerStartResult,
   type StudioConfig,
   type WorkspaceRecord,
@@ -120,7 +135,7 @@ import {
 } from './mode.ts';
 import type { DesignSystemPreset } from '../shared/design-systems.ts';
 import { addDraftReference, removeDraftReference, buildReferenceSubmission, type DraftReference } from './reference-draft.ts';
-import { buildAttachPayload, type PickScreen } from './attach-dialog.ts';
+import { buildAttachPayload } from './attach-dialog.ts';
 
 const POLL_MS = 900;
 
@@ -172,9 +187,6 @@ const IDEAS: Record<DesignType, Idea[]> = {
   ],
 };
 
-/** A picked element plus the screen it was picked from. */
-type TrackedPick = PickPayload & { seq: number; url: string; pickedAt: Date; screen?: PickScreen };
-
 /** The one-time heads-up about out-of-folder edit permissions (decision 4b). */
 const PERMISSION_TOAST_KEY = 'ws-permission-notified';
 const PERMISSION_HEADS_UP =
@@ -203,7 +215,16 @@ const state = {
   windowOpen: false,
   /** True while OUR side is bringing the window up (see openCanvasWindow). */
   pendingOpen: false,
-  lastSeq: 0,
+  /**
+   * V4-5: another panel currently claims the pick→chat bridge (`/state.bridgeActive`)
+   * — the row's pick loop HOLDS (no attach, no ack; the queue keeps everything).
+   */
+  bridgeActive: false,
+  /**
+   * V4-4: the last `/state.registryError` message we toasted while the condition
+   * held. Null clears the arm, so a fixed-then-rebroken registry toasts again.
+   */
+  registryErrorNotified: null as string | null,
   /** The live canvas controls from `GET /state` (spec §B). */
   liveMode: 'edit' as 'edit' | 'play',
   liveScreens: [] as CanvasScreenState[],
@@ -422,16 +443,19 @@ async function maybeShowPermissionToast(dir: string): Promise<void> {
   await host.toast({ kind: 'info', message: PERMISSION_HEADS_UP });
 }
 
-/** The outcome of scaffolding a NEW canvas workspace under the service root. */
+/** The outcome of the async scaffold POST for a NEW canvas workspace. */
 type ScaffoldOutcome =
-  | { ok: true; record: WorkspaceRecord; url: string }
+  | { ok: true; record: WorkspaceRecord; jobId: string; url: string }
   | { ok: false; error: string };
 
 /**
  * Create the workspace: `GET /workspaces` for the service-resolved ROOT (the
  * panel never constructs the Documents path itself — decision 3), a slug that
- * no existing workspace clashes with, then `POST /scaffold` into `<root>/<slug>`
- * (the service confines creation to its own root, spec §E).
+ * no existing workspace clashes with, then `POST /scaffold {…, async:true}`
+ * into `<root>/<slug>` (the service confines creation to its own root, spec §E).
+ * V4-11: the POST answers as soon as the FILES are written — the returned
+ * `jobId` covers npm install + dev boot, which the caller polls so the request
+ * can NEVER hit the 20 s host cap (E15).
  */
 async function scaffoldCanvasWorkspace(brief: string, seed: string, designSystemId: string | null): Promise<ScaffoldOutcome> {
   let result: WorkspacesResult;
@@ -462,9 +486,66 @@ async function scaffoldCanvasWorkspace(brief: string, seed: string, designSystem
     await host.toast({ kind: 'error', message: scaffold.error });
     return { ok: false, error: scaffold.error };
   }
-  await host.toast({ kind: 'success', message: `Canvas workspace created at ${dir} — served at ${scaffold.url}` });
   await maybeShowPermissionToast(dir);
-  return { ok: true, record: { dir, name }, url: scaffold.url };
+  return { ok: true, record: { dir: scaffold.dir || dir, name }, jobId: scaffold.jobId, url: scaffold.url };
+}
+
+/** The async-scaffold job polling cadence (V4-11): a progress poll every 2 s. */
+const SCAFFOLD_POLL_MS = 2000;
+/** Progress toasts repeat on a 10 s cadence inside one state — "updated", not spammed. */
+const SCAFFOLD_TOAST_STEP_MS = 10_000;
+/**
+ * Give up on a job that never settles. Cold-cache installs are slow, but not
+ * fifteen-minutes slow; the honest error beats an open-ended wait. `ws/` stays
+ * stored either way — the created dir is real, and Start retries the open, not
+ * a second scaffold.
+ */
+const SCAFFOLD_MAX_MS = 15 * 60_000;
+
+/**
+ * Poll `GET /scaffold/status?job=` (every `timing.pollMs`, production 2 s) until
+ * the job reports done/failed, TOASTING progress as it goes (V4-11): once per
+ * state change, refreshed at most per `SCAFFOLD_TOAST_STEP_MS` inside a state.
+ * `timing` is a test seam. Returns 'done' or an actionable error.
+ */
+export async function runScaffoldJob(
+  jobId: string,
+  timing: { pollMs?: number; maxMs?: number } = {},
+): Promise<'done' | { error: string }> {
+  const pollMs = timing.pollMs ?? SCAFFOLD_POLL_MS;
+  const maxMs = timing.maxMs ?? SCAFFOLD_MAX_MS;
+  const start = Date.now();
+  let lastKey = '';
+  for (;;) {
+    let job: ScaffoldStatus;
+    try {
+      job = await getScaffoldStatus(jobId);
+    } catch (error) {
+      const message = `Canvas setup failed: the job status could not be read (${error instanceof Error ? error.message : String(error)}).`;
+      await host.toast({ kind: 'error', message });
+      return { error: message };
+    }
+    if (job.state === 'done') {
+      await host.toast({ kind: 'success', message: scaffoldProgressText(job) });
+      return 'done';
+    }
+    if (job.state === 'failed') {
+      const message = scaffoldProgressText(job);
+      await host.toast({ kind: 'error', message });
+      return { error: message };
+    }
+    const key = `${job.state}:${Math.floor((job.elapsedMs ?? 0) / SCAFFOLD_TOAST_STEP_MS)}`;
+    if (key !== lastKey) {
+      lastKey = key;
+      await host.toast({ kind: 'info', message: scaffoldProgressText(job) });
+    }
+    if (Date.now() - start >= maxMs) {
+      const message = 'Canvas setup is taking unusually long — the workspace files exist; press Start to try opening it.';
+      await host.toast({ kind: 'error', message });
+      return { error: message };
+    }
+    await sleep(pollMs);
+  }
 }
 
 /**
@@ -472,6 +553,9 @@ async function scaffoldCanvasWorkspace(brief: string, seed: string, designSystem
  * (`Start creates the workspace` — spec §F). `forSessionId` overrides which
  * session the record is keyed to (the page flow keys it to the NEW session the
  * start-session call returns). A resolved record binds `state.workspace`.
+ * V4-11: `ws/<sessionId>` is stored the MOMENT the async scaffold POST answers
+ * (files written) — before the install/boot job finishes — so an interrupted
+ * wait can never orphan a second workspace. The window opens only after `done`.
  */
 async function ensureCanvasWorkspace(brief: string, forSessionId: string | null = null): Promise<WorkspaceRecord | null> {
   const sessionId = forSessionId ?? state.sessionId;
@@ -494,6 +578,8 @@ async function ensureCanvasWorkspace(brief: string, forSessionId: string | null 
   state.workspace = outcome.record;
   renderRow();
   rerender();
+  const job = await runScaffoldJob(outcome.jobId);
+  if (job !== 'done') return null; // `ws/` stays stored — the dir is real, Start retries the open
   return outcome.record;
 }
 
@@ -878,9 +964,11 @@ type CanvasPrep =
 /**
  * Make sure a canvas workspace exists for the composer's brief, scaffolding one
  * under the service root when this session has none (decision 2/3: there is no
- * project gate to refuse on). A scaffold failure surfaces the error and the
- * session still starts — the prompt ships the workspace path once the agent has
- * created it (kept for the /canvas flows that carry a workspace later).
+ * project gate to refuse on). V4-11: the scaffold is the async job — files
+ * first, then an install/boot poll — so this can never hit the 20 s host cap.
+ * A scaffold failure surfaces the error and the session still starts — the
+ * prompt ships the workspace path once the agent has created it (kept for the
+ * /canvas flows that carry a workspace later).
  */
 async function scaffoldCurrentProject(spec: DesignBriefSpec): Promise<CanvasPrep> {
   if (state.workspace && state.workspace.dir.trim() !== '') {
@@ -900,6 +988,12 @@ async function scaffoldCurrentProject(spec: DesignBriefSpec): Promise<CanvasPrep
   if (!outcome.ok) {
     await host.toast({ kind: 'error', message: outcome.error });
     return { kind: 'failed', error: outcome.error };
+  }
+  // The session starts once the workspace is REAL (installed and booted), not
+  // half-written; the progress toasts tell the user where it is.
+  const job = await runScaffoldJob(outcome.jobId);
+  if (job !== 'done') {
+    return { kind: 'failed', error: job.error };
   }
   return { kind: 'new', workspace: outcome.record, url: outcome.url };
 }
@@ -979,27 +1073,168 @@ async function startNewDesign(): Promise<void> {
 // ---- references ----
 
 /**
- * Attach a picked element to the chat as a reference chip.
+ * Attach one queued pick to the chat composer. Returns whether the chip LANDED:
+ * a failure must NOT ack (the pick is re-delivered on the next poll — the queue
+ * holds the last 50, so a transient host failure loses nothing and duplicates
+ * nothing). No success toast here: the "Added to chat" confirmation rides the
+ * ack and answers in the CANVAS (V4-5 — the service relays it to the shell's
+ * toast pill), which is exactly where the user just clicked.
  */
-async function addToChat(pick: TrackedPick): Promise<void> {
+async function addToChat(entry: QueuedPick): Promise<boolean> {
   try {
-    await host.attach(buildAttachPayload(pick, pick.seq, pick.url, pick.pickedAt, pick.screen));
-    await host.toast({ kind: 'success', message: 'Reference added to the chat composer.' });
+    await host.attach(buildAttachPayload(entry));
+    return true;
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
+    setStatus(`Could not attach a canvas pick: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    return false;
   }
 }
 
-// ---- the pick→chat bridge ----
+// ---- the pick queue (SPEC-V4 V4-5, row surface only) ----
 //
-// `host.attach` delivers a chip into the composer of the window that hosts the
-// panel frame making the call — there is no cross-window targeting, and every
-// hidden frame the host mounts for a slash command is force-unmounted after
-// `GUEST_REQUEST_TIMEOUT_MS` (20s), so a hidden pane CANNOT serve as a
-// long-lived pick bridge. `/canvas` therefore answers immediately: the mode is
-// bound to the live window, and picks attach through the chat's Work Status
-// row. Routing picks into a mini chat requires a host-side persistent surface
-// there (tracked upstream). The service-side claim (POST /bridge) stays.
+// Picks arrive from the service as an ORDERED QUEUE, not a `lastPick` snapshot:
+// ONE `GET /picks?since=<cursor>&wait=12000` long-poll in flight at a time,
+// delivers every queued pick as its own chip in seq order, then `POST /picks/ack`
+// up to the last delivered seq. Two consequences the old 900 ms poll had neither
+// (E7): rapid clicks ALL arrive (the ring buffer holds them, no coalescing loss),
+// and a hidden window loses nothing — this loop has NO visibility guard, and the
+// persisted since-cursor catches up whatever queued while it could not read.
+// A request error/timeout falls back to `wait=0` short polls every 250 ms for
+// 30 s, then the long-poll retries. The `bridgeActive` semantics are unchanged:
+// a claimed bridge stands THIS row down (holding keeps every pick queued and
+// un-acked, so the claimant — or the row later — still delivers it). Design
+// Mode OFF likewise holds delivery: chips land only on an explicit gesture path,
+// never automatically (fence §5), and turning ON re-runs the cursor catch-up.
+
+/** The long-poll window (the service accepts `wait` 0..12000). */
+export const PICK_LONG_POLL_MS = 12_000;
+/** The degraded-mode short poll: `wait=0` every 250 ms… */
+export const PICK_SHORT_POLL_MS = 250;
+/** …for up to 30 s, then back to the long-poll (spec V4-5). */
+export const PICK_SHORT_POLL_BUDGET_MS = 30_000;
+/** The idle check cadence while held (mode off / bridge claimed). */
+const PICK_HELD_POLL_MS = 900;
+/** The pace after an idle long-poll round — pacing only; a real long-poll already waited. */
+const PICK_IDLE_POLL_MS = 1000;
+
+/**
+ * The highest seq this row has delivered-and-acked. Persists for the frame's
+ * life — across hidden windows, backoff stretches and mode toggles — so the
+ * queue never replays delivered chips, and whatever it cannot read yet waits
+ * for the cursor, not for luck.
+ */
+let pickCursor = 0;
+let pickLoopActive = false;
+
+/** Test seam / accounting: the current since-cursor. */
+export function getPickCursor(): number {
+  return pickCursor;
+}
+
+/**
+ * Deliver a batch in seq order and ack the contiguous prefix. The cursor moves
+ * ONLY past chips that landed (failure → no ack → retry); an ack that fails
+ * AFTER its chip landed keeps the cursor advanced — the composer already has
+ * the chip, and redelivering it would duplicate. The service's own unacked
+ * watchdog raises the canvas-side warning when delivery truly stalls.
+ */
+async function deliverPickBatch(picks: QueuedPick[]): Promise<boolean> {
+  let lastDelivered: QueuedPick | null = null;
+  for (const entry of [...picks].sort((a, b) => a.seq - b.seq)) {
+    if (entry.seq <= pickCursor) continue; // already delivered-and-acked (defensive)
+    if (!state.mode.on || state.bridgeActive) break; // held — the queue keeps it
+    if (!(await addToChat(entry))) break; // no ack past a failed attach; retry next poll
+    lastDelivered = entry;
+  }
+  if (!lastDelivered) return false;
+  pickCursor = lastDelivered.seq;
+  try {
+    await ackPicks(lastDelivered.seq, pickAckLabel(lastDelivered));
+  } catch {
+    /* the chips are in the composer; the next ack covers these seqs as well */
+  }
+  return true;
+}
+
+/** Whether a `/picks` answer has the shape the §3 contract gives it. */
+function picksResultValid(result: PicksResult | null | undefined): result is PicksResult {
+  return Boolean(result && Array.isArray(result.picks));
+}
+
+/**
+ * One `/picks` round. `'progress'` — chips landed (drain the rest at once);
+ * `'idle'` — the request answered with nothing deliverable; `'error'` — the
+ * request failed or answered garbage, which sends the caller into the backoff
+ * mode. Also rebases the cursor if the service restarted (its latest seq
+ * regressed below ours): the ring's new picks must not be pinned behind a dead
+ * cursor.
+ */
+async function pollPicksOnce(waitMs: number): Promise<'progress' | 'idle' | 'error'> {
+  try {
+    const result = await getPicks(pickCursor, waitMs);
+    if (!picksResultValid(result)) return 'error';
+    if (typeof result.seq === 'number' && result.seq < pickCursor) pickCursor = 0;
+    return await deliverPickBatch(result.picks) ? 'progress' : 'idle';
+  } catch {
+    return 'error';
+  }
+}
+
+/**
+ * The queue loop: runs until `stop()` says so. Sequential awaits make it
+ * SINGLE-IN-FLIGHT by construction — a second `/picks` can never overlap the
+ * long-poll that is still open. Delivered batches loop immediately (the ≤20
+ * page cap means a big queue needs successive reads); an idle round paces at
+ * `PICK_IDLE_POLL_MS` so a service answering fast can never hot-spin the row;
+ * errors take the V4-5 backoff route.
+ */
+export async function runPickLoop(stop: () => boolean): Promise<void> {
+  while (!stop()) {
+    if (!state.mode.on || state.bridgeActive) {
+      await sleep(PICK_HELD_POLL_MS);
+      continue;
+    }
+    const outcome = await pollPicksOnce(PICK_LONG_POLL_MS);
+    if (outcome === 'progress') continue;
+    if (outcome === 'idle') {
+      await sleep(PICK_IDLE_POLL_MS);
+      continue;
+    }
+    // Backoff: short `wait=0` polls every 250 ms for up to 30 s, then the
+    // long-poll retries (and the budget restarts if the service stays down).
+    const backoffStart = Date.now();
+    while (!stop() && Date.now() - backoffStart < PICK_SHORT_POLL_BUDGET_MS) {
+      if (!state.mode.on || state.bridgeActive) break;
+      await sleep(PICK_SHORT_POLL_MS);
+      if ((await pollPicksOnce(0)) !== 'error') break;
+    }
+  }
+}
+
+/** Start the row's queue loop (idempotent; the row mount calls it once). */
+export function startPickLoop(): void {
+  if (pickLoopActive) return;
+  pickLoopActive = true;
+  void runPickLoop(() => !pickLoopActive);
+}
+
+/** Stop it (test seam; a frame teardown takes the whole panel with it). */
+export function stopPickLoop(): void {
+  pickLoopActive = false;
+}
+
+/** Test seam: reset the queue bookkeeping between cases. */
+export function resetPickLoop(): void {
+  pickLoopActive = false;
+  pickCursor = 0;
+}
+
+// NOTE — the pick→chat bridge claim (`POST /bridge`) keeps its old meaning: a
+// hidden resolve frame CANNOT be a long-lived bridge (it is force-unmounted
+// after `GUEST_REQUEST_TIMEOUT_MS`, 20 s), which is exactly why delivery moved
+// from "the claiming frame attaches" to "the queue + the row attaches, and the
+// claim only stands the row down". Routing chips to another window still needs
+// a host-side persistent surface there (tracked upstream).
 
 // ---- the canvas window ----
 
@@ -1011,9 +1246,23 @@ function openStatus(message: string, kind: 'info' | 'error' = 'info'): void {
 /**
  * Open (or navigate) the workspace's live canvas: `POST /open {dir}` — the
  * service resolves `.design-studio.json` and all screens itself (spec §B).
- * Called only from an explicit action (the toggle turning ON). `wsReady`
+ * Called only from an explicit action (the toggle turning ON, the Start
+ * control) and from the async-scaffold flow's end, so it carries V4-8's
+ * `focus:true` — raising the window IS what the user asked for. `wsReady`
  * (a config url) gates a real open; with none it stays SILENT — there is no
  * "no url" toast for a backstop-only path.
+ * V4-15: a `WORKSPACE_MISSING` answer unbinds this session's `ws/` record and
+ * offers a fresh create.
+ *
+ * FORK-MERGE (V4-13 dock, P2 — SKIPPED): the spec wants `dock:{x,y,width,height}`
+ * beside the OpenChamber window "from `window.screenX/screenY/outerWidth/
+ * outerHeight` of the host window (best effort)". The guest frame has NO such
+ * surface: the SDK HostClient exposes no window geometry, and from a cross-origin
+ * panel iframe `window.screenX/outerWidth` do not describe the HOST window (the
+ * test frame proves it — the shim `window` has none). Sending the iframe's own
+ * numbers would mis-dock Chrome, so the panel sends no `dock` and the service's
+ * `placeWindow` default stands. Needs a host API (e.g. a window-bounds read on
+ * the bridge) — filed, not faked.
  */
 async function openCanvasWindow(notify: boolean): Promise<void> {
   const ws = state.workspace;
@@ -1040,7 +1289,14 @@ async function openCanvasWindow(notify: boolean): Promise<void> {
       return;
     }
     openStatus(OPENING_STATUS);
-    const result = await openWorkspace({ dir: ws.dir });
+    const result = await openWorkspace({ dir: ws.dir, focus: true });
+    // V4-15: the folder is gone — unbind the session's workspace and let the
+    // row offer a fresh "Create canvas" (the `ws/` record is deleted, not just
+    // shadowed, so a reload cannot re-bind the dead dir).
+    if (!result.ok && result.code === WORKSPACE_MISSING_CODE) {
+      await handleMissingWorkspace(ws.dir, result.error);
+      return;
+    }
     // Persist the URL the moment it is opened, so a later ON with no live config
     // still reopens this workspace at its last page.
     if (result.ok) await saveLastUrl(ws.dir, result.url || url);
@@ -1056,8 +1312,39 @@ async function openCanvasWindow(notify: boolean): Promise<void> {
 }
 
 /**
+ * The workspace dir no longer exists (V4-15). Clear this session's binding
+ * (memory + `ws/<sessionId>` storage + the page's dir→session map) so the row's
+ * Start control re-offers "Create canvas" and no poll path can resurrect the
+ * dead dir. The mode mirror turns Design Mode OFF through the normal
+ * window-closed path; the toast says what to do next.
+ */
+async function handleMissingWorkspace(dir: string, message?: string): Promise<void> {
+  state.workspace = null;
+  state.config = null;
+  state.configPath = null;
+  state.configDir = null;
+  state.startedServers.delete(dir);
+  wsSessionMap.delete(normalizeDirPath(dir));
+  const key = workspaceStorageKey(state.sessionId);
+  if (key) {
+    try {
+      await host.storage.delete(key);
+    } catch {
+      /* an undeletable record is shadowed by the in-memory clear for this session */
+    }
+  }
+  renderRow();
+  rerender();
+  await host.toast({
+    kind: 'error',
+    message: `${message ?? `The canvas folder ${dir} no longer exists.`} Start creates a new canvas.`,
+  });
+}
+
+/**
  * Raise the workspace of a workspaces-list row without rebinding this session:
- * `POST /open {dir}` against that row's dir.
+ * `POST /open {dir}` against that row's dir. A Preview click is user-initiated,
+ * so it carries the V4-8 `focus:true`.
  */
 async function previewWorkspace(row: WorkspaceRow): Promise<void> {
   if (!row.url?.trim()) {
@@ -1065,7 +1352,7 @@ async function previewWorkspace(row: WorkspaceRow): Promise<void> {
     return;
   }
   try {
-    const result = await openWorkspace({ dir: row.dir });
+    const result = await openWorkspace({ dir: row.dir, focus: true });
     if (!result.ok) {
       await host.toast({ kind: 'error', message: result.error ?? 'Could not open the canvas' });
       return;
@@ -1235,14 +1522,48 @@ function reportHonouredStop(
 }
 
 /**
+ * V4-12: mirror this session's agent turn to the canvas — `POST /agent-status`
+ * on every busy→idle/idle→busy transition, so the shell shows the "Designing…"
+ * chip and settles with its sync pulse. DISPLAY-ONLY: this never sends a prompt,
+ * and the service never turns it into one (fence §5). Failures are silent: the
+ * worst case is a stale chip, never a stuck row.
+ */
+async function reportAgentStatus(busy: boolean): Promise<void> {
+  try {
+    await postAgentStatus(busy, busy ? 'Designing…' : undefined);
+  } catch {
+    /* the canvas keeps its previous chip; the row's own state is unaffected */
+  }
+}
+
+/**
+ * V4-4 backstop: after an agent turn COMPLETES, ask the service to re-read the
+ * registry and push it (`POST /screens/sync {dir}`) — the same tick the file
+ * watcher fires, covering network roots where `fs.watch` is unreliable.
+ * Best-effort: a miss only delays the next watcher tick.
+ */
+async function syncRegistryBackstop(): Promise<void> {
+  const dir = state.workspace?.dir;
+  if (!dir) return;
+  try {
+    await syncScreens(dir);
+  } catch {
+    /* the watcher owns the guarantee; the backstop is insurance */
+  }
+}
+
+/**
  * The current session's live snapshot (`host.onSession`). Re-binds the session
- * (and its workspace record), keeps `sessionBusy` fresh, and performs a queued
- * stop once the session goes idle.
+ * (and its workspace record), keeps `sessionBusy` fresh (mirroring every busy
+ * TRANSITION to the canvas, V4-12), and performs a queued stop once the session
+ * goes idle.
  */
 export async function applySessionSnapshot(session: { id: string; busy: boolean } | null): Promise<void> {
   const changed = state.sessionId !== (session?.id ?? null);
+  const wasBusy = state.sessionBusy;
   state.sessionId = session?.id ?? null;
   state.sessionBusy = session?.busy ?? false;
+  if (wasBusy !== state.sessionBusy) await reportAgentStatus(state.sessionBusy);
   if (state.sessionBusy) {
     if (state.pendingStop) {
       state.pendingStop = null;
@@ -1259,13 +1580,17 @@ export async function applySessionSnapshot(session: { id: string; busy: boolean 
 
 /**
  * A session lifecycle event: a `completed` turn is the moment a `pendingStop`
- * is honoured, if the session is now idle.
+ * is honoured, if the session is now idle — and the moment the registry
+ * backstop runs, because the agent's writes are all on disk (V4-4/V4-12).
  */
 export async function handleSessionLifecycle(event: { phase: 'started' | 'completed' | 'failure' }): Promise<void> {
-  if (event.phase === 'completed' && state.pendingStop && !state.sessionBusy) {
-    const request = state.pendingStop;
-    const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
-    reportHonouredStop(result, request.dir);
+  if (event.phase === 'completed') {
+    void syncRegistryBackstop();
+    if (state.pendingStop && !state.sessionBusy) {
+      const request = state.pendingStop;
+      const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
+      reportHonouredStop(result, request.dir);
+    }
   }
 }
 
@@ -2541,7 +2866,7 @@ function renderIdeas(): HTMLElement {
 function renderFooter(): HTMLElement {
   const footer = q('footer', 'ds-footer');
   footer.append(q('span', 'ds-footer-name', 'Design Canvas'));
-  footer.append(q('span', 'ds-footer-hint', 'Add references by ⌘-clicking an element in the live canvas window.'));
+  footer.append(q('span', 'ds-footer-hint', 'Add references by clicking an element in the live canvas — edit mode turns every click into a chip.'));
   return footer;
 }
 
@@ -2762,13 +3087,17 @@ async function onPlayToggleClick(): Promise<void> {
   renderCanvasControls();
 }
 
-/** The active-screen dropdown: `POST /open {dir, screen}` — warm activation, no restart. */
+/**
+ * The active-screen dropdown: `POST /open {dir, screen}` — warm activation, no
+ * restart — and V4-8's `focus:false`: switching the screen must never raise
+ * the canvas over the chat.
+ */
 async function onScreenSelectChange(): Promise<void> {
   const id = screenSelectEl?.value;
   const ws = state.workspace;
   if (!id || !ws) return;
   try {
-    await openWorkspace({ dir: ws.dir, screen: id });
+    await openWorkspace({ dir: ws.dir, screen: id, focus: false });
     state.activeScreen = id;
   } catch (error) {
     setStatus(`Could not switch screens: ${error instanceof Error ? error.message : String(error)}`, 'error');
@@ -2804,20 +3133,22 @@ export async function applyState(stateData: LiveState): Promise<void> {
   state.url = stateData.url;
   state.title = stateData.title;
   state.windowOpen = stateData.windowOpen;
+  // V4-5: the bridge claim stands the row's pick loop down (semantics unchanged).
+  state.bridgeActive = stateData.bridgeActive === true;
   if (stateData.mode === 'edit' || stateData.mode === 'play') state.liveMode = stateData.mode;
   if (stateData.screens !== undefined) state.liveScreens = stateData.screens.map((screen) => ({ ...screen }));
   state.activeScreen = stateData.activeScreen ?? null;
-  if (stateData.lastPick && stateData.pickSeq > state.lastSeq) {
-    state.lastSeq = stateData.pickSeq;
-    const screenState = stateData.lastPickScreen
-      ? state.liveScreens.find((screen) => screen.id === stateData.lastPickScreen)
-      : undefined;
-    const screen: PickScreen | undefined = screenState ? { id: screenState.id, url: screenState.url } : undefined;
-    const pick: TrackedPick = { ...stateData.lastPick, seq: stateData.pickSeq, url: stateData.url, pickedAt: new Date(), screen };
-    // Design Mode: a pick IS the instruction context — attach without asking.
-    // Unless another panel owns the bridge right now.
-    if (state.mode.on && !stateData.bridgeActive) void addToChat(pick);
+  // V4-4: a broken screen registry is LOUD exactly once per distinct message —
+  // the shell carries the banner, the chat gets a toast, and repeated poll
+  // reads of the SAME error never re-toast. Clearing (null) re-arms it, so a
+  // fixed-then-rebroken screens.json speaks up again.
+  const registry = shouldToastRegistryError(state.registryErrorNotified, stateData.registryError ?? null);
+  state.registryErrorNotified = registry.key;
+  if (registry.toast) {
+    await host.toast({ kind: 'error', message: registryErrorToastMessage(stateData.registryError as string) });
   }
+  // Picks are NOT read here anymore (V4-5): they arrive through `GET /picks`
+  // in `runPickLoop`; `/state` keeps serving window/mode/screens/registryError.
   renderWindowStatus();
   // The user closed the live window by hand: that IS Design Mode going off. Flip
   // the mode (persist it) and reflect it in the widget — never auto-reopen. The
@@ -2919,7 +3250,7 @@ function observeRowHeight(): void {
 
 /**
  * The compact chat Work Status row: Start/Stop, Design Mode, the play/edit
- * toggle, the active-screen dropdown and Focus, plus the ⌘-click hint and the
+ * toggle, the active-screen dropdown and Focus, plus the click-to-pick hint and the
  * one-line session status below. Building it never opens a window.
  */
 export function buildRow(root: HTMLElement): void {
@@ -3052,6 +3383,9 @@ async function main(): Promise<void> {
     if (kind === 'row') {
       void poll();
       setInterval(() => void poll(), POLL_MS);
+      // V4-5: the pick-queue long-poll runs on the row surface only. It has no
+      // visibility guard — picks queue and land whenever this frame can read them.
+      startPickLoop();
     }
   });
 
@@ -3094,6 +3428,11 @@ export function setProjectDirectory(dir: string | null): void {
 export function setWorkspace(workspace: WorkspaceRecord | null): void {
   state.workspace = workspace;
   if (workspace) state.configDir = null;
+}
+
+/** Test seam: the session's currently-bound workspace record. */
+export function getWorkspaceState(): WorkspaceRecord | null {
+  return state.workspace;
 }
 
 /** Test seams for the unsent page draft, without installing a browser host. */

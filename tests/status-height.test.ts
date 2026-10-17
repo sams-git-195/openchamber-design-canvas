@@ -260,11 +260,18 @@ function statusSection(): StatusNode {
 const { setProjectDirectory } = main;
 const { setSurface } = main;
 const { setStudioConfig } = main;
+const { stopPickLoop } = main;
 
 // ---- fail-before (baseline-reachable behavior; both FAIL on the baseline) ----
 
 test('the mounted status row builds no Brief & options block', async () => {
   await mounted();
+  // V4-5: the real mount now also starts the row's pick-queue loop. Like the
+  // poll setInterval neutered at the top of this file, the loop must be stood
+  // down HERE so the runner can drain (its last held-phase sleep fires, the
+  // loop exits, nothing hangs). The loop renders NO new row nodes — the height
+  // stays honest, which the four-controls pin below keeps proving.
+  stopPickLoop();
   assert.equal(root.findAll('ds-more').length, 0, 'the mounted row renders no Brief & options disclosure node');
   assert.equal(root.findAll('ds-miniform').length, 0, 'no micro-brief form node in the mounted row');
   assert.equal(root.findAll('ds-brief').length, 0, 'no brief textarea node in the mounted row');

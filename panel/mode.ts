@@ -427,7 +427,7 @@ export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceR
   );
   lines.push(
     '',
-    'Workflow: in the live canvas the user picks elements; each pick arrives as a reference chip with its screen id. Apply what it asks for and keep the system consistent.',
+    'Workflow: in the live canvas (edit mode) the user clicks elements; EACH click arrives as its own reference chip with its screen id. Sending a whole artboard from its menu arrives as a `Screen: <id> (<w>×<h>) — <file>` chip with the screen URL — edit that file.',
     '',
     VERIFY_PROTOCOL,
   );

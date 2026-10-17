@@ -25,12 +25,13 @@ const main = await import('../panel/main.ts');
 const {
   ATTACH_NEEDS_URL, DESIGN_READY_BADGE, NO_CONFIG_BADGE, NO_DESIGN_WORK_MESSAGE, NO_PROJECT_URL_MESSAGE,
   NO_WORKSPACE_MESSAGE, PANEL_SIDEBAR_HINT, PICK_HINT, WORKSPACE_SLUG_LIMIT,
-  allProjectsFromSnapshot, canvasSessionStatus, canvasSlug, closeLive, contrastRatio, countOtherActiveDesignSessions,
-  focusLive, formatOpenStatus, formatWindowStatus, getScreens, getState, getWorkspaces,
+  ackPicks, allProjectsFromSnapshot, canvasSessionStatus, canvasSlug, closeLive, contrastRatio, countOtherActiveDesignSessions,
+  focusLive, formatOpenStatus, formatWindowStatus, getPicks, getScreens, getScaffoldStatus, getState, getWorkspaces,
   isLoopbackUrl, isModeChipData, isWorkspaceRecord, joinWorkspaceDir, joinWorkspaceSessions, normalizeDirPath,
-  openWorkspace, pathContains, pickHintActive, projectReady, putScreens, referenceText, resolveCanvasTarget,
-  sameDirPath, scaffoldProject, screenUrl, sessionShowsDesignMode, setMode, shouldStopDevServer, ServiceUnavailable,
-  startDevServer, tokenNameFor, uniqueCanvasSlug, workspaceMeta, wsSessionIdFromKey,
+  openWorkspace, pathContains, pickAckLabel, pickHintActive, postAgentStatus, projectReady, putScreens,
+  referenceText, registryErrorToastMessage, resolveCanvasTarget, sameDirPath, scaffoldProgressText, scaffoldProject,
+  screenUrl, sessionShowsDesignMode, setMode, ServiceUnavailable, shouldStopDevServer, shouldToastRegistryError, startDevServer,
+  syncScreens, tokenNameFor, uniqueCanvasSlug, workspaceMeta, WORKSPACE_MISSING_CODE, wsSessionIdFromKey,
 } = api;
 const { loadStudioConfig, setProjectDirectory, setWorkspace, surfaceKind, nextOverlayState } = main;
 const { workspaceStorageKey } = await import('../panel/mode.ts');
@@ -84,12 +85,27 @@ test('setMode posts POST /mode {mode} and echoes the held mode', async () => {
   assert.deepEqual(JSON.parse(calls[0]!.body ?? ''), { mode: 'play' });
 });
 
-test('openWorkspace posts {dir} — and {dir, screen} for an explicit screen (spec §B)', async () => {
+test('openWorkspace posts {dir}, {dir, screen}, and the V4-8 focus flag only when given', async () => {
   const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/home.html', title: 'Home', settled: true }) }));
   await openWorkspace({ dir: 'C:\\p\\site' });
   assert.deepEqual(JSON.parse(calls[0]!.body ?? ''), { dir: 'C:\\p\\site' }, 'the config url stays authoritative service-side');
   await openWorkspace({ dir: 'C:\\p\\site', screen: 'checkout' });
   assert.deepEqual(JSON.parse(calls[1]!.body ?? ''), { dir: 'C:\\p\\site', screen: 'checkout' });
+  await openWorkspace({ dir: 'C:\\p\\site', focus: true });
+  assert.deepEqual(JSON.parse(calls[2]!.body ?? ''), { dir: 'C:\\p\\site', focus: true }, 'V4-8: a user-initiated open carries focus:true');
+  await openWorkspace({ dir: 'C:\\p\\site', screen: 'checkout', focus: false });
+  assert.deepEqual(JSON.parse(calls[3]!.body ?? ''), { dir: 'C:\\p\\site', screen: 'checkout', focus: false }, 'the dropdown activates WITHOUT raising the window');
+});
+
+test('getState reads /state with the V4 registryError field (V4-4)', async () => {
+  const stateBody = {
+    url: 'http://localhost:5173/', title: 'App', lastPick: null, pickSeq: 0, windowOpen: true,
+    mode: 'edit', screens: [], activeScreen: 'home', registryError: 'screens.json: Expected \',\' or \'}\'', shellBridge: { authority: true, lastCommandAt: 1731500000000 },
+  };
+  stubService(() => ({ status: 200, body: JSON.stringify(stateBody) }));
+  const state = await getState();
+  assert.equal(state.registryError, 'screens.json: Expected \',\' or \'}\'');
+  assert.deepEqual(state.shellBridge, { authority: true, lastCommandAt: 1731500000000 });
 });
 
 test('getState reads /state with the extended canvas fields', async () => {
@@ -105,12 +121,86 @@ test('getState reads /state with the extended canvas fields', async () => {
   assert.equal(calls[0]!.path, '/state');
 });
 
-test('scaffoldProject posts {dir, type, …} and the design system travels only when chosen', async () => {
-  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/', files: ['home.html'] }) }));
-  await scaffoldProject('/root/slug', { type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'landing' });
-  assert.deepEqual(JSON.parse(calls[0]!.body ?? ''), { dir: '/root/slug', type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'landing' });
+test('scaffoldProject posts {dir, type, …, async:true} and the design system travels only when chosen', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true, jobId: 'job-1', dir: '/root/slug', url: 'http://localhost:5173/' }) }));
+  const started = await scaffoldProject('/root/slug', { type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'landing' });
+  assert.deepEqual(JSON.parse(calls[0]!.body ?? ''), { dir: '/root/slug', type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'landing', async: true }, 'V4-11: async:true rides on every panel scaffold');
+  assert.deepEqual(started, { ok: true, jobId: 'job-1', dir: '/root/slug', url: 'http://localhost:5173/' }, 'the async answer is the job to poll');
   await scaffoldProject('/root/slug', { type: 'hi-fi', designSystemId: 'apple' });
-  assert.deepEqual(JSON.parse(calls[1]!.body ?? ''), { dir: '/root/slug', type: 'hi-fi', designSystemId: 'apple' });
+  assert.deepEqual(JSON.parse(calls[1]!.body ?? ''), { dir: '/root/slug', type: 'hi-fi', designSystemId: 'apple', async: true });
+});
+
+test('getScaffoldStatus polls GET /scaffold/status?job= — the async job state (V4-11)', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ state: 'installing', elapsedMs: 4400 }) }));
+  const status = await getScaffoldStatus('job-1');
+  assert.deepEqual(status, { state: 'installing', elapsedMs: 4400 });
+  assert.deepEqual(calls[0], { method: 'GET', path: '/scaffold/status', query: { job: 'job-1' }, body: undefined });
+});
+
+test('scaffoldProgressText words each async-scaffold state for the progress toast (V4-11)', () => {
+  assert.equal(scaffoldProgressText({ state: 'installing', elapsedMs: 12_400 }), 'Setting up the canvas… installing (12 s)');
+  assert.equal(scaffoldProgressText({ state: 'booting', elapsedMs: 20_600 }), 'Setting up the canvas… starting the dev server (21 s)');
+  assert.match(scaffoldProgressText({ state: 'done', elapsedMs: 30_000 }), /ready \(30 s\) — opening the canvas/);
+  assert.match(scaffoldProgressText({ state: 'failed', elapsedMs: 1000, error: 'npm exited 1' }), /Canvas setup failed: npm exited 1/);
+});
+
+// ---- pick-queue wires (SPEC-V4 §3: GET /picks, POST /picks/ack) ----
+
+test('getPicks long-polls GET /picks?since&wait exactly as §3 declares', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ seq: 0, picks: [] }) }));
+  const result = await getPicks(12, 12_000);
+  assert.deepEqual(result, { seq: 0, picks: [] });
+  assert.deepEqual(calls[0], { method: 'GET', path: '/picks', query: { since: '12', wait: '12000' }, body: undefined });
+  await getPicks(0, 0);
+  assert.deepEqual(calls[1]!.query, { since: '0', wait: '0' }, 'the degraded short poll uses wait=0');
+});
+
+test('ackPicks posts POST /picks/ack {seq,label} and clamps the label to 80', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  await ackPicks(7, 'x'.repeat(120));
+  assert.deepEqual(calls[0], { method: 'POST', path: '/picks/ack', query: undefined, body: JSON.stringify({ seq: 7, label: 'x'.repeat(80) }) });
+});
+
+test('pickAckLabel names the pick for the canvas confirmation pill — ≤80 chars', () => {
+  assert.equal(pickAckLabel({ seq: 1, kind: 'element', screen: 'home', screenUrl: 'http://127.0.0.1:5173/home.html', at: 0, additive: false, selector: '#b', tag: 'button', classes: '', text: '', outerHTML: '', styles: {}, rect: { x: 0, y: 0, width: 0, height: 0 } }), '#b');
+  assert.equal(pickAckLabel({ seq: 2, kind: 'screen', screen: 'home', screenUrl: 'http://127.0.0.1:5173/home.html', at: 0, additive: false, width: 1280, height: 800, file: 'home.html' }), 'screen home');
+  const long = pickAckLabel({ seq: 3, kind: 'element', screen: 'home', screenUrl: '', at: 0, additive: false, selector: 'y'.repeat(100), tag: 'y', classes: '', text: '', outerHTML: '', styles: {}, rect: { x: 0, y: 0, width: 0, height: 0 } });
+  assert.equal(long.length, 80, 'the §3 label cap holds');
+});
+
+// ---- agent status + registry sync wires (SPEC-V4 §3) ----
+
+test('postAgentStatus posts POST /agent-status {busy,label?} capped at 60 (V4-12)', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  await postAgentStatus(true, 'Designing…');
+  assert.deepEqual(JSON.parse(calls[0]!.body ?? ''), { busy: true, label: 'Designing…' });
+  await postAgentStatus(false);
+  assert.deepEqual(JSON.parse(calls[1]!.body ?? ''), { busy: false }, 'idle carries NO label — the chip just settles');
+  await postAgentStatus(true, 'x'.repeat(90));
+  assert.equal((JSON.parse(calls[2]!.body ?? '') as { label: string }).label.length, 60, 'the ≤60 cap is applied panel-side too');
+});
+
+test('syncScreens posts POST /screens/sync {dir} — the V4-4 turn-completed backstop', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  await syncScreens('C:\\p\\site');
+  assert.deepEqual(calls[0], { method: 'POST', path: '/screens/sync', query: undefined, body: JSON.stringify({ dir: 'C:\\p\\site' }) });
+});
+
+// ---- registry-error toast rule (V4-4, decision C) ----
+
+test('registry errors toast once per distinct message and re-arm on clear', () => {
+  assert.deepEqual(shouldToastRegistryError(null, 'screens.json: bad'), { toast: true, key: 'screens.json: bad' });
+  assert.deepEqual(shouldToastRegistryError('screens.json: bad', 'screens.json: bad'), { toast: false, key: 'screens.json: bad' }, 'the same error across poll ticks stays silent');
+  assert.deepEqual(shouldToastRegistryError('screens.json: bad', 'screens.json: other'), { toast: true, key: 'screens.json: other' }, 'a NEW distinct message toasts');
+  assert.deepEqual(shouldToastRegistryError('screens.json: other', null), { toast: false, key: null }, 'clearing never toasts');
+  assert.deepEqual(shouldToastRegistryError('screens.json: other', undefined), { toast: false, key: null }, 'absent reads as cleared');
+  assert.deepEqual(shouldToastRegistryError('screens.json: other', '  '), { toast: false, key: null }, 'whitespace is not an error');
+  assert.deepEqual(shouldToastRegistryError(null, 'again'), { toast: true, key: 'again' }, 'after a clear, the SAME message is a fresh episode');
+  assert.match(registryErrorToastMessage('screens.json: bad'), /screens\.json: bad/, 'the toast quotes the registry error');
+});
+
+test('WORKSPACE_MISSING is the exact code the V4-15 recovery keys on', () => {
+  assert.equal(WORKSPACE_MISSING_CODE, 'WORKSPACE_MISSING');
 });
 
 test('focusLive posts /focus and closeLive posts /close', async () => {
@@ -258,7 +348,7 @@ test('the list copy is fixed', () => {
   assert.equal(NO_DESIGN_WORK_MESSAGE, 'No canvas workspaces yet — /canvas creates one.');
   assert.equal(PANEL_SIDEBAR_HINT, 'Design Canvas opens from the sidebar.');
   assert.equal(NO_WORKSPACE_MESSAGE, 'No canvas workspace yet — Start creates one.');
-  assert.match(PICK_HINT, /^⌘-click an element to add a reference$/);
+  assert.match(PICK_HINT, /^Click an element in edit mode to add a reference$/, 'V4: edit-mode click is the pick gesture (no ⌘ needed with hover outlines, V4-6)');
   assert.match(ATTACH_NEEDS_URL, /http\(s\)/);
   assert.match(NO_PROJECT_URL_MESSAGE, /No \.design-studio\.json url/);
 });
@@ -590,26 +680,50 @@ test('the first scaffold toasts the one-time permission heads-up (decision 4b)',
 
 test('config and dev-server reads resolve against the workspace dir', async () => {
   const source = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
+  const apiSource = await readFile(new URL('../panel/api.ts', import.meta.url), 'utf8');
   const readStart = source.indexOf('async function readStudioConfig(');
   const read = source.slice(readStart, source.indexOf('/** Read the workspace config'));
   assert.match(read, /const dir = workspaceDir\(\)/, 'the config read uses the workspace dir');
   const openStart = source.indexOf('async function openCanvasWindow(');
-  const open = source.slice(openStart, source.indexOf('async function previewWorkspace('));
-  assert.match(open, /await openWorkspace\(\{ dir: ws\.dir \}\)/, 'POST /open {dir}: the config url is authoritative service-side');
-  assert.match(open, /const result = await openWorkspace\(\{ dir: ws\.dir \}\)/, 'the canvas opens ALL screens');
+  const open = source.slice(openStart, source.indexOf('async function handleMissingWorkspace('));
+  assert.match(open, /await openWorkspace\(\{ dir: ws\.dir, focus: true \}\)/, 'POST /open {dir, focus:true}: a user-initiated open raises the window (V4-8), all screens');
+  assert.match(open, /result\.code === WORKSPACE_MISSING_CODE/, 'V4-15: the missing-workspace answer is acted on, not just shown');
+  const missing = source.slice(source.indexOf('async function handleMissingWorkspace('), source.indexOf('/**\n * Raise the workspace of a workspaces-list row'));
+  assert.match(missing, /host\.storage\.delete\(key\)/, 'the ws/ record is deleted, not shadowed');
+  assert.match(missing, /state\.workspace = null/, 'the session unbinds so Start re-offers "Create canvas"');
+  assert.match(missing, /Start creates a new canvas\./, 'the toast offers the next action');
+  assert.match(source, /await openWorkspace\(\{ dir: row\.dir, focus: true \}\)/, 'the page Preview row is user-initiated too');
+  assert.match(source, /await openWorkspace\(\{ dir: ws\.dir, screen: id, focus: false \}\)/, 'the screen dropdown never raises the window (V4-8)');
+  assert.doesNotMatch(source, /FORK-MERGE:?\s*panel\/styles\.css/, 'no unfilled style notes left for the row');
+  // V4-13 dock — the seam is the INPUT TYPE (the runtime proof lives in
+  // mode-open: every /open body deep-equals {dir[,screen],focus} — no dock key),
+  // because a bare `dock` grep would hit the FORK-MERGE note itself.
+  assert.match(apiSource, /export function openWorkspace\(input: \{ dir: string; screen\?: string; focus\?: boolean \}\)/, 'the /open seam accepts NO dock rect (V4-13 skipped — no host geometry API)');
+  assert.match(source, /FORK-MERGE \(V4-13 dock/, 'the skip is filed as FORK-MERGE with the reason');
 });
 
-test('the pick pipeline attaches the screen from /state lastPickScreen', async () => {
+test('the pick pipeline is the V4-5 queue: long-poll, ordered attach, ack after delivery', async () => {
   const source = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
-  const stateStart = source.indexOf('export async function applyState(');
-  const pollStart = source.indexOf('async function poll()');
-  const apply = source.slice(stateStart, pollStart);
-  assert.match(apply, /stateData\.lastPickScreen/, 'the screen id of the last pick is read');
-  assert.match(apply, /const screen: PickScreen \| undefined = screenState \? \{ id: screenState\.id, url: screenState\.url \} : undefined/, 'the screen resolves from the live screens');
-  assert.match(apply, /void addToChat\(pick\)/, 'the pick flows through the shared attach path');
-  const attachStart = source.indexOf('async function addToChat(');
-  const addToChat = source.slice(attachStart, source.indexOf('// ---- the pick→chat bridge ----'));
-  assert.match(addToChat, /buildAttachPayload\(pick, pick\.seq, pick\.url, pick\.pickedAt, pick\.screen\)/, 'the screen rides on the pick chip');
+  const queueStart = source.indexOf('// ---- the pick queue');
+  assert.ok(queueStart > 0, 'the pick-queue section exists');
+  const queue = source.slice(queueStart, source.indexOf('// ---- the canvas window ----'));
+  assert.match(queue, /getPicks\(pickCursor, waitMs\)|pollPicksOnce\(PICK_LONG_POLL_MS\)/, 'delivery long-polls GET /picks from the since-cursor');
+  assert.match(queue, /export const PICK_LONG_POLL_MS = 12_000/, 'wait=12000 — the §3 long-poll window');
+  assert.match(queue, /export const PICK_SHORT_POLL_MS = 250/, 'error fallback: wait=0 short polls every 250 ms');
+  assert.match(queue, /export const PICK_SHORT_POLL_BUDGET_MS = 30_000/, '…for a 30 s budget, then the long-poll retries');
+  assert.match(queue, /\[...picks\]\.sort\(\(a, b\) => a\.seq - b\.seq\)/, 'batches deliver in SEQ ORDER');
+  assert.match(queue, /if \(!\(await addToChat\(entry\)\)\) break/, 'a failed attach stops the batch — no ack past it, the queue retries it');
+  assert.match(queue, /pickCursor = lastDelivered\.seq/, 'the cursor moves only past delivered chips');
+  assert.match(queue, /await ackPicks\(lastDelivered\.seq, pickAckLabel\(lastDelivered\)\)/, 'ONE ack with the last delivered seq + label');
+  assert.match(queue, /if \(!state\.mode\.on \|\| state\.bridgeActive\) break/, 'mode-off and bridgeActive both HOLD delivery (semantics unchanged, fence §5)');
+  assert.doesNotMatch(queue, /document\.visibilityState/, 'the queue loop has NO visibility guard — hidden windows lose nothing');
+  assert.match(queue, /void runPickLoop\(\(\) => !pickLoopActive\)/, 'startPickLoop runs exactly one loop — single in-flight request');
+  // The old snapshot path is really gone from the state reader:
+  const applyStart = source.indexOf('export async function applyState(');
+  const apply = source.slice(applyStart, source.indexOf('/** The user closed the live window.'));
+  assert.doesNotMatch(apply, /lastPick|pickSeq|state\.lastSeq/, 'applyState no longer consumes lastPick/pickSeq');
+  assert.match(apply, /shouldToastRegistryError\(state\.registryErrorNotified, stateData\.registryError \?\? null\)/, 'V4-4: /state.registryError feeds the once-per-message toast rule');
+  assert.match(apply, /state\.bridgeActive = stateData\.bridgeActive === true/, 'the bridge claim is tracked for the queue loop');
 });
 
 test('loadStudioConfig reads the config for display but never opens a window', async () => {

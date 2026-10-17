@@ -5,11 +5,16 @@
 // `ServiceUnavailable` or a plain Error.
 //
 // The canvas is a real headful Chrome window the service owns; the panel only
-// opens/navigates it (`POST /open {dir, screen?}`), raises it without reloading
-// (`/focus`), switches edit/play (`POST /mode`), sets the active screen
-// (`POST /open {dir, screen}` — in-memory activation, no shell restart) and
-// reads its state (`/state`). Workspaces live on disk under the service-resolved
-// root (`GET /workspaces`); the panel NEVER constructs the Documents path itself.
+// opens/navigates it (`POST /open {dir, screen?, focus?}`), raises it without
+// reloading (`/focus`), switches edit/play (`POST /mode`), sets the active
+// screen (`POST /open {dir, screen}` — in-memory activation, no shell restart)
+// and reads its state (`/state`). Picks ride the SPEC-V4 queue (`GET /picks?
+// since&wait` long-poll + `POST /picks/ack`), first-run setup is the async
+// scaffold job (`POST /scaffold {…, async:true}` + `GET /scaffold/status?job=`),
+// the turn mirror is `POST /agent-status {busy,label?}`, and the post-turn
+// registry backstop is `POST /screens/sync {dir}` — all exactly the frozen §3
+// contract. Workspaces live on disk under the service-resolved root
+// (`GET /workspaces`); the panel NEVER constructs the Documents path itself.
 import { connectHost, HostRequestError } from '@openchamber/sdk';
 import type { GuestProjectsSnapshot, GuestSessionRecord } from '@openchamber/sdk';
 import type { VerifyConfig } from '../shared/verify-types.ts';
@@ -65,6 +70,72 @@ export type PickPayload = {
   rect: { x: number; y: number; width: number; height: number };
 };
 
+// ---- the pick queue (SPEC-V4 V4-5/V4-10, §3 `GET /picks` + `POST /picks/ack`) ----
+
+/**
+ * One honoured pick as the service queues it: `kind:'element'` carries the full
+ * picked-element payload, `kind:'screen'` (the artboard menu's Send to chat,
+ * V4-10) carries the screen's size and workspace file instead of a selector.
+ * `additive` is the Shift-click flag — reserved service-side, treated identically
+ * here (every pick is its own chip).
+ */
+export type QueuedElementPick = {
+  seq: number;
+  kind: 'element';
+  screen: string;
+  screenUrl: string;
+  at: number;
+  additive: boolean;
+} & PickPayload;
+
+export type QueuedScreenPick = {
+  seq: number;
+  kind: 'screen';
+  screen: string;
+  screenUrl: string;
+  at: number;
+  additive: boolean;
+  width: number;
+  height: number;
+  /** The workspace file behind the screen (the registry path, absolute when the service resolves it). */
+  file: string;
+};
+
+export type QueuedPick = QueuedElementPick | QueuedScreenPick;
+
+/** What `GET /picks?since&wait` answers: the latest seq plus the queued picks above it. */
+export type PicksResult = { seq: number; picks: QueuedPick[] };
+
+/** The ack label cap the service declares (`label:string≤80`). */
+export const PICK_ACK_LABEL_MAX = 80;
+
+/**
+ * Long-poll the pick queue: resolves at the first push or at `wait` (≤12000 ms).
+ * ONE request in flight — the panel's pick loop is sequential by construction.
+ */
+export function getPicks(since: number, waitMs: number): Promise<PicksResult> {
+  return callService<PicksResult>('/picks', { since: String(since), wait: String(waitMs) });
+}
+
+/** Confirm delivery through `seq`; the service answers the CANVAS with the
+ * `Added to chat · <label>` pill — the panel only acks (V4-5). */
+export function ackPicks(seq: number, label: string): Promise<{ ok: boolean }> {
+  return callService<{ ok: boolean }>(
+    '/picks/ack',
+    undefined,
+    'POST',
+    JSON.stringify({ seq, label: label.slice(0, PICK_ACK_LABEL_MAX) }),
+  );
+}
+
+/** The ack label for one queued pick: what the canvas pill should read. */
+export function pickAckLabel(entry: QueuedPick): string {
+  const raw = entry.kind === 'screen'
+    ? `screen ${entry.screen}`
+    : entry.selector || entry.tag || `screen ${entry.screen}`;
+  return raw.slice(0, PICK_ACK_LABEL_MAX);
+}
+
 /** One screen as the canvas shell reports it (spec §B `GET /state`). */
 export type CanvasScreenState = {
   id: string;
@@ -75,11 +146,16 @@ export type CanvasScreenState = {
   active: boolean;
 };
 
-/** The real window the service drives: its page, mode, screens and last pick. */
+/** The real window the service drives: its page, mode, screens and registry health. */
 export type LiveState = {
   url: string;
   title: string;
+  /**
+   * LEGACY single-slot pick (kept service-side for back-compat, V4-5). The panel
+   * does NOT read it — picks arrive through `GET /picks` (see `getPicks`).
+   */
   lastPick: PickPayload | null;
+  /** LEGACY like `lastPick`; the queue's own seqs drive delivery. */
   pickSeq: number;
   windowOpen: boolean;
   /**
@@ -93,8 +169,16 @@ export type LiveState = {
   screens?: CanvasScreenState[];
   /** The active screen id, when a workspace is open. */
   activeScreen?: string;
-  /** The screen the LAST pick landed on (spec §B pick() gains `screen`). */
+  /** The screen the LAST pick landed on (legacy `lastPick` companion; unused since V4-5). */
   lastPickScreen?: string;
+  /**
+   * V4-4: the screen-registry error the service wants the user to see
+   * (`screens.json: <parse problem>`), or null/absent when the registry is
+   * healthy. The row raises ONE toast per distinct message.
+   */
+  registryError?: string | null;
+  /** V4-15/E17 bridge-health telemetry: read by the integrator's loop, never rendered by the row. */
+  shellBridge?: { authority: boolean; lastCommandAt: number | null };
 };
 
 /** What `POST /open` answers after opening/navigating the real window. */
@@ -107,19 +191,32 @@ export type OpenResult = {
   started?: boolean;
   /** Actionable reason when `ok` is false (the dev server is down, or open failed). */
   error?: string;
+  /** Machine code the panel reacts to; V4-15 answers `WORKSPACE_MISSING`. */
+  code?: string;
 };
+
+/** The workspace folder no longer exists — the row clears its `ws/` record and offers a new create. */
+export const WORKSPACE_MISSING_CODE = 'WORKSPACE_MISSING';
 
 /** Status shown in the dock while an open (and dev-server start) is in flight. */
 export const OPENING_STATUS = 'Starting dev server…';
 
 /**
- * Open the workspace's canvas window. Spec §B: `POST /open` accepts
- * `{dir, screen?}` — the config's `.design-studio.json` url is authoritative,
- * the service resolves the screens itself. A warm window gets an in-memory
- * activation (`setActive`/`setScreens`), never a shell restart.
+ * Open (or warm-navigate) the workspace's live canvas: `POST /open`. Spec §B:
+ * the config's `.design-studio.json` url is authoritative, the service resolves
+ * the screens itself. A warm window gets an in-memory activation
+ * (`setActive`/`setScreens`), never a shell restart.
+ * `focus` is the V4-8 raise gate: the panel sends `true` ONLY on user-initiated
+ * paths (Design Mode ON, workspace-row open); the screen dropdown sends `false`
+ * so activation never steals the foreground. Agent paths never carry `/open`.
+ * V4-13 (dock): `dock:{x,y,width,height}` would ride with `focus:true`, but the
+ * guest frame has no host-window geometry (see the FORK-MERGE note in main.ts),
+ * so the panel sends none and the service keeps its own placement.
  */
-export function openWorkspace(input: { dir: string; screen?: string }): Promise<OpenResult> {
-  const payload = input.screen !== undefined ? { dir: input.dir, screen: input.screen } : { dir: input.dir };
+export function openWorkspace(input: { dir: string; screen?: string; focus?: boolean }): Promise<OpenResult> {
+  const payload: Record<string, string | boolean> = { dir: input.dir };
+  if (input.screen !== undefined) payload.screen = input.screen;
+  if (input.focus !== undefined) payload.focus = input.focus;
   return callService<OpenResult>('/open', undefined, 'POST', JSON.stringify(payload));
 }
 
@@ -201,10 +298,31 @@ export function releasePickBridge(token: string): Promise<{ ok: boolean; bridgeA
 
 /**
  * Raise the live Chrome window (POST /focus) without navigating or reloading
- * it, so the user can see the page they are about to Cmd-click.
+ * it, so the user can see the page they are about to click.
  */
 export function focusLive(): Promise<{ ok: boolean }> {
   return callService<{ ok: boolean }>('/focus', undefined, 'POST');
+}
+
+/**
+ * V4-12: mirror this session's agent turn to the canvas (display-only — a
+ * "Designing…" chip and a settle pulse, never an auto-send).
+ * `label` is capped at 60 characters service-side.
+ */
+export function postAgentStatus(busy: boolean, label?: string): Promise<{ ok: boolean }> {
+  const body: { busy: boolean; label?: string } = { busy };
+  if (label !== undefined) body.label = label.slice(0, 60);
+  return callService<{ ok: boolean }>('/agent-status', undefined, 'POST', JSON.stringify(body));
+}
+
+/**
+ * V4-4 backstop: tell the service to re-read `screens.json` for `dir` and push
+ * the registry if it changed — the same tick the file watcher would fire. The
+ * row calls it when an agent turn completes (the watcher may have missed a
+ * write on unreliable network roots).
+ */
+export function syncScreens(dir: string): Promise<{ ok: boolean; error?: string }> {
+  return callService<{ ok: boolean; error?: string }>('/screens/sync', undefined, 'POST', JSON.stringify({ dir }));
 }
 
 /**
@@ -359,7 +477,7 @@ export type WorkspacesView =
   | { kind: 'empty' }
   | { kind: 'list'; rows: WorkspaceWorkRow[] };
 
-// ---- scaffolding (immediate workspace initialization) ----
+// ---- scaffolding (immediate workspace initialization, async in V4-11) ----
 
 /** What `POST /scaffold` is asked to build: the workspace dir plus the brief. */
 export type ScaffoldSpec = {
@@ -374,19 +492,50 @@ export type ScaffoldSpec = {
   designSystemId?: string;
 };
 
-/** What `POST /scaffold` answers: the served URL and the files it wrote, or an actionable error. */
+/**
+ * What `POST /scaffold {…, async:true}` answers right after the FILES are
+ * written (V4-11): the single-slot job to poll, the dir and the config url.
+ * npm install + dev boot continue in the service's job, so the panel can store
+ * `ws/<sessionId>` immediately — it can never hit the 20 s host cap.
+ */
 export type ScaffoldResult =
-  | { ok: true; url: string; files: string[] }
+  | { ok: true; jobId: string; dir: string; url: string }
   | { ok: false; error: string };
 
 /**
- * Scaffold the workspace at `dir` from the design spec (the service writes
- * `.design-studio.json`, the multi-page skeleton and `screens.json`). The dir
- * must live inside the service-resolved workspace root — the panel derives it
- * from the `GET /workspaces` answer (decision 3), never from Documents itself.
+ * Scaffold the workspace at `dir` from the design spec, ASYNCHRONOUSLY: the
+ * service writes `.design-studio.json`, the multi-page skeleton and
+ * `screens.json`, answers with the job id, then installs and boots in the
+ * background. Poll the job with `getScaffoldStatus`. The dir must live inside
+ * the service-resolved workspace root — the panel derives it from the
+ * `GET /workspaces` answer (decision 3), never from Documents itself.
  */
 export function scaffoldProject(dir: string, spec: ScaffoldSpec): Promise<ScaffoldResult> {
-  return callService<ScaffoldResult>('/scaffold', undefined, 'POST', JSON.stringify({ dir, ...spec }));
+  return callService<ScaffoldResult>('/scaffold', undefined, 'POST', JSON.stringify({ dir, ...spec, async: true }));
+}
+
+/** The states of an async scaffold job (V4-11). */
+export type ScaffoldState = 'installing' | 'booting' | 'done' | 'failed';
+
+/** What `GET /scaffold/status?job=` answers. */
+export type ScaffoldStatus = { state: ScaffoldState; elapsedMs: number; error?: string };
+
+/** Poll one async scaffold job by the id `POST /scaffold` returned. */
+export function getScaffoldStatus(job: string): Promise<ScaffoldStatus> {
+  return callService<ScaffoldStatus>('/scaffold/status', { job });
+}
+
+/**
+ * The progress-toast copy for one job poll (V4-11): "Setting up the canvas…
+ * installing (12 s)", then the boot line, then the open line at done. Pure so
+ * the wording is pinned without a host.
+ */
+export function scaffoldProgressText(job: ScaffoldStatus): string {
+  const seconds = Math.max(0, Math.round((job.elapsedMs ?? 0) / 1000));
+  if (job.state === 'installing') return `Setting up the canvas… installing (${seconds} s)`;
+  if (job.state === 'booting') return `Setting up the canvas… starting the dev server (${seconds} s)`;
+  if (job.state === 'done') return `Canvas workspace is ready (${seconds} s) — opening the canvas.`;
+  return `Canvas setup failed${job.error ? `: ${job.error}` : '.'}`;
 }
 
 // ---- cross-platform path compares (spec §F, audit #11 / §G rule 2) ----
@@ -571,14 +720,15 @@ export function sessionShowsDesignMode(session: Pick<GuestSessionRecord, 'items'
 // ---- pure helpers (kept DOM-free so they can be unit-tested) ----
 
 /**
- * The row's compact pick gesture hint. A reference is added by holding Cmd
- * (macOS) or Ctrl and clicking an element in the live window.
+ * The row's compact pick gesture hint. V4 (V4-5/V4-6): in edit mode a plain
+ * click picks the element under the (now hover-outlined) point; every click
+ * becomes its own chip through the pick queue.
  */
-export const PICK_HINT = '⌘-click an element to add a reference';
+export const PICK_HINT = 'Click an element in edit mode to add a reference';
 
 /**
  * The hint is ACTIVE only while the live window is open; with no window there
- * is nothing to Cmd-click.
+ * is nothing to click.
  */
 export function pickHintActive(state: Pick<LiveState, 'windowOpen'>): boolean {
   return state.windowOpen;
@@ -662,6 +812,34 @@ export function canvasSessionStatus(state: { modeOn: boolean; workspaceDir: stri
     : `Design session · ${state.workspaceDir} (no .design-studio.json url yet)`;
 }
 
+// ---- registry-error toasts (V4-4, decision C: one toast per error id) ----
+
+/**
+ * Whether `/state.registryError` is a NEW error to raise. The registry error is
+ * service-side state read on every poll tick; the row must toast each DISTINCT
+ * message exactly once while the condition holds, and arm again once it clears
+ * (null) — so a fixed-then-rebroken `screens.json` toasts once per break, and a
+ * poll storm on the SAME error stays silent. Pure: the caller feeds the previous
+ * and current values and persists the returned key.
+ */
+export function shouldToastRegistryError(
+  lastToastKey: string | null,
+  registryError: string | null | undefined,
+): { toast: boolean; key: string | null } {
+  const message = typeof registryError === 'string' && registryError.trim() !== '' ? registryError.trim() : null;
+  if (message === null) return { toast: false, key: null };
+  if (message === lastToastKey) return { toast: false, key: lastToastKey };
+  return { toast: true, key: message };
+}
+
+/**
+ * The chat-facing line a registry error produces. Kept separate so the toast and
+ * a test share one wording.
+ */
+export function registryErrorToastMessage(registryError: string): string {
+  return `The canvas screens registry is broken — ${registryError}`;
+}
+
 /** Actionable message when a workspace has no url to open or serve. */
 export const NO_PROJECT_URL_MESSAGE =
   'No .design-studio.json url for this workspace — add one, or turn the dev server on first';
@@ -736,6 +914,24 @@ export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, s
     '```html',
     pick.outerHTML,
     '```',
+  ].join('\n');
+}
+
+/**
+ * The text of a SCREEN-level chip (V4-10: the artboard menu's "Send to chat",
+ * arriving through the pick queue as `kind:'screen'`): exactly
+ * `Screen: <id> (<w>×<h>) — <file path>` plus `Screen URL:` — no selector, no
+ * styles block, no markup (spec §V4-10: "no selector/styles block").
+ */
+export function screenReferenceText(
+  entry: Pick<QueuedScreenPick, 'screen' | 'screenUrl' | 'width' | 'height' | 'file'>,
+  pickedAt?: Date,
+): string {
+  return [
+    'Reference from Design Canvas',
+    ...(pickedAt ? [`Picked at ${localTimeOf(pickedAt)}`] : []),
+    `Screen: ${entry.screen} (${entry.width}×${entry.height}) — ${entry.file}`,
+    `Screen URL: ${entry.screenUrl}`,
   ].join('\n');
 }
 

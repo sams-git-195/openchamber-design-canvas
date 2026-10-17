@@ -132,7 +132,10 @@ async function page(): Promise<Session[]> {
   host.serviceRequest = async (request) => {
     if (request.path === '/config') return { status: 200, body: JSON.stringify({ config: { version: 1, name: 'Site', url: 'http://localhost:5173' }, path: null }) };
     if (request.path === '/workspaces') return { status: 200, body: JSON.stringify({ root: '/projects', workspaces: [] }) };
-    if (request.path === '/scaffold') return { status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/', files: ['home.html'] }) };
+    // V4-11 async scaffold contract (re-bound by the panel lane): the POST answers
+    // with the job, the status poll says done — exactly like mode-open's stubs.
+    if (request.path === '/scaffold') return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-ref', dir: '/projects/site', url: 'http://localhost:5173/' }) };
+    if (request.path === '/scaffold/status') return { status: 200, body: JSON.stringify({ state: 'done', elapsedMs: 1200 }) };
     if (request.path === '/reference') {
       const body = JSON.parse(request.body || '{}') as { dir: string; path: string };
       return valid(`${body.dir}/${body.path}`, body.dir);
