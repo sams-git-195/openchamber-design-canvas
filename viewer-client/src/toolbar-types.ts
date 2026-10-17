@@ -4,6 +4,8 @@ export type ToolbarMenu = 'page' | 'zoom' | null;
 export type CameraZoomRequest = { action: 'in' | 'out' | 'reset' | 'wheel'; deltaY?: number; x?: number; y?: number };
 export type CanvasMode = 'edit' | 'play';
 export type ScreenState = 'loading' | 'ready' | 'error';
+export type NoticeKind = 'info' | 'warn' | 'error';
+export type ToastKind = 'ok' | 'warn' | 'error' | 'info';
 
 export type ToolbarScreen = {
   id: string;
@@ -13,6 +15,9 @@ export type ToolbarScreen = {
   title: string;
   state: ScreenState;
 };
+
+export type ToolbarNotice = { id: string; kind: NoticeKind; text: string };
+export type ToolbarToast = { kind: ToastKind; text: string };
 
 export type ToolbarState = {
   ready: boolean;
@@ -34,14 +39,20 @@ export type ToolbarState = {
   pan: boolean;
   capturing: boolean;
   openMenu: ToolbarMenu;
+  /** SPEC-V4 §3: persistent registry banners (<=3), transient toast, agent state. */
+  notices: readonly ToolbarNotice[];
+  toast: ToolbarToast | null;
+  agentBusy: boolean;
+  agentLabel: string;
+  modePending: CanvasMode | null;
 };
 
 export type ToolbarBridge = {
   getSnapshot: () => ToolbarState;
   subscribe: (listener: () => void) => () => void;
-  selectPreset: (id: Exclude<ToolbarPreset, 'custom'>) => void;
   selectPage: (id: string) => void;
-  zoomTo: (value: 'fit' | number) => void;
+  /** Numeric zoom only: V4-1 retired the Fit-width preset from the toolbar. */
+  zoomTo: (value: number) => void;
   zoomCamera: (info: CameraZoomRequest) => boolean;
   togglePan: () => void;
   panBy: (direction: 'left' | 'right' | 'up' | 'down') => void;

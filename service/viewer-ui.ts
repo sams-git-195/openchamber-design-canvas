@@ -82,11 +82,12 @@ type PlacedScreen = ViewerScreen & { x: number | null; y: number | null };
 function renderArtboard(screen: PlacedScreen, cell: { x: number; y: number }, index: number, active: boolean): string {
   const id = escapeAttribute(screen.id);
   const header = `${index + 1} · ${escapeText(screen.title)}`;
-  return `<section class="ds-artboard" data-screen="${id}" data-active="${active ? 'true' : 'false'}" style="left:${cell.x}px;top:${cell.y}px;width:${screen.width}px;height:${screen.height}px">`
+  return `<section class="ds-artboard" data-screen="${id}" data-active="${active ? 'true' : 'false'}" style="left:${cell.x}px;top:${cell.y}px;width:${screen.width}px;height:${screen.height}px;--w:${screen.width}px">`
     + `<button type="button" class="ds-ab-title">${header}</button>`
     + `<span class="ds-ab-size">${screen.width}×${screen.height}</span>`
     + `<iframe id="ds-frame-${id}" data-ds-screen="${id}" name="__dsArtifact:${id}" referrerpolicy="no-referrer" sandbox="${FRAME_SANDBOX}" src="${escapeAttribute(screen.url)}"></iframe>`
     + `<div class="ds-ab-state" data-state="loading"><p class="ds-ab-card-copy" role="status">Loading this screen.</p><button type="button" class="ds-ab-retry" hidden>Retry</button></div>`
+    + `<button type="button" class="ds-ab-menu" aria-label="Screen options">⋯</button>`
     + `</section>`;
 }
 
@@ -128,35 +129,60 @@ export function renderViewerHtml(config: ViewerConfig): string {
 }
 
 // Canvas-only geometry. No legacy toolbar, control, typography, or palette CSS.
+// V4-9 art-wall targets (SPEC-V4): dot grid that tracks the camera, shadowed
+// artboards, plain-text counter-scaled headers, and the notice band / toast
+// pill / context menu the controller renders. The dot grid's background-size
+// and -position are rewritten by paint(); the counter-scale reads --cam-scale
+// (set on #camera by paint) so headers stay a constant ~13 readable px at every
+// zoom, clamped by max-width calc(var(--w) * var(--cam-scale)) so a header can
+// never exceed its artboard's on-screen width.
 const CANVAS_GEOMETRY = String.raw`
 html,body{margin:0;width:100%;height:100%}
 body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 #toolbar-root{flex:none;min-width:0}
-.canvas{position:relative;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden;touch-action:none}
+.canvas{position:relative;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden;touch-action:none;background:oklch(0.17 0 0) radial-gradient(circle,oklch(1 0 0 / .07) 1px,transparent 1.2px);background-size:24px 24px;background-position:0 0}
 .canvas[data-layout=fit]{touch-action:auto}
 .camera{position:absolute;top:0;left:0;transform-origin:0 0}
 iframe{display:block;border:0;width:100%;height:100%}
 .camera[hidden],.pan-layer[hidden],.state[hidden],[hidden]{display:none}
 .pan-layer{position:absolute;inset:0;z-index:4;cursor:grab;touch-action:none}
 .canvas.dragging,.canvas.dragging .pan-layer{cursor:grabbing}
-.ds-artboard{position:absolute;box-sizing:border-box;background:var(--card);outline:1px solid var(--border)}
-.ds-artboard[data-active=true]{outline:2px solid var(--primary)}
-.ds-artboard>.ds-ab-title,.ds-artboard>.ds-ab-size{position:absolute;bottom:100%;margin:0 0 6px;padding:0 8px;height:24px;display:inline-flex;align-items:center;font-size:12px;line-height:1;color:var(--muted-foreground);background:var(--muted);border-radius:6px}
-.ds-artboard>.ds-ab-title{left:0;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;cursor:pointer;color:var(--foreground)}
-.ds-artboard>.ds-ab-title:hover{background:var(--accent)}
-.ds-artboard>.ds-ab-size{right:0;white-space:nowrap}
+.ds-artboard{position:absolute;box-sizing:border-box;background:var(--card);box-shadow:0 1px 2px rgb(0 0 0/.4),0 12px 32px rgb(0 0 0/.35)}
+.canvas[data-mode=edit] .ds-artboard:hover{outline:1px solid rgb(79 140 255/.6)}
+.ds-artboard[data-active=true]{outline:2px solid #4f8cff;outline-offset:2px}
+.ds-artboard[data-new=true]{animation:ds-new-pulse 1.2s ease-out}
+.ds-artboard>.ds-ab-title,.ds-artboard>.ds-ab-size{position:absolute;bottom:100%;margin:0 0 8px;padding:0;display:inline-flex;align-items:center;line-height:1;transform:scale(calc(1 / var(--cam-scale,1)))}
+.ds-artboard>.ds-ab-title{left:0;transform-origin:bottom left;max-width:calc(var(--w,100%) * var(--cam-scale,1));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;font-size:13px;font-weight:500;color:var(--foreground);opacity:.85;cursor:pointer}
+.ds-artboard>.ds-ab-title:hover{opacity:1}
+.ds-artboard>.ds-ab-size{right:0;transform-origin:bottom right;white-space:nowrap;font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted-foreground)}
+.ds-ab-menu{position:absolute;top:2px;right:2px;z-index:5;width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;padding:0;border:1px solid var(--border);border-radius:6px;background:var(--popover);color:var(--muted-foreground);font-size:14px;line-height:1;cursor:pointer;opacity:0;transform:scale(calc(1 / var(--cam-scale,1)));transform-origin:top right}
+.ds-artboard:hover>.ds-ab-menu,.ds-artboard:focus-within>.ds-ab-menu,.ds-ab-menu:focus-visible{opacity:1}
+.ds-ab-menu:hover{color:var(--foreground)}
+.ds-ab-rename{position:absolute;bottom:100%;left:0;z-index:5;margin:0 0 4px;padding:2px 6px;width:220px;font-size:13px;color:var(--foreground);background:var(--card);border:1px solid #4f8cff;border-radius:6px;transform:scale(calc(1 / var(--cam-scale,1)));transform-origin:bottom left}
 .ds-ab-state{position:absolute;inset:0;z-index:3;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center;background:var(--card);padding:16px}
 .ds-ab-state[data-state=loading]::before{content:"";width:28px;height:28px;border-radius:50%;border:2px solid var(--border);border-top-color:var(--primary);animation:ds-spin .9s linear infinite}
 .ds-ab-card-copy{max-width:480px;margin:0;overflow-wrap:anywhere;color:var(--muted-foreground)}
 .ds-ab-retry{color:var(--foreground)}
 @keyframes ds-spin{to{transform:rotate(360deg)}}
+@keyframes ds-new-pulse{0%{box-shadow:0 0 0 0 rgb(79 140 255/.55),0 1px 2px rgb(0 0 0/.4),0 12px 32px rgb(0 0 0/.35)}100%{box-shadow:0 0 0 16px rgb(79 140 255/0),0 1px 2px rgb(0 0 0/.4),0 12px 32px rgb(0 0 0/.35)}}
 .canvas[data-mode=edit] .ds-artboard>iframe{pointer-events:none}
 .canvas[data-mode=edit] .ds-artboard{cursor:crosshair}
-.canvas[data-mode=edit] .ds-artboard:hover{outline:2px solid var(--accent-foreground)}
-.canvas[data-mode=edit] .ds-artboard:hover>.ds-ab-title{background:var(--accent)}
+.canvas[data-agent-input] .ds-artboard>iframe{pointer-events:auto}
+#toolbar-status-area{position:absolute;top:0;left:0;right:0;z-index:6;display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 16px;pointer-events:none}
+#toolbar-status-area:empty{padding:0}
+.ds-notice{display:flex;align-items:center;gap:8px;max-width:720px;padding:6px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground);font-size:13px;line-height:1.4;box-shadow:0 12px 32px rgb(0 0 0/.35)}
+.ds-notice[data-kind=error]{border-color:var(--destructive)}
+.ds-notice[data-kind=warn]{border-color:#d97706}
+.ds-notice-dot{width:8px;height:8px;flex:none;border-radius:9999px;background:var(--muted-foreground)}
+.ds-notice[data-kind=error] .ds-notice-dot{background:var(--destructive)}
+.ds-notice[data-kind=warn] .ds-notice-dot{background:#d97706}
+.ds-notice-text{overflow-wrap:anywhere}
+.ds-toast{position:absolute;left:50%;bottom:24px;z-index:6;transform:translateX(-50%);max-width:min(80%,560px);padding:8px 16px;border:1px solid var(--border);border-radius:9999px;background:var(--popover);color:var(--popover-foreground);font-size:13px;line-height:1.3;text-align:center;box-shadow:0 12px 32px rgb(0 0 0/.35);pointer-events:none}
+.ds-context-menu{position:fixed;z-index:7;min-width:180px;display:flex;flex-direction:column;gap:2px;padding:6px;border:1px solid var(--border);border-radius:var(--radius);background:var(--popover);box-shadow:0 12px 32px rgb(0 0 0/.35)}
+.ds-menu-item{padding:6px 10px;border:0;border-radius:calc(var(--radius) * .6);background:transparent;color:var(--popover-foreground);font-size:13px;line-height:1.2;text-align:left;cursor:pointer}
+.ds-menu-item:hover,.ds-menu-item:focus{background:var(--accent);color:var(--accent-foreground);outline:none}
 .state{position:absolute;inset:0;display:grid;place-items:center;text-align:center;background:var(--background)}
 .state-body{max-width:100%;overflow-wrap:anywhere}
-.fallback{position:absolute;bottom:0;left:0;max-width:100%;overflow-wrap:anywhere;pointer-events:none}
 .sr{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 `;
 
@@ -165,6 +191,6 @@ const CANVAS_MARKUP = (screens: readonly PlacedScreen[], mode: 'edit' | 'play'):
   const artboards = screens.map((screen, index) => renderArtboard(screen, layout.cells[index]!, index, index === 0)).join('');
   const zero = screens.length === 0;
   return `
-<div id="toolbar-root"></div><main id="canvas" class="canvas" data-mode="${mode}" tabindex="0" aria-label="Design canvas. Arrow keys pan. Plus and minus zoom. Shift 1 fits width. H toggles Pan. Double-click or press a screen title to focus it."><div id="toolbar-status-area"></div><div id="camera" class="camera" style="width:${layout.width}px;height:${layout.height}px">${artboards}</div><div id="pan-layer" class="pan-layer" hidden aria-hidden="true"></div><section id="state" class="state" data-state="empty"${zero ? '' : ' hidden'} aria-labelledby="state-title"><div class="state-body"><div id="spinner" role="status" aria-label="Loading screens"${zero ? ' hidden' : ''}>Loading…</div><h1 id="state-title"${zero ? '' : ' hidden'}>No screens on this canvas</h1><p id="state-copy"${zero ? '' : ' hidden'}>Ask the agent to design a screen, or retry after adding an entry to screens.json.</p><button id="state-action" hidden>Retry</button></div></section><p id="layout-reason" class="fallback" role="status" hidden></p></main><div id="announcement" class="sr" aria-live="polite" aria-atomic="true"></div>
+<div id="toolbar-root"></div><main id="canvas" class="canvas" data-mode="${mode}" tabindex="0" aria-label="Design canvas. Arrow keys pan. Plus and minus zoom. Shift 1 fits all screens. H toggles Pan. Double-click or press a screen title to focus it. Right-click a screen for options."><div id="toolbar-status-area"></div><div id="camera" class="camera" style="width:${layout.width}px;height:${layout.height}px">${artboards}</div><div id="pan-layer" class="pan-layer" hidden aria-hidden="true"></div><section id="state" class="state" data-state="empty"${zero ? '' : ' hidden'} aria-labelledby="state-title"><div class="state-body"><div id="spinner" role="status" aria-label="Loading screens"${zero ? ' hidden' : ''}>Loading…</div><h1 id="state-title"${zero ? '' : ' hidden'}>No screens on this canvas</h1><p id="state-copy"${zero ? '' : ' hidden'}>Ask the agent to design a screen, or retry after adding an entry to screens.json.</p><button id="state-action" hidden>Retry</button></div></section></main><div id="announcement" class="sr" aria-live="polite" aria-atomic="true"></div>
 `;
 };

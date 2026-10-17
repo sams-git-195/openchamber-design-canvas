@@ -3,18 +3,35 @@ export function initCanvas(initialConfig) {
   if (window.__dsToolbarBridge) return window.__dsCanvas;
   const $ = id => document.getElementById(id);
   const canvas = $('canvas'), camera = $('camera');
+  // Preset sizes survive ONLY as setViewport bookkeeping identities (service
+  // compatibility). V4-1 retired the viewport-preset toolbar machinery: no
+  // shell path resizes an artboard, and the shell never emits layout,
+  // fit-size, or viewport commands. Artboards are fixed-size by the registry.
   const presets = {desktop:{width:1280,height:800},large:{width:1920,height:1080},tablet:{width:768,height:1024},mobile:{width:390,height:844}};
   const GRID_GAP=48, FLOW_BUDGET=3200, POS_CLAMP=32768, MIN_EXTENT=64, MAX_EXTENT=65536, MAX_SCREENS=12, EMIT_DEBOUNCE_MS=400;
+  const NOTICE_MAX=3, NOTICE_TEXT_MAX=300, TOAST_MS=2000, NEW_PULSE_MS=1200, MODE_PENDING_MS=1500, HOVER_MIN_STEP=3, DOT=24, DOT_MIN_SCALE=.3;
   const SCREEN_ID=/^[a-z0-9][a-z0-9-]{0,30}$/;
   const BOARD_COPY={loading:'Loading this screen.',ready:'',error:'This screen could not be displayed. Check that the dev server is running and the page allows embedding.'};
+  const SCREEN_MENU=[['send-to-chat','Send to chat'],['zoom','Zoom to screen'],['reload','Reload screen'],['reset-position','Reset position'],['export-png','Export PNG'],['export-pdf','Export PDF'],['copy-path','Copy file path'],['rename','Rename…']];
   const bootConfig=initialConfig||{};
   let pages = [], currentUrl = '', currentTitle = 'Preview';
   let screens = [], active = '', shellMode = 'edit', cellCenters = new Map();
   const boards = new Map();
-  const view = {width:0,height:0,nominalHeight:Number.isInteger(bootConfig.viewport&&bootConfig.viewport.height)?bootConfig.viewport.height:800,layoutMode:'viewport',reason:'',preset:'desktop',mode:'fit',scale:1,panX:0,panY:0,pan:false,space:false,ready:false};
+  const view = {width:0,height:0,nominalHeight:Number.isInteger(bootConfig.viewport&&bootConfig.viewport.height)?bootConfig.viewport.height:800,layoutMode:'viewport',reason:'',preset:'desktop',mode:'fit-all',scale:1,panX:0,panY:0,pan:false,space:false,agentInput:false,ready:false};
   let openMenu = null, drag = null, slowTimer = null, statusState = 'loading', message = '';
   let captureState = null, captureSequence = 0, repaintPending = false, lastTap = null, boardDrag = null, boardDragSquelch = false;
-let cameraTimer = null, applyingCamera = false, lastCameraSent = null, lastPositions = new Map();
+  let cameraTimer = null, applyingCamera = false, lastCameraSent = null, lastPositions = new Map();
+  // V4 shell surface (SPEC-V4 §3): notices, toast, agent status/input, mode
+  // pending, the artboard context menu, inline rename, and the hover emitter.
+  let notices = Object.freeze([]);
+  const noticeMap = new Map();
+  let toast = null, toastEl = null, toastTimer = null;
+  let agentBusy = false, agentLabel = '', agentReloadSeen = false;
+  let modePending = null, modeTimer = null;
+  let contextMenu = null, renaming = null;
+  const hover = {screen:'',x:NaN,y:NaN,pending:null,raf:0};
+  const newPulseTimers = new Map();
+  let hadScreens = false;
   // Geometry constants from the original camera, not toolbar/theme tokens.
   const numToken = name => name === '--s7' ? 48 : name === '--pan-step' ? 32 : parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
   const finite = n => typeof n === 'number' && Number.isFinite(n);
@@ -27,7 +44,7 @@ let cameraTimer = null, applyingCamera = false, lastCameraSent = null, lastPosit
     const oldScreens=snapshot?.screens;
     const sameScreens=!!oldScreens&&oldScreens.length===screens.length&&screens.every((s,i)=>oldScreens[i].id===s.id&&oldScreens[i].url===s.url&&oldScreens[i].title===s.title&&oldScreens[i].width===s.width&&oldScreens[i].height===s.height&&oldScreens[i].state===s.state);
     const activeScreen=screens.find(s=>s.id===active);
-    const next={ready:view.ready,statusState,message,pages:samePages?oldPages:Object.freeze(pages.map(p=>Object.freeze({...p}))),currentUrl,currentTitle,screens:sameScreens?oldScreens:Object.freeze(screens.map(s=>Object.freeze({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:s.state}))),active,mode:shellMode,preset:view.preset,width:activeScreen?activeScreen.width:view.width,height:activeScreen?activeScreen.height:view.height,layoutMode:view.layoutMode,reason:view.reason,zoomMode:view.mode,scale:view.scale,pan:view.pan,capturing:!!captureState,openMenu};
+    const next={ready:view.ready,statusState,message,pages:samePages?oldPages:Object.freeze(pages.map(p=>Object.freeze({...p}))),currentUrl,currentTitle,screens:sameScreens?oldScreens:Object.freeze(screens.map(s=>Object.freeze({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:s.state}))),active,mode:shellMode,preset:view.preset,width:activeScreen?activeScreen.width:view.width,height:activeScreen?activeScreen.height:view.height,layoutMode:view.layoutMode,reason:view.reason,zoomMode:view.mode,scale:view.scale,pan:view.pan,capturing:!!captureState,openMenu,notices,toast,agentBusy,agentLabel,modePending};
     if(snapshot&&Object.keys(next).every(key=>next[key]===snapshot[key]))return;
     snapshot=Object.freeze(next);for(const listener of [...listeners])listener();
   }
@@ -35,7 +52,7 @@ let cameraTimer = null, applyingCamera = false, lastCameraSent = null, lastPosit
   function announce(text){$('announcement').textContent=text;}
   function validUrl(value){try{const u=new URL(value);return ['http:','https:'].includes(u.protocol)&&!u.username&&!u.password?u.href:null;}catch{return null;}}
   function clampExtent(value){return value===0?0:Math.max(MIN_EXTENT,Math.min(MAX_EXTENT,value));}
-const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
+  const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
   function validScreen(item){
     if(!item||typeof item!=='object'||typeof item.id!=='string'||!SCREEN_ID.test(item.id))return null;
     const url=validUrl(item.url);if(!url)return null;
@@ -83,6 +100,14 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
     b.copy.textContent=s.state==='ready'?'':(s.message||BOARD_COPY[s.state]||'');
     b.action.hidden=s.state!=='error';
   }
+  function menuButtonFor(section){
+    let menu=section.querySelector('.ds-ab-menu');
+    if(menu)return menu;
+    menu=document.createElement('button');menu.type='button';menu.className='ds-ab-menu';
+    menu.textContent='⋯';menu.setAttribute('aria-label','Screen options');
+    section.appendChild(menu);
+    return menu;
+  }
   function wireBoard(id,b){
     b.title.onclick=()=>{if(boardDragSquelch){boardDragSquelch=false;return;}transaction(()=>applyActive(id,true));};
     b.title.addEventListener('pointerdown',e=>{
@@ -92,12 +117,22 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
       // D14 risk 5: bind the camera scale at pointerdown so a zoom racing the
       // drag can never jitter the deltas; live drag stays in-memory only.
       e.preventDefault();e.stopPropagation();
+      emitHoverEnd();
       if(typeof b.title.setPointerCapture==='function')b.title.setPointerCapture(e.pointerId);
       boardDrag={id,moved:false,startX:e.clientX,startY:e.clientY,originX:placed.x,originY:placed.y,scale:view.scale||1,wasAuto:s.x===null||s.y===null};
     });
     b.action.onclick=()=>transaction(()=>retryScreen(id));
     b.section.ondblclick=e=>{if(e&&typeof e.preventDefault==='function')e.preventDefault();transaction(()=>{if(applyActive(id,true))focusScreen(id);});};
+    b.menu.onclick=()=>{
+      if(captureState||!view.ready)return;
+      const already=contextMenu&&contextMenu.section===b.section;
+      closeScreenMenu(true);
+      if(already)return;
+      const r=b.menu.getBoundingClientRect();
+      openScreenMenu(b.section,(r&&r.left)||0,((r&&r.bottom)||0)+2);
+    };
     b.frame.addEventListener('load',()=>{
+      if(agentBusy)agentReloadSeen=true; // V4-12: busy-turn reload sighting
       // Seam 3: keep s.src mirrored to what the frame actually shows. A
       // setPage({navigate:false}) confirmation (in-frame navigation) then no
       // longer leaves s.src stale, so a later relayout cannot rewrite the
@@ -125,7 +160,7 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
     if(!title||!size||!frame||!overlay)return null;
     const copy=overlay.querySelector('.ds-ab-card-copy'),action=overlay.querySelector('.ds-ab-retry');
     if(!copy||!action)return null;
-    const board={section,title,size,frame,overlay,copy,action};
+    const board={section,title,size,frame,overlay,copy,action,menu:menuButtonFor(section)};
     wireBoard(id,board);return board;
   }
   function createBoard(id){
@@ -144,6 +179,7 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
     overlay.appendChild(copy);overlay.appendChild(action);
     section.appendChild(title);section.appendChild(size);section.appendChild(frame);section.appendChild(overlay);
     const board={section,title,size,frame,overlay,copy,action};
+    board.menu=menuButtonFor(section);
     wireBoard(id,board);
     return board;
   }
@@ -153,7 +189,7 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
     cellCenters=layout.centers;
     lastPositions=new Map(screens.map((s,i)=>{const c=layout.cells[i];return [s.id,{x:c.x,y:c.y}];}));
     const live=new Set(screens.map(s=>s.id));
-    for(const [id,b] of [...boards]){if(!live.has(id)){b.section.remove();boards.delete(id);}}
+    for(const [id,b] of [...boards]){if(!live.has(id)){if(contextMenu&&contextMenu.section===b.section)closeScreenMenu(false);if(renaming&&renaming.id===id)cancelRename();b.section.remove();boards.delete(id);}}
     // Stray baked artboards (ids the service removed before this controller ever
     // adopted them) must leave the camera too, or the grid keeps a dead frame.
     for(const el of [...(camera.children||[])]){
@@ -170,6 +206,9 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
       b.section.dataset.screen=s.id;
       b.section.style.left=cell.x+'px';b.section.style.top=cell.y+'px';
       b.section.style.width=s.width+'px';b.section.style.height=s.height+'px';
+      // --w lets the counter-scaled header clamp to the artboard's on-screen
+      // width (V4-9): max-width calc(var(--w) * var(--cam-scale)).
+      if(b.section.style.setProperty)b.section.style.setProperty('--w',s.width+'px');
       b.section.dataset.active=s.id===active?'true':'false';
       b.title.textContent=(i+1)+' · '+s.title;b.size.textContent=s.width+'×'+s.height;
       if(s.url&&s.src!==s.url){
@@ -194,26 +233,288 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
     camera.style.width=view.width+'px';camera.style.height=view.height+'px';
     const x=(box.width-view.width*view.scale)/2+view.panX,y=view.mode==='fit-all'?(box.height-view.height*view.scale)/2+view.panY:numToken('--s7')+view.panY;
     camera.style.transform='translate('+x+'px,'+y+'px) scale('+view.scale+')';
-    $('layout-reason').hidden=!(view.layoutMode==='viewport'&&view.reason);$('layout-reason').textContent=view.reason?'Viewport fallback: '+view.reason:'';
+    // V4-9 art-wall polish: --cam-scale drives the header counter-scale (CSS
+    // scales headers by 1/--cam-scale, so labels stay ~13px readable at every
+    // zoom); the dot grid translates with the camera and hides below 0.3.
+    if(camera.style.setProperty)camera.style.setProperty('--cam-scale',String(view.scale));
+    canvas.style.backgroundSize=(DOT*view.scale)+'px '+(DOT*view.scale)+'px';
+    canvas.style.backgroundPosition=x+'px '+y+'px';
+    canvas.style.backgroundImage=view.scale<DOT_MIN_SCALE?'none':'';
     $('pan-layer').hidden=!(view.ready&&(view.pan||view.space));
     scheduleCameraChanged();
     publish();
   }
   // User camera churn (wheel/pan/drag-zoom, all funneled through paint) emits
   // one debounced camera-changed command; service-originated camera application
-  // (restoreCamera) never echoes back as user churn.
+  // (restoreCamera, revealScreen) never echoes back as user churn, and while
+  // the agent owns input (V4-7) the user's persisted camera is never touched.
   function scheduleCameraChanged(){
-    if(applyingCamera||captureState)return;
+    if(applyingCamera||captureState||view.agentInput)return;
     clearTimeout(cameraTimer);
     cameraTimer=setTimeout(emitCameraChanged,EMIT_DEBOUNCE_MS);
   }
   function emitCameraChanged(){
     cameraTimer=null;
-    if(applyingCamera||captureState||!view.ready)return;
+    if(applyingCamera||captureState||view.agentInput||!view.ready)return;
     const camera={mode:view.mode,scale:view.scale,panX:view.panX,panY:view.panY};
     if(lastCameraSent&&lastCameraSent.mode===camera.mode&&lastCameraSent.scale===camera.scale&&lastCameraSent.panX===camera.panX&&lastCameraSent.panY===camera.panY)return;
     lastCameraSent=camera;
     send({type:'camera-changed',camera:{mode:camera.mode,scale:camera.scale,panX:camera.panX,panY:camera.panY}});
+  }
+  // V4-4 shell half: stacked persistent banners in #toolbar-status-area. The
+  // service is the authority (registry errors); text rides textContent only, so
+  // hostile payloads can never become markup.
+  function freezeNotices(){return Object.freeze([...noticeMap.values()].map(n=>Object.freeze({...n})));}
+  function renderNotices(){
+    const area=$('toolbar-status-area');
+    if(!area||typeof area.replaceChildren!=='function')return;
+    const rows=[];
+    for(const n of noticeMap.values()){
+      const row=document.createElement('div');row.className='ds-notice';row.dataset.kind=n.kind;
+      row.setAttribute('role',n.kind==='error'?'alert':'status');
+      const dot=document.createElement('span');dot.className='ds-notice-dot';dot.setAttribute('aria-hidden','true');
+      const text=document.createElement('span');text.className='ds-notice-text';text.textContent=n.text;
+      row.appendChild(dot);row.appendChild(text);rows.push(row);
+    }
+    area.replaceChildren(...rows);
+  }
+  function setNoticeCore(info){
+    if(!info||typeof info!=='object'||typeof info.id!=='string'||!info.id||info.id.length>120)return false;
+    if(typeof info.text!=='string')return false;
+    const kind=['info','warn','error'].includes(info.kind)?info.kind:'info';
+    const text=info.text.slice(0,NOTICE_TEXT_MAX);
+    if(!text){
+      if(noticeMap.has(info.id)){noticeMap.delete(info.id);notices=freezeNotices();renderNotices();publish();}
+      return true;
+    }
+    noticeMap.set(info.id,{id:info.id,kind,text});
+    while(noticeMap.size>NOTICE_MAX){const oldest=noticeMap.keys().next().value;noticeMap.delete(oldest);}
+    notices=freezeNotices();renderNotices();publish();return true;
+  }
+  // V4-5 shell half: one bottom-center transient pill; the newest replaces it
+  // and it self-dismisses after 2000 ms. copy:true also mirrors the text to the
+  // clipboard (127.0.0.1 is a secure context) and never surfaces a rejection.
+  function renderToast(){
+    if(!toastEl){toastEl=document.createElement('div');toastEl.className='ds-toast';toastEl.setAttribute('role','status');canvas.appendChild(toastEl);}
+    if(!toast||captureState){toastEl.style.display='none';toastEl.textContent='';return;}
+    toastEl.style.display='';toastEl.dataset.kind=toast.kind;toastEl.textContent=toast.text;
+  }
+  function showToastCore(info){
+    if(!info||typeof info!=='object'||typeof info.text!=='string'||!info.text.trim())return false;
+    const kind=['ok','warn','error','info'].includes(info.kind)?info.kind:'ok';
+    const text=info.text.trim().slice(0,NOTICE_TEXT_MAX);
+    toast=Object.freeze({kind,text});renderToast();
+    clearTimeout(toastTimer);
+    toastTimer=setTimeout(()=>{toastTimer=null;toast=null;renderToast();publish();},TOAST_MS);
+    if(info.copy===true){
+      try{
+        const nav=window.navigator;
+        if(nav&&nav.clipboard&&typeof nav.clipboard.writeText==='function'){
+          const maybe=nav.clipboard.writeText(text);
+          if(maybe&&typeof maybe.catch==='function')maybe.catch(()=>undefined);
+        }
+      }catch{/* clipboard is best effort only */}
+    }
+    publish();return true;
+  }
+  // V4-12 shell half: the toolbar chip reads agentBusy/agentLabel; on the
+  // busy→idle flip an Updated toast lands only if some artboard reloaded during
+  // the turn (frame load events while busy).
+  function setAgentStatusCore(info){
+    if(!info||typeof info!=='object'||typeof info.busy!=='boolean')return false;
+    const wasBusy=agentBusy;
+    agentBusy=info.busy;
+    agentLabel=info.busy&&typeof info.label==='string'?info.label.trim().slice(0,60):'';
+    if(info.busy){if(!wasBusy)agentReloadSeen=false;}
+    else if(wasBusy){
+      const saw=agentReloadSeen;agentReloadSeen=false;
+      if(saw)showToastCore({kind:'ok',text:'Updated'});
+    }
+    publish();return true;
+  }
+  // V4-7 shell half: while the agent owns input, canvas pointer/wheel/keyboard
+  // paths ignore user events, camera-changed never emits, and CSS re-enables
+  // iframe pointer-events so dispatched input lands inside the screen.
+  function setAgentInputCore(on){
+    if(typeof on!=='boolean')return false;
+    if(on){
+      view.agentInput=true;canvas.dataset.agentInput='true';
+      emitHoverEnd();closeScreenMenu(false);cancelRename();
+      clearTimeout(cameraTimer);cameraTimer=null;
+    }else{
+      view.agentInput=false;delete canvas.dataset.agentInput;
+      lastCameraSent={mode:view.mode,scale:view.scale,panX:view.panX,panY:view.panY};
+    }
+    publish();return true;
+  }
+  // V4-7: pan the minimum needed to bring the artboard fully into view (no
+  // zoom change; its top-left when it is larger than the viewport). Service
+  // application, so it never echoes as user camera churn.
+  function revealScreenCore(id){
+    if(captureState||!view.ready||typeof id!=='string'||!id)return false;
+    const s=screens.find(v=>v.id===id),cell=lastPositions.get(id);
+    if(!s||!cell)return false;
+    const box=canvas.getBoundingClientRect();
+    if(!box||!finite(box.width)||!box.width||!box.height||!view.scale)return false;
+    const tx=(box.width-view.width*view.scale)/2+view.panX;
+    const ty=(view.mode==='fit-all'?(box.height-view.height*view.scale)/2:numToken('--s7'))+view.panY;
+    const left=tx+cell.x*view.scale,top=ty+cell.y*view.scale,w=s.width*view.scale,h=s.height*view.scale;
+    let nx=tx,ny=ty;
+    if(left<0||left+w>box.width)nx=w>box.width?tx-left:(left<0?tx-left:tx+(box.width-(left+w)));
+    if(top<0||top+h>box.height)ny=h>box.height?ty-top:(top<0?ty-top:ty+(box.height-(top+h)));
+    if(nx===tx&&ny===ty)return true;
+    applyingCamera=true;
+    try{
+      view.mode='manual';
+      view.panX=nx-(box.width-view.width*view.scale)/2;
+      view.panY=ny-numToken('--s7');
+      paint();
+    }finally{
+      applyingCamera=false;
+      lastCameraSent={mode:view.mode,scale:view.scale,panX:view.panX,panY:view.panY};
+    }
+    return true;
+  }
+  // V4-6 shell half: edit-mode hover emitter. The outline inside the frame is
+  // the service's job (__dsHoverAt); the shell only emits unscaled artboard
+  // coordinates (same mapping as pickAt), rAF-coalesced, ≥3 px or screen
+  // change, and one hover-end on leave/mode change/drag start.
+  function framePoint(section,e){
+    const s=screens.find(x=>x.id===section.dataset.screen);if(!s)return null;
+    const r=section.getBoundingClientRect();
+    if(!r||!finite(r.left)||!finite(r.top)||!view.scale)return null;
+    const x=(e.clientX-r.left)/view.scale,y=(e.clientY-r.top)/view.scale;
+    if(!finite(x)||!finite(y)||x<0||y<0||x>=s.width||y>=s.height)return null;
+    return {screen:s.id,x:Math.round(x),y:Math.round(y)};
+  }
+  function emitHoverEnd(){
+    if(!hover.screen)return;
+    hover.screen='';hover.x=NaN;hover.y=NaN;hover.pending=null;
+    send({type:'screen-hover-end'});
+  }
+  function flushHover(){
+    hover.raf=0;
+    const p=hover.pending;if(!p)return;
+    if(hover.screen===p.screen&&Math.abs(p.x-hover.x)<HOVER_MIN_STEP&&Math.abs(p.y-hover.y)<HOVER_MIN_STEP)return;
+    hover.screen=p.screen;hover.x=p.x;hover.y=p.y;
+    send({type:'screen-hover',screen:p.screen,x:p.x,y:p.y});
+  }
+  function canvasHoverMove(e){
+    if(!view.ready||captureState||view.agentInput||shellMode!=='edit'||contextMenu||renaming||drag||boardDrag)return;
+    const target=e&&e.target;
+    const section=target&&typeof target.closest==='function'?target.closest('.ds-artboard'):null;
+    if(!section||target.closest('.ds-ab-title')||target.closest('.ds-ab-menu')||target.closest('.ds-ab-state')){emitHoverEnd();return;}
+    const p=framePoint(section,e);
+    if(!p){emitHoverEnd();return;}
+    hover.pending=p;
+    if(!hover.raf)hover.raf=requestAnimationFrame(flushHover);
+  }
+  // V4-10 shell half: a vanilla role=menu popover the controller builds itself
+  // (fixed coords, so it is never clipped by the canvas). Actions map onto the
+  // frozen {type:'screen-menu'} contract; 'zoom' focuses locally and 'rename'
+  // opens the inline header input -- neither sends a screen-menu message.
+  function closeScreenMenu(refocus){
+    if(!contextMenu)return false;
+    const {menu,section}=contextMenu;contextMenu=null;menu.remove();
+    if(refocus&&section&&typeof section.querySelector==='function'){
+      const target=section.querySelector('.ds-ab-title');
+      if(target&&typeof target.focus==='function')target.focus();
+    }
+    return true;
+  }
+  function openScreenMenu(section,x,y){
+    if(captureState||!view.ready||!section)return false;
+    const id=section.dataset.screen,s=screens.find(v=>v.id===id);
+    if(!s)return false;
+    closeScreenMenu(false);
+    emitHoverEnd();
+    const menu=document.createElement('div');
+    menu.className='ds-context-menu';menu.setAttribute('role','menu');menu.setAttribute('aria-label','Screen options');
+    menu.style.left=Math.round(x)+'px';menu.style.top=Math.round(y)+'px';
+    const items=[];
+    for(const [action,label] of SCREEN_MENU){
+      const item=document.createElement('button');
+      item.type='button';item.className='ds-menu-item';item.setAttribute('role','menuitem');item.textContent=label;
+      item.onclick=()=>screenMenuAction(id,action,section);
+      menu.appendChild(item);items.push(item);
+    }
+    document.body.appendChild(menu);
+    contextMenu={menu,section,items,focus:0};
+    const first=items[0];
+    if(first&&typeof first.focus==='function')first.focus();
+    return true;
+  }
+  function moveMenuFocus(step){
+    if(!contextMenu)return;
+    const n=contextMenu.items.length;
+    contextMenu.focus=((contextMenu.focus+step)%n+n)%n;
+    const item=contextMenu.items[contextMenu.focus];
+    if(item&&typeof item.focus==='function')item.focus();
+  }
+  function handleMenuKey(e){
+    if(!contextMenu||!e)return false;
+    const stop=()=>{if(typeof e.preventDefault==='function')e.preventDefault();};
+    if(e.key==='Escape'){stop();closeScreenMenu(true);return true;}
+    if(e.key==='ArrowDown'){stop();moveMenuFocus(1);return true;}
+    if(e.key==='ArrowUp'){stop();moveMenuFocus(-1);return true;}
+    if(e.key==='Home'){stop();contextMenu.focus=0;moveMenuFocus(0);return true;}
+    if(e.key==='End'){stop();contextMenu.focus=contextMenu.items.length;moveMenuFocus(-1);return true;}
+    if(e.key==='Enter'||e.key===' '){stop();const item=contextMenu.items[contextMenu.focus];if(item&&item.onclick)item.onclick();return true;}
+    if(e.key==='Tab'){closeScreenMenu(false);return true;}
+    return false;
+  }
+  function screenMenuAction(id,action){
+    closeScreenMenu(true);
+    if(action==='zoom'){transaction(()=>focusScreen(id));return;}
+    if(action==='rename'){startRename(id);return;}
+    send({type:'screen-menu',screen:id,action});
+  }
+  function startRename(id){
+    const s=screens.find(v=>v.id===id),b=boards.get(id);
+    if(!s||!b)return false;
+    cancelRename();
+    const input=document.createElement('input');
+    input.className='ds-ab-rename';input.type='text';input.maxLength=120;
+    input.value=s.title;input.setAttribute('aria-label','Rename screen');
+    input.addEventListener('keydown',e=>{
+      if(!e)return;
+      if(e.key==='Enter'){if(typeof e.preventDefault==='function')e.preventDefault();if(typeof e.stopPropagation==='function')e.stopPropagation();commitRename();}
+      else if(e.key==='Escape'){if(typeof e.preventDefault==='function')e.preventDefault();cancelRename();publish();}
+    });
+    input.addEventListener('blur',()=>{if(renaming&&renaming.input===input)commitRename();});
+    b.section.appendChild(input);
+    renaming={id,input,previous:s.title};
+    if(typeof input.focus==='function')input.focus();
+    if(typeof input.select==='function')input.select();
+    publish();return true;
+  }
+  function commitRename(){
+    if(!renaming)return false;
+    const {id,input,previous}=renaming;
+    const raw=typeof input.value==='string'?input.value.trim():'';
+    renaming=null;input.remove();
+    publish();
+    if(!raw||raw===previous)return true;
+    const title=raw.slice(0,120);
+    transaction(()=>send({type:'screen-rename',screen:id,title}));
+    return true;
+  }
+  function cancelRename(){
+    if(!renaming)return false;
+    const done=renaming;renaming=null;done.input.remove();
+    return true;
+  }
+  function pulseNew(ids){
+    for(const id of ids){
+      const b=boards.get(id);if(!b)continue;
+      b.section.dataset.new='true';
+      clearTimeout(newPulseTimers.get(id));
+      newPulseTimers.set(id,setTimeout(()=>{
+        newPulseTimers.delete(id);
+        const bb=boards.get(id);
+        if(bb)delete bb.section.dataset.new;
+      },NEW_PULSE_MS));
+    }
   }
   function setScreensCore(list){
     if(captureState||!Array.isArray(list)||list.length>MAX_SCREENS)return false;
@@ -229,12 +530,18 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
       const inherit=old&&item.x===undefined&&item.y===undefined&&old.x!==null&&old.y!==null;
       next.push({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:old?old.state:'loading',message:old?old.message:'',src:old?old.src:'',x:inherit?old.x:s.x,y:inherit?old.y:s.y});
     }
+    // V4-4: ids the previous live list did not have get a 1200 ms ring pulse
+    // ("the agent just added this"). The boot bake and the very first screen
+    // never pulse (nothing arrived -- the canvas simply opened).
+    const added=hadScreens?next.filter(s=>!previous.has(s.id)).map(s=>s.id):[];
     screens=next;
     if(!screens.some(s=>s.id===active))active=screens.length?screens[0].id:'';
     const activeScreen=screens.find(s=>s.id===active);
     if(activeScreen){currentUrl=activeScreen.url;currentTitle=activeScreen.title;}
     relayout();
     if(screens.length)paint();else setStatus({state:'empty'});
+    hadScreens=screens.length>0;
+    if(added.length)pulseNew(added);
     return true;
   }
   function setViewport(width,height){
@@ -297,6 +604,10 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
     }
     document.title=currentTitle+' · Design Canvas';renderPages();return true;
   }
+  // V4-1 shell pin: activating an artboard (title click, toolbar chip,
+  // double-click, service setActive) is camera + focus ONLY. Sizes are owned by
+  // the registry and this path never touches width/height, never qualifies a
+  // layout, and never emits layout/fit-size/viewport commands.
   function applyActive(id,notify){
     if(captureState||!id)return false;
     const s=screens.find(s=>s.id===id);if(!s)return false;
@@ -311,7 +622,11 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
   }
   function setModeCore(mode){
     if(captureState||!['edit','play'].includes(mode))return false;
-    shellMode=mode;canvas.dataset.mode=mode;paint();
+    shellMode=mode;canvas.dataset.mode=mode;
+    // A service push is the truth: the toolbar's pending segment resolves.
+    clearTimeout(modeTimer);modeTimer=null;modePending=null;
+    emitHoverEnd();
+    paint();
     announce(mode==='edit'?'Edit mode: clicking a screen picks that element for the chat.':'Play mode: screens accept real interaction.');
     return true;
   }
@@ -328,7 +643,7 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
   function zoomTo(value,point){
     if(!view.ready||captureState||view.layoutMode==='fit')return;if(value==='fit'){view.mode='fit';paint();announce('Fit page width, up to 100 percent');return;}
     const next=Number(value);if(!finite(next))return;const old=view.scale,scale=Math.min(3,Math.max(.1,next)),box=canvas.getBoundingClientRect(),px=point?point.x-box.width/2:0,py=point?point.y-numToken('--s7'):0;
-    view.panX=px-(px-view.panX)*scale/old;view.panY=py-(py-view.panY)*scale/old;view.scale=scale;view.mode='manual';paint();announce('Zoom '+Math.round(scale*100)+' percent');
+    view.panX=px-(px-view.panX)*scale/old;view.panY=py-(py-view.panY-(point?(view.mode==='fit-all'?(box.height-view.height*old)/2-numToken('--s7'):0):0))*scale/old;view.scale=scale;view.mode='manual';paint();announce('Zoom '+Math.round(scale*100)+' percent');
   }
   function zoomCamera(info){
     if(!info||!['in','out','reset','wheel'].includes(info.action)||!view.ready||captureState||view.layoutMode==='fit')return false;
@@ -362,7 +677,18 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
     const target=typeof screenId==='string'&&screenId?screenId:active;
     const screen=screens.find(s=>s.id===target);
     if(!screen)throw new Error('Canvas capture needs a screen with a preview URL.');
+    // V4-15 (E18): a capture must never leave an input grab dangling. Cancel an
+    // in-flight board drag (reverts to the pre-drag cell) and the pan drag,
+    // close the context menu/rename, and stop hover emission.
+    emitHoverEnd();closeScreenMenu(false);cancelRename();
+    if(boardDrag)finishBoardDrag(true);
+    if(drag){drag=null;canvas.classList.remove('dragging');}
     captureState={token:++captureSequence,id:target,view:{...view},body:document.body.style.cssText,styles:[[camera,camera.style.cssText],[canvas,canvas.style.cssText]]};
+    // Shell chrome that lives inside the canvas rect would leak into the export
+    // region; snapshot and hide it until endCapture restores every cssText.
+    const statusArea=$('toolbar-status-area');
+    if(statusArea){captureState.styles.push([statusArea,statusArea.style.cssText]);statusArea.style.display='none';}
+    if(toastEl){captureState.styles.push([toastEl,toastEl.style.cssText]);toastEl.style.display='none';}
     window.__dsCaptureActive=true;document.body.style.pointerEvents='none';publish();return captureState.token;
   }
   async function normalizeCapture(token){
@@ -384,22 +710,50 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
     if(!captureState||captureState.token!==token)return false;
     const saved=captureState;document.body.style.cssText=saved.body;for(const [el,style] of saved.styles)el.style.cssText=style;Object.assign(view,saved.view);
     captureState=null;window.__dsCaptureActive=false;
+    renderToast();
     const pending=saved.pendingStatus;repaintPending=false;if(pending)setStatus(pending);else paint();return true;
   }
   for(const type of ['pointerdown','pointermove','pointerup','click','wheel','keydown','keyup'])document.addEventListener(type,e=>{if(captureState){e.preventDefault();e.stopImmediatePropagation();}},{capture:true,passive:false});
   document.addEventListener('keydown',e=>{
+    // The context menu owns the keyboard while it is open; typing into the
+    // inline rename input never reaches canvas shortcuts. While the agent owns
+    // input (V4-7) every user key path is inert.
+    if(contextMenu){handleMenuKey(e);return;}
+    if(renaming)return;
+    if(view.agentInput)return;
     if(e.defaultPrevented||cameraShortcut(e))return;
     // Stock DropdownMenu owns all menu keyboard/focus and dismissal handling.
     if(openMenu)return;
     if(e.key==='Escape'&&(view.pan||view.space)){e.preventDefault();setPan(false);$('pan')?.focus();return;}
     if(document.activeElement!==canvas||!view.ready||view.layoutMode==='fit')return;
-    if(e.key===' '){e.preventDefault();view.space=true;paint();}else if(e.key.toLowerCase()==='h'){e.preventDefault();setPan(!view.pan);}else if(e.key==='+'||e.key==='='){e.preventDefault();zoomTo(view.scale*1.25);}else if(e.key==='-'){e.preventDefault();zoomTo(view.scale/1.25);}else if(e.shiftKey&&(e.code==='Digit1'||e.key==='!')){e.preventDefault();zoomTo('fit');}else if(e.shiftKey&&(e.code==='Digit0'||e.key===')')){e.preventDefault();zoomTo(1);}else if(e.key.startsWith('Arrow')){e.preventDefault();moveCamera(e.key.slice(5).toLowerCase(),e.shiftKey?3:1);}
+    if(e.key===' '){e.preventDefault();view.space=true;paint();}else if(e.key.toLowerCase()==='h'){e.preventDefault();setPan(!view.pan);}else if(e.key==='+'||e.key==='='){e.preventDefault();zoomTo(view.scale*1.25);}else if(e.key==='-'){e.preventDefault();zoomTo(view.scale/1.25);}else if(e.shiftKey&&(e.code==='Digit1'||e.key==='!')){e.preventDefault();transaction(()=>fitAll());}else if(e.shiftKey&&(e.code==='Digit0'||e.key===')')){e.preventDefault();zoomTo(1);}else if(e.key.startsWith('Arrow')){e.preventDefault();moveCamera(e.key.slice(5).toLowerCase(),e.shiftKey?3:1);}
   });
   function moveCamera(direction,multiplier=1){if(!view.ready||captureState||view.layoutMode==='fit')return;view.mode='manual';const step=numToken('--pan-step')*multiplier;if(direction==='left')view.panX-=step;if(direction==='right')view.panX+=step;if(direction==='up')view.panY-=step;if(direction==='down')view.panY+=step;paint();}
-  document.addEventListener('keyup',e=>{if(e.key===' '){view.space=false;paint();}});window.addEventListener('blur',()=>{view.space=false;drag=null;lastTap=null;finishBoardDrag(true);canvas.classList.remove('dragging');paint();});
-  function choosePreset(id){if(!view.ready||captureState||!active||!(id==='fit'||Object.hasOwn(presets,id)))return;if(id==='fit'){setLayout({mode:'fit',preset:'fit',...getFitBounds(),nominalHeight:view.nominalHeight});send({type: 'layout',mode:'fit',preset:'fit',screen:active});}else{const p=presets[id];setLayout({mode:'viewport',preset:id,width:p.width,height:p.height,nominalHeight:p.height});send({type: 'layout',mode:'page',preset:id,screen:active});}announce((id==='large'?'Desktop Large':id)+' layout');}
-  canvas.addEventListener('pointerdown',e=>{if(!view.ready||view.layoutMode==='fit'||e.button!==0||e.target.closest('.state')||e.target.closest('.ds-ab-title')||e.target.closest('.ds-ab-state'))return;canvas.focus();view.mode='manual';drag={x:e.clientX,y:e.clientY,panX:view.panX,panY:view.panY,moved:false,section:e.target.closest('.ds-artboard')};canvas.setPointerCapture(e.pointerId);canvas.classList.add('dragging');e.preventDefault();});
+  document.addEventListener('keyup',e=>{if(e.key===' '){view.space=false;paint();}});window.addEventListener('blur',()=>{view.space=false;drag=null;lastTap=null;finishBoardDrag(true);canvas.classList.remove('dragging');emitHoverEnd();paint();});
+  canvas.addEventListener('pointerdown',e=>{
+    if(!view.ready||view.layoutMode==='fit'||view.agentInput||e.button!==0||e.target.closest('.state')||e.target.closest('.ds-ab-title')||e.target.closest('.ds-ab-menu')||e.target.closest('.ds-ab-rename')||e.target.closest('.ds-ab-state'))return;
+    canvas.focus();view.mode='manual';emitHoverEnd();
+    drag={x:e.clientX,y:e.clientY,panX:view.panX,panY:view.panY,moved:false,section:e.target.closest('.ds-artboard')};canvas.setPointerCapture(e.pointerId);canvas.classList.add('dragging');e.preventDefault();
+  });
   canvas.addEventListener('pointermove',e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if((Math.abs(dx)>4||Math.abs(dy)>4)&&!drag.moved){drag.moved=true;lastTap=null;}view.panX=drag.panX+dx;view.panY=drag.panY+dy;paint();});
+  canvas.addEventListener('pointermove',canvasHoverMove);
+  canvas.addEventListener('pointerleave',()=>emitHoverEnd());
+  canvas.addEventListener('contextmenu',e=>{
+    if(captureState||!view.ready||view.agentInput||!e||!e.target||typeof e.target.closest!=='function')return;
+    const section=e.target.closest('.ds-artboard');
+    if(!section)return;
+    // Play mode: the frame owns the body, so the menu only opens on the
+    // artboard's header chrome (title/size/⋯ strip above and beside it).
+    if(shellMode==='play'&&!e.target.closest('.ds-ab-title')&&!e.target.closest('.ds-ab-size')&&!e.target.closest('.ds-ab-menu'))return;
+    if(typeof e.preventDefault==='function')e.preventDefault();
+    openScreenMenu(section,Number(e.clientX)||0,Number(e.clientY)||0);
+  });
+  document.addEventListener('pointerdown',e=>{
+    if(!contextMenu||!e||!e.target)return;
+    if(typeof contextMenu.menu.contains==='function'&&contextMenu.menu.contains(e.target))return;
+    if(typeof e.target.closest==='function'&&e.target.closest('.ds-ab-menu'))return;
+    closeScreenMenu(false);
+  });
   function endDrag(e){
     if(!drag)return;
     const moved=drag.moved,section=drag.section;drag=null;lastTap=moved?null:lastTap;
@@ -439,18 +793,25 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
   window.addEventListener('pointerup',()=>finishBoardDrag(false));
   window.addEventListener('pointercancel',()=>finishBoardDrag(true));
   function pickAt(section,e){
-    const s=screens.find(s=>s.id===section.dataset.screen);if(!s)return;
-    const r=section.getBoundingClientRect();
-    if(!r||!finite(r.left)||!finite(r.top)||!view.scale)return;
-    const x=(e.clientX-r.left)/view.scale,y=(e.clientY-r.top)/view.scale;
-    if(!finite(x)||!finite(y)||x<0||y<0||x>=s.width||y>=s.height)return;
-    send({type:'screen-pick',screen:s.id,x:Math.round(x),y:Math.round(y)});
+    const p=framePoint(section,e);if(!p)return;
+    const command={type:'screen-pick',screen:p.screen,x:p.x,y:p.y};
+    // V4-5: Shift-click marks the pick as additive (the agent text says
+    // "also"); the flag is reserved, both paths still land a chip.
+    if(e&&e.shiftKey)command.additive=true;
+    send(command);
   }
   function wheelInput(deltaX,deltaY,x,y,zoom){if(!view.ready||captureState||view.layoutMode==='fit'||![deltaX,deltaY,x,y].every(finite))return false;if(zoom)zoomTo(view.scale*Math.exp(-deltaY*.005),{x,y});else{view.mode='manual';view.panX-=deltaX;view.panY-=deltaY;paint();}return true;}
-  canvas.addEventListener('wheel',e=>{if(e.defaultPrevented)return;const b=canvas.getBoundingClientRect();if(e.ctrlKey||e.metaKey){e.preventDefault();e.stopPropagation();zoomCamera({action:'wheel',deltaY:e.deltaY,x:e.clientX-b.left,y:e.clientY-b.top});return;}if(!view.ready||view.layoutMode==='fit'||e.target.closest('.state'))return;e.preventDefault();wheelInput(e.deltaX,e.deltaY,e.clientX-b.left,e.clientY-b.top,false);},{passive:false});
-  document.addEventListener('wheel',e=>{if(e.defaultPrevented||!(e.ctrlKey||e.metaKey))return;e.preventDefault();e.stopPropagation();const b=canvas.getBoundingClientRect();zoomCamera({action:'wheel',deltaY:e.deltaY,x:e.clientX-b.left,y:e.clientY-b.top});},{passive:false});
-  let fitSizeQueued=false;
-  new ResizeObserver(()=>{paint();if(view.layoutMode==='fit'&&!captureState&&!fitSizeQueued){fitSizeQueued=true;requestAnimationFrame(()=>{fitSizeQueued=false;if(view.layoutMode==='fit'&&!captureState)send({type: 'fit-size',screen:active});});}}).observe(canvas);
+  canvas.addEventListener('wheel',e=>{
+    if(e.defaultPrevented||view.agentInput)return;
+    const b=canvas.getBoundingClientRect();
+    if(e.ctrlKey||e.metaKey){e.preventDefault();e.stopPropagation();zoomCamera({action:'wheel',deltaY:e.deltaY,x:e.clientX-b.left,y:e.clientY-b.top});return;}
+    if(!view.ready||view.layoutMode==='fit'||e.target.closest('.state'))return;e.preventDefault();wheelInput(e.deltaX,e.deltaY,e.clientX-b.left,e.clientY-b.top,false);
+  },{passive:false});
+  document.addEventListener('wheel',e=>{if(e.defaultPrevented||!(e.ctrlKey||e.metaKey)||view.agentInput)return;e.preventDefault();e.stopPropagation();const b=canvas.getBoundingClientRect();zoomCamera({action:'wheel',deltaY:e.deltaY,x:e.clientX-b.left,y:e.clientY-b.top});},{passive:false});
+  // The observer keeps the camera/grid repainted on window resize. The legacy
+  // fit-size qualification emit is gone (V4-1): the canvas never asks the
+  // service to resize an artboard.
+  new ResizeObserver(()=>{paint();}).observe(canvas);
   function retry(){if(captureState)return;setStatus({state:'loading'});const command={type:'retry'};if(active)command.screen=active;send(command);}
   function retryScreen(id){if(captureState||!boards.get(id))return;setScreenStateCore(id,{state:'loading'});send({type:'retry',screen:id});}
   $('state-action').onclick=()=>transaction(retry);
@@ -458,6 +819,10 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
     setViewport:(...args)=>transaction(()=>setViewport(...args)),setScreens:list=>transaction(()=>setScreensCore(list)),setMode:mode=>transaction(()=>setModeCore(mode)),setActive:id=>transaction(()=>applyActive(id,false)),getActive:()=>active,getMode:()=>shellMode,
     setScreenState:(id,info)=>transaction(()=>setScreenStateCore(id,info)),fitAll:()=>transaction(()=>fitAll()),focusScreen:id=>transaction(()=>focusScreen(id)),zoomToScreen:id=>transaction(()=>focusScreen(id)),getScreens:()=>screens.map(s=>({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:s.state,message:s.message,src:s.src,x:s.x,y:s.y})),
     setLayout:info=>transaction(()=>setLayout(info)),getFitBounds,setStatus:info=>transaction(()=>setStatus(info)),setPage:info=>transaction(()=>setPage(info)),beginCapture,normalizeCapture,endCapture:token=>transaction(()=>endCapture(token)),zoomCamera:info=>transaction(()=>zoomCamera(info)),
+    // SPEC-V4 §3 service→shell surface (all boolean-returning).
+    setNotice:info=>transaction(()=>setNoticeCore(info)),showToast:info=>transaction(()=>showToastCore(info)),
+    setAgentStatus:info=>transaction(()=>setAgentStatusCore(info)),setAgentInput:on=>transaction(()=>setAgentInputCore(on)),
+    revealScreen:id=>transaction(()=>revealScreenCore(id)),
     getCamera:()=>({mode:view.mode,scale:view.scale,panX:view.panX,panY:view.panY,width:screens.find(s=>s.id===active)?.width??view.width,height:screens.find(s=>s.id===active)?.height??view.height,preset:view.preset,layoutMode:view.layoutMode,nominalHeight:view.nominalHeight,reason:view.reason,gridWidth:view.width,gridHeight:view.height}),
     // width/height round-trip the ACTIVE screen size (like the old single frame);
     // the grid extent is derived from the screens list and never restored.
@@ -475,17 +840,26 @@ const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
       }
     }),
     dismissMenu:()=>closeMenu(),
-    handleCanvasInput:event=>{if(!event||view.layoutMode==='fit'||(!view.pan&&view.layoutMode!=='page')||event.type!=='wheel')return false;return wheelInput(event.deltaX,event.deltaY,event.x,event.y,Boolean(event.zoom));}
+    handleCanvasInput:event=>{if(!event||view.agentInput||view.layoutMode==='fit'||(!view.pan&&view.layoutMode!=='page')||event.type!=='wheel')return false;return wheelInput(event.deltaX,event.deltaY,event.x,event.y,Boolean(event.zoom));}
   };
   window.__dsToolbarBridge = {
     getSnapshot:()=>snapshot,subscribe:listener=>{listeners.add(listener);return()=>listeners.delete(listener);},
-    selectPreset:id=>transaction(()=>choosePreset(id)),
     selectPage:id=>transaction(()=>{if(!view.ready||captureState||!pages.some(p=>p.id===id))return;closeMenu();send({type: 'page',id,screen:active});}),
     zoomTo:value=>transaction(()=>{if(!view.ready||captureState||view.layoutMode==='fit')return;zoomTo(value);closeMenu();}),
     zoomCamera:info=>transaction(()=>zoomCamera(info)),togglePan:()=>transaction(()=>setPan(!view.pan)),
     panBy:direction=>transaction(()=>{if(!view.ready||captureState||view.layoutMode==='fit'||!['left','right','up','down'].includes(direction))return;moveCamera(direction);announce('Canvas moved '+direction+'.');closeMenu();}),
     retry:()=>transaction(retry),setMenu:id=>{if(captureState||!(id===null||id==='page'||id==='zoom')||(id!==null&&!view.ready))return;if(openMenu===id)return;openMenu=id;publish();},
-    setMode:id=>transaction(()=>{if(captureState||!['edit','play'].includes(id)||id===shellMode)return;send({type:'mode-request',mode:id});}),
+    // V4-15: the toolbar requests, the service confirms. The requested segment
+    // stays pending for up to 1500 ms; a refusal falls back with a warn toast.
+    setMode:id=>transaction(()=>{
+      if(captureState||!['edit','play'].includes(id)||id===shellMode||modePending)return;
+      modePending=id;send({type:'mode-request',mode:id});
+      clearTimeout(modeTimer);
+      modeTimer=setTimeout(()=>{
+        modeTimer=null;
+        if(modePending===id&&shellMode!==id){modePending=null;showToastCore({kind:'warn',text:'Mode change refused'});publish();}
+      },MODE_PENDING_MS);
+    }),
     activateScreen:id=>transaction(()=>applyActive(id,true)),
     fitAll:()=>transaction(()=>{fitAll();}),
     focusScreen:id=>transaction(()=>focusScreen(id))

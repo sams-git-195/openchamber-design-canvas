@@ -15,9 +15,9 @@ function html(extra: Record<string, unknown> = {}): string {
 test('renderer bakes one artboard per screen with hardening attributes and never a legacy single preview', () => {
   const rendered = html();
   assert.equal((rendered.match(/<section class="ds-artboard"/g) ?? []).length, 2);
-  assert.match(rendered, /<section class="ds-artboard" data-screen="home"[^>]*style="left:0px;top:0px;width:1280px;height:800px"/);
+  assert.match(rendered, /<section class="ds-artboard" data-screen="home"[^>]*style="left:0px;top:0px;width:1280px;height:800px;--w:1280px"/);
   // Grid math is natural px only: gap 48 after the 1280 column, never scaled.
-  assert.match(rendered, /<section class="ds-artboard" data-screen="other"[^>]*style="left:1328px;top:0px;width:768px;height:1024px"/);
+  assert.match(rendered, /<section class="ds-artboard" data-screen="other"[^>]*style="left:1328px;top:0px;width:768px;height:1024px;--w:768px"/);
   assert.match(rendered, /id="camera"[^>]*style="width:2096px;height:1024px"/);
   assert.match(rendered, /<iframe id="ds-frame-home" data-ds-screen="home" name="__dsArtifact:home" referrerpolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-pointer-lock" src="http:\/\/127\.0\.0\.1:5173\/"/);
   assert.doesNotMatch(rendered, /allow-top-navigation/);
@@ -26,6 +26,8 @@ test('renderer bakes one artboard per screen with hardening attributes and never
   assert.match(rendered, /class="ds-ab-size">1280×800</);
   assert.match(rendered, /class="ds-ab-title">1 · Home<\/button>/);
   assert.match(rendered, /class="ds-ab-title">2 · Checkout<\/button>/);
+  assert.equal((rendered.match(/class="ds-ab-menu"/g) ?? []).length, 2, 'V4-10: every baked artboard carries the hover ⋯ trigger');
+  assert.doesNotMatch(rendered, /id="layout-reason"|class="fallback"/, 'the legacy fit/page layout machinery is retired (V4-1)');
   assert.doesNotMatch(rendered, /srcdoc|contentDocument|contentWindow\.document|fixtureDocument|Fieldnotes|DEMO/);
   assert.match(rendered, /frame\.src\s*=/);
   assert.doesNotMatch(rendered, /<script[^>]+src=|<link[^>]+href=/);
@@ -38,6 +40,27 @@ test('the shell carries edit mode, the artboard hover affordance, and per-artboa
   assert.match(rendered, /data-mode=edit\] \.ds-artboard:hover/);
   assert.equal((rendered.match(/class="ds-ab-state"/g) ?? []).length, 2, 'one overlay card inside each artboard');
   assert.match(rendered, /ds-ab-retry/, 'artboard retry never blanks the grid');
+});
+
+test('V4-9 art-wall CSS: dot grid, shadows, counter-scaled headers, and the notice/toast/menu surfaces', () => {
+  const rendered = html();
+  assert.match(rendered, /background:oklch\(0\.17 0 0\) radial-gradient\(circle,oklch\(1 0 0 \/ \.07\) 1px,transparent 1\.2px\)/, 'dot-grid canvas background at the exact spec value');
+  assert.match(rendered, /box-shadow:0 1px 2px rgb\(0 0 0\/\.4\),0 12px 32px rgb\(0 0 0\/\.35\)/, 'artboard shadow pair at the exact spec value');
+  assert.doesNotMatch(rendered, /\.ds-artboard\{[^}]*outline:1px solid/, 'the inactive 1 px outline is gone');
+  assert.match(rendered, /\.ds-artboard\[data-active=true\]\{outline:2px solid #4f8cff;outline-offset:2px\}/);
+  assert.match(rendered, /data-mode=edit\] \.ds-artboard:hover\{outline:1px solid rgb\(79 140 255\/\.6\)\}/, 'edit hover is the soft blue artboard-level outline');
+  // Counter-scaled plain-text headers (E10 fix): scale 1/cam reads --cam-scale.
+  assert.match(rendered, /\.ds-artboard>\.ds-ab-title,\.ds-artboard>\.ds-ab-size\{[^}]*transform:scale\(calc\(1 \/ var\(--cam-scale,1\)\)\)/);
+  assert.match(rendered, /\.ds-artboard>\.ds-ab-title\{[^}]*transform-origin:bottom left[^}]*max-width:calc\(var\(--w,100%\) \* var\(--cam-scale,1\)\)/);
+  assert.match(rendered, /\.ds-artboard>\.ds-ab-size\{[^}]*transform-origin:bottom right[^}]*font-variant-numeric:tabular-nums/);
+  assert.doesNotMatch(rendered, /\.ds-ab-title[^{]*\{[^}]*background:var\(--muted\)/, 'no pill backgrounds behind plain-text headers');
+  // V4-7 handoff, V4-4 pulse ring, and the controller-rendered surfaces.
+  assert.match(rendered, /\.canvas\[data-agent-input\] \.ds-artboard>iframe\{pointer-events:auto\}/);
+  assert.match(rendered, /\.ds-artboard\[data-new=true\]\{animation:ds-new-pulse/);
+  assert.match(rendered, /#toolbar-status-area\{[^}]*position:absolute[^}]*z-index:6/);
+  assert.match(rendered, /\.ds-notice\{/); assert.match(rendered, /\.ds-toast\{[^}]*bottom:24px/);
+  assert.match(rendered, /\.ds-context-menu\{[^}]*position:fixed[^}]*z-index:7/);
+  assert.match(rendered, /aria-label="Design canvas[^"]*Shift 1 fits all screens[^"]*Right-click a screen for options/);
 });
 
 test('hostile titles and script terminators cannot break out; bad ids are refused; unknown secrets are omitted', () => {
@@ -84,25 +107,33 @@ test('canvas mode is baked and only edit or play survive', () => {
 
 test('the bake places positioned screens at their view.json coordinates and flows the rest', () => {
   const rendered = html({ screens: [{ ...home }, { ...other, x: 500, y: 700 }] });
-  assert.match(rendered, /data-screen="home"[^>]*style="left:0px;top:0px;width:1280px;height:800px"/);
-  assert.match(rendered, /data-screen="other"[^>]*style="left:500px;top:700px;width:768px;height:1024px"/);
+  assert.match(rendered, /data-screen="home"[^>]*style="left:0px;top:0px;width:1280px;height:800px;--w:1280px"/);
+  assert.match(rendered, /data-screen="other"[^>]*style="left:500px;top:700px;width:768px;height:1024px;--w:768px"/);
   // bbox spans max(1280, 500+768) x max(800, 700+1024)
   assert.match(rendered, /id="camera"[^>]*style="width:1280px;height:1724px"/);
   // explicit null = auto flow, still first-painted from the bake
   const auto = html({ screens: [{ ...home, x: null, y: null }, { ...other, x: null, y: null }] });
-  assert.match(auto, /data-screen="other"[^>]*style="left:1328px;top:0px;width:768px;height:1024px"/);
+  assert.match(auto, /data-screen="other"[^>]*style="left:1328px;top:0px;width:768px;height:1024px;--w:768px"/);
   // one-sided or non-finite prescriptions are refused, never silently baked
   assert.throws(() => html({ screens: [{ ...home, x: 100 }] }), /both/i);
   assert.throws(() => html({ screens: [{ ...home, x: Infinity, y: 0 }] }), /finite/i);
 });
 
-test('rendered client exposes the CDP contract and the approved narrow outbound mode commands', () => {
+test('rendered client exposes the CDP contract incl. the SPEC-V4 §3 surface and the approved outbound commands', () => {
   const rendered = html();
   for (const name of ['setScreens', 'setMode', 'setActive', 'getActive', 'setScreenState', 'fitAll', 'focusScreen', 'zoomToScreen', 'getScreens',
-    'setViewport', 'setStatus', 'setPage', 'getCamera', 'restoreCamera', 'dismissMenu', 'beginCapture', 'normalizeCapture', 'endCapture']) assert.ok(rendered.includes(name), name);
+    'setViewport', 'setStatus', 'setPage', 'getCamera', 'restoreCamera', 'dismissMenu', 'beginCapture', 'normalizeCapture', 'endCapture',
+    // SPEC-V4 §3 (frozen service->shell names, verbatim):
+    'setNotice', 'showToast', 'setAgentStatus', 'setAgentInput', 'revealScreen']) assert.ok(rendered.includes(name), name);
   assert.match(rendered, /window\.__dsCanvasSend/);
   assert.doesNotMatch(rendered, /host\.attach|fetch\(|XMLHttpRequest|WebSocket|localStorage/);
-  for (const type of ['ready', 'page', 'retry', 'layout', 'fit-size', 'screen-pick', 'screen-activate', 'mode-request', 'screen-move', 'camera-changed']) assert.ok(rendered.includes(`'${type}'`), type);
+  for (const type of ['ready', 'page', 'retry', 'screen-pick', 'screen-activate', 'mode-request', 'screen-move', 'camera-changed',
+    // SPEC-V4 §3 (frozen shell->service emissions, verbatim shapes):
+    'screen-hover', 'screen-hover-end', 'screen-menu', 'screen-rename']) assert.ok(rendered.includes(`'${type}'`), type);
+  // REMOVED from shell emission (V4-1): the legacy layout machinery messages.
+  assert.doesNotMatch(rendered, /type:\s*'layout'|type:\s*'fit-size'|type:\s*'viewport'/);
+  // The context menu action union is the frozen §3 set.
+  for (const action of ['send-to-chat', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path']) assert.ok(rendered.includes(`'${action}'`), action);
 });
 
 function clientFunction(name: string): string {
@@ -111,12 +142,17 @@ function clientFunction(name: string): string {
   return match[0];
 }
 
-test('five layout presets are handed to the stock toolbar, Fit not falsely preselected', () => {
+test('V4-1: the toolbar has no viewport presets, no Fit-width zoom, and no selectPreset path', () => {
   const rendered = html();
-  // Preset identity now lives in the controller's config passed to the stock
-  // React toolbar (ToggleGroup), not in server-rendered radio elements.
-  for (const preset of ['fit', 'desktop', 'large', 'tablet', 'mobile']) assert.ok(rendered.includes(`'${preset}'`) || rendered.includes(`"${preset}"`), preset);
-  assert.doesNotMatch(rendered, /aria-checked="true"[^>]*data-preset="fit"/, 'Fit must not be preselected for the desktop default');
+  assert.doesNotMatch(rendered, /selectPreset|selectViewport/, 'no toolbar path may reach setLayout (the E1 resize machinery)');
+  assert.doesNotMatch(rendered, /aria-label="Design viewport|Design viewport: /, 'the viewport ToggleGroup is gone');
+  assert.doesNotMatch(rendered, /Fit width|Width · /, 'the zoom label is only N% and there is no fit-width item');
+  assert.doesNotMatch(rendered, /Desktop Large/, 'preset labels are retired from the toolbar');
+  // The zoom menu instead: Fit all / 50% / 100% / 200% / Zoom to selection.
+  for (const item of ['Zoom to selection', '50%', '100%', '200%']) assert.ok(rendered.includes(item), item);
+  assert.doesNotMatch(rendered, /<footer|class="notice"|<select/);
+  // setLayout/getFitBounds REMAIN on __dsCanvas for service compatibility.
+  assert.match(rendered, /setLayout:info=>transaction/); assert.match(rendered, /getFitBounds,setStatus/);
 });
 
 test('backend-confirmed page height and explicit viewport fallback restyle the ACTIVE artboard only', () => {
@@ -186,23 +222,25 @@ test('live readiness is backend-reported, not inferred from the iframe load even
   // load event; the compiled bundle's own load listeners are library internals.
   const controller = [...rendered.matchAll(/<script>([\s\S]*?)<\/script>/g)][0]![1]!;
   assert.doesNotMatch(controller, /frame\.onload\s*=/);
-  // The only frame 'load' listener is the P2 src-sync (seam 3): it may touch
-  // bookkeeping, never status/state -- readiness stays service-driven.
+  // The only frame 'load' listener is the P2 src-sync (seam 3) plus the V4-12
+  // busy-turn sighting: it may touch bookkeeping, never status/state --
+  // readiness stays service-driven.
   for (const match of controller.matchAll(/addEventListener\(['"]load['"]/g)) {
     const site = match.index ?? 0;
-    assert.match(controller.slice(site, site + 560), /s\.src\s*=/, 'frame load listeners only sync src');
-    assert.doesNotMatch(controller.slice(site, site + 560), /setScreenState|renderBoardState|setStatus|state\s*=\s*['"]ready/);
+    assert.match(controller.slice(site, site + 660), /s\.src\s*=/, 'frame load listeners only sync src');
+    assert.doesNotMatch(controller.slice(site, site + 660), /setScreenState|renderBoardState|setStatus|state\s*=\s*['"]ready/);
   }
   for (const state of ['loading', 'ready', 'empty', 'error']) assert.ok(rendered.includes(`'${state}'`));
   assert.match(rendered, /allows embedding/);
   assert.match(rendered, /15000/);
 });
 
-test('viewport presets are served to the stock toolbar without a footer or dropdown', () => {
+test('V4-1/V4-9: no preset toggle labels anywhere, and the workspace toolbar copy is in', () => {
   const rendered = html();
-  for (const label of ['Desktop Large', 'Desktop', 'Tablet', 'Mobile']) assert.ok(rendered.includes(label));
-  for (const size of ['1920', '1080', '1280', '800', '768', '1024', '390', '844']) assert.ok(rendered.includes(size));
-  assert.doesNotMatch(rendered, /<footer|class="notice"|<select/);
+  for (const label of ['Desktop Large', 'Tablet', 'Mobile']) assert.equal(rendered.includes(label), false, `${label} preset toggle is retired`);
+  // The art-wall toolbar language (compiled bundle + controller announces).
+  for (const label of ['Fit all', 'Zoom out', 'Zoom in', 'Pan canvas', 'Fit all screens']) assert.ok(rendered.includes(label), label);
+  assert.doesNotMatch(rendered, /<footer|<select/);
 });
 
 test('initial ready before CDP binding stays pending, while disconnected user commands report failure', () => {
