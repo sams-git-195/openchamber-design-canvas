@@ -14,16 +14,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import { Browser } from '../service/browser.ts';
 import { getExportStatus, resetExportJobs, startExportJob, type ExportScreen } from '../service/export.ts';
+import { liveTest, resolveChrome } from './helpers/chrome.ts';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const chrome = process.env.DS_CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const TOKEN = 'export-acceptance-token';
 const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -81,12 +81,7 @@ async function owned(run: (o: Owned) => Promise<void>): Promise<void> {
 }
 
 test('printScreenToPdf prints a hidden throwaway target and keeps the R7 invariants', { timeout: 120000 }, async (t) => {
-  try {
-    await access(chrome);
-  } catch {
-    t.skip('Chrome unavailable');
-    return;
-  }
+  if (!(await liveTest(t))) return;
   await owned(async ({ browser, url }) => {
     await browser.open(url);
     await until(async () => (await browser.state()).windowOpen && /Export fixture/.test((await browser.state()).title), 'the window is up');
@@ -118,12 +113,7 @@ test('printScreenToPdf prints a hidden throwaway target and keeps the R7 invaria
 });
 
 test('startExportJob writes natural-size PNGs and screen-sized PDFs, then restores the R7 invariants', { timeout: 180000 }, async (t) => {
-  try {
-    await access(chrome);
-  } catch {
-    t.skip('Chrome unavailable');
-    return;
-  }
+  if (!(await liveTest(t))) return;
   await owned(async ({ browser, url }) => {
     await browser.openWorkspace({
       screens: [
@@ -185,7 +175,7 @@ async function startServiceP2(extraEnv: Record<string, string>): Promise<{ port:
     env: {
       ...process.env,
       DS_KILL_WINDOW_ON_STOP: '1',
-      DS_CHROME_PATH: process.env.DS_CHROME_PATH ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      DS_CHROME_PATH: resolveChrome(),
       OPENCHAMBER_SERVICE_PORT: String(port),
       OPENCHAMBER_SERVICE_TOKEN: TOKEN,
       ...extraEnv,
@@ -208,12 +198,7 @@ async function startServiceP2(extraEnv: Record<string, string>): Promise<{ port:
 }
 
 test('POST /open → POST /export → poll /export/status writes real exports (D4 routes)', { timeout: 240000 }, async (t) => {
-  try {
-    await access(process.env.DS_CHROME_PATH ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
-  } catch {
-    t.skip('Chrome unavailable');
-    return;
-  }
+  if (!(await liveTest(t))) return;
   const workdir = await mkdtemp(path.join(tmpdir(), 'ds-export-route-'));
   const server = createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' });

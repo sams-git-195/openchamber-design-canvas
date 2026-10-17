@@ -13,6 +13,15 @@
 // It never clobbers: a directory that already holds a `.design-studio.json` is
 // refused, and a dev server that is already up is reused rather than restarted.
 // New directories are confined to the workspace root (§E).
+//
+// SPEC-V4 (V4-11) splits the work in two so the `/scaffold` route can answer
+// before the slow part starts:
+//   - `writeScaffoldFiles(options)` — the fast half: validate, pin a port,
+//     write every project file and the screens registry. No install, no boot.
+//   - `installAndBoot(dir, url, ...)` — the slow async half: `npm install` when
+//     `node_modules` is missing, then bring the dev server up.
+//   - `scaffoldProject(options)` stays as the thin composition of both, so
+//     every existing caller keeps its current behaviour.
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -63,9 +72,10 @@ export type ScaffoldOptions = {
   designSystemId?: string;
   /**
    * Run `npm install` when `node_modules` is missing (default true). Tests turn
-   * this off to stay hermetic and independent of the network.
+   * this off to stay hermetic and independent of the network. A function runs
+   * INSTEAD of the real install (V4-11 test seam: a fake npm that sleeps).
    */
-  install?: boolean;
+  install?: boolean | InstallHook;
   /** Start the dev server after scaffolding (default true). */
   boot?: boolean;
   /**
@@ -84,6 +94,23 @@ export type ScaffoldOptions = {
 export type ScaffoldResult =
   | { ok: true; url: string; files: string[] }
   | { ok: false; error: string };
+
+/** The fast half's result: everything the route needs before starting a job. */
+export type WriteScaffoldResult =
+  | { ok: true; dir: string; url: string; files: string[] }
+  | { ok: false; error: string };
+
+/** Test seam that replaces the real `npm install` (V4-11 acceptance). */
+export type InstallHook = (dir: string) => Promise<{ ok: boolean; error?: string }>;
+
+/** Options for the slow half (install + dev-server boot). */
+export type InstallBootOptions = {
+  /** Run `npm install` when `node_modules` is missing (default true); a
+   *  function is called INSTEAD of the real install (test seam, V4-11). */
+  install?: boolean | InstallHook;
+  /** Bring the dev server up (default true). */
+  boot?: boolean;
+};
 
 /** Where a wrapping port scan begins: the injected offset, else a random one. */
 function scanOffset(start: number, end: number, offset?: number): number {
@@ -140,9 +167,13 @@ function packageJson(name: string, port: number): string {
       version: '0.0.0',
       type: 'module',
       scripts: {
-        dev: `vite --host --strictPort --port ${port}`,
+        // V4-14 (E12): bind the dev/preview servers to the IPv4 loopback only.
+        // A bare `--host` binds all interfaces and serves the workspace to the
+        // LAN; `--host 127.0.0.1` keeps the fence ("nothing listening beyond
+        // 127.0.0.1") true for scaffolds too.
+        dev: `vite --host 127.0.0.1 --strictPort --port ${port}`,
         build: 'vite build',
-        preview: `vite preview --host --strictPort --port ${port}`,
+        preview: `vite preview --host 127.0.0.1 --strictPort --port ${port}`,
       },
       devDependencies: { vite: '^5.4.0' },
     },
@@ -510,15 +541,46 @@ function resolveDesignSystem(id: string | undefined): DesignSystemPreset | null 
   return DESIGN_SYSTEMS.find((preset) => preset.id === wanted) ?? null;
 }
 
+/**
+ * V4-3 (E5) — the scaffold token bridge. `STYLES_CSS` speaks the default
+ * skeleton's token vocabulary (`--font-sans`, `--step-*`, `--radius`,
+ * `--measure`); every shared design-system preset instead defines the
+ * OpenDesign vocabulary (`--font-body`, `--text-*`, `--radius-md`). Without a
+ * bridge, every preset workspace renders Times New Roman at UA sizes. Each
+ * entry maps a styles.css name onto the preset token that carries it; the
+ * last two entries are plain values, not tokens. Emitted inside the preset's
+ * `:root` ONLY for names the preset does not itself define, so a preset that
+ * ships a real `--radius` keeps its own value.
+ */
+const SCAFFOLD_TOKEN_ALIASES: ReadonlyArray<readonly [string, string]> = [
+  ['--font-sans', 'var(--font-body)'],
+  ['--font-serif', 'var(--font-display)'],
+  ['--step--1', 'var(--text-sm)'],
+  ['--step-0', 'var(--text-base)'],
+  ['--step-1', 'var(--text-xl)'],
+  ['--step-2', 'var(--text-2xl)'],
+  ['--step-3', 'var(--text-3xl)'],
+  ['--step-4', 'var(--text-4xl)'],
+  ['--radius', 'var(--radius-md)'],
+  ['--measure', '68ch'],
+];
+
 /** A `:root` token block built from a preset, values preserved verbatim. */
 function presetTokensCss(preset: DesignSystemPreset): string {
   const decls = Object.entries(preset.tokens)
     .map(([name, value]) => `  ${name}: ${value};`)
     .join('\n');
+  // The bridge block: only the names the preset does not define.
+  const aliases = SCAFFOLD_TOKEN_ALIASES.filter(([name]) => !(name in preset.tokens));
+  const bridge = aliases.length
+    ? `\n\n  /* scaffold aliases — styles.css vocabulary → preset tokens */\n${aliases
+        .map(([name, value]) => `  ${name}: ${value};`)
+        .join('\n')}`
+    : '';
   return `/* tokens.css — ${preset.name} design system (id: ${preset.id}).
    Every colour, space and type value in styles.css must come from here. */
 :root {
-${decls}
+${decls}${bridge}
 }
 `;
 }
@@ -529,10 +591,13 @@ function presetDesignMd(preset: DesignSystemPreset): string {
 }
 
 /**
- * Create a minimal, runnable design project in `dir`, install its dependencies,
- * start its dev server and write the harness plugin. See the module header.
+ * The fast half of the scaffold (V4-11): validate, confine, pin a free port
+ * and write every project file plus the screens registry. NO install, NO
+ * dev-server boot — the `/scaffold` route can answer `{dir,url,files}` right
+ * after this resolves and run `installAndBoot` as a background job.
+ * `install`/`boot` options are ignored here (they belong to the other half).
  */
-export async function scaffoldProject(options: ScaffoldOptions): Promise<ScaffoldResult> {
+export async function writeScaffoldFiles(options: ScaffoldOptions): Promise<WriteScaffoldResult> {
   const dir = options.dir;
   if (!path.isAbsolute(dir)) return { ok: false, error: 'dir must be an absolute path' };
   if (typeof options.type !== 'string' || options.type.trim() === '') {
@@ -571,7 +636,9 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
   if (port === null) {
     return { ok: false, error: `no free loopback port in ${range.start}..${range.end}` };
   }
-  const url = `http://localhost:${port}/`;
+  // V4-14 (E12): the URL is the IPv4 literal, matching the `--host 127.0.0.1`
+  // bind below — no localhost/IPv6 ambiguity for Chrome or the probes.
+  const url = `http://127.0.0.1:${port}/`;
   const name = projectName(dir);
   const brief = typeof options.brief === 'string' ? options.brief.trim() : '';
   const direction = options.direction && options.direction.trim() ? options.direction.trim() : 'auto';
@@ -641,28 +708,82 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
   // harness ships via the panel's buildModeChip / designSessionPrompt instead.
   // (writeHarnessPlugin stays imported above, intentionally dead — see note.)
 
+  return { ok: true, dir, url, files: written };
+}
+
+/**
+ * The slow half of the scaffold (V4-11): `npm install` when `node_modules` is
+ * missing (or run the injected `install` hook instead — the V4-11 test seam),
+ * then bring the dev server up. `ensureDevServer` reuses an already-reachable
+ * server for this URL (never a second one) and bounds its own wait. Safe to
+ * run as a background job after `/scaffold` has already answered.
+ *
+ * Call forms (both are used during V4 integration; the positional one is the
+ * documented shape from §3):
+ *   installAndBoot(dir, url, { install?, boot? })
+ *   installAndBoot({ dir, url, ...ScaffoldOptions })   // A's job runner
+ */
+export async function installAndBoot(
+  dir: string | (InstallBootOptions & { dir: string; url: string }),
+  url?: string,
+  options: InstallBootOptions = {},
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  let targetDir: string;
+  let targetUrl: string;
+  let opts: InstallBootOptions;
+  if (typeof dir === 'string') {
+    targetDir = dir;
+    targetUrl = url ?? '';
+    opts = options;
+  } else {
+    targetDir = dir.dir;
+    targetUrl = dir.url;
+    opts = dir;
+  }
+
   // Install the project's own dependencies when they are missing. `vite` is the
   // design project's dependency, not the extension's.
-  if (options.install !== false) {
+  if (opts.install !== false) {
     const hasModules = await fs
-      .stat(path.join(dir, 'node_modules'))
+      .stat(path.join(targetDir, 'node_modules'))
       .then((s) => s.isDirectory())
       .catch(() => false);
     if (!hasModules) {
-      const installed = await runNpmInstall(dir);
-      if (!installed.ok) return { ok: false, error: installed.error };
+      if (typeof opts.install === 'function') {
+        const hooked = await opts.install(targetDir);
+        if (!hooked.ok) return { ok: false, error: hooked.error ?? 'the injected install hook failed' };
+      } else {
+        const installed = await runNpmInstall(targetDir);
+        if (!installed.ok) return { ok: false, error: installed.error };
+      }
     }
   }
 
   // Bring the dev server up. ensureDevServer reuses an already-reachable server
   // for this URL (never a second one) and bounds its own wait.
-  if (options.boot !== false) {
-    if (!isLoopbackUrl(url)) return { ok: false, error: `scaffolded URL is not loopback: ${url}` };
-    const dev = await ensureDevServer(url, { dir });
-    if (!dev.up) return { ok: false, error: dev.error ?? `the dev server did not come up at ${url}` };
+  if (opts.boot !== false) {
+    if (!isLoopbackUrl(targetUrl)) return { ok: false, error: `scaffolded URL is not loopback: ${targetUrl}` };
+    const dev = await ensureDevServer(targetUrl, { dir: targetDir });
+    if (!dev.up) return { ok: false, error: dev.error ?? `the dev server did not come up at ${targetUrl}` };
   }
 
-  return { ok: true, url, files: written };
+  return { ok: true };
+}
+
+/**
+ * Create a minimal, runnable design project in `dir`, install its dependencies,
+ * start its dev server and write the harness plugin. See the module header.
+ * Thin composition of the two halves (V4-11): existing callers keep working.
+ */
+export async function scaffoldProject(options: ScaffoldOptions): Promise<ScaffoldResult> {
+  const written = await writeScaffoldFiles(options);
+  if (!written.ok) return written;
+  const booted = await installAndBoot(written.dir, written.url, {
+    install: options.install,
+    boot: options.boot,
+  });
+  if (!booted.ok) return booted;
+  return { ok: true, url: written.url, files: written.files };
 }
 
 /** Run `npm install` in `dir`, bounded, capturing the output for errors. */
@@ -679,12 +800,20 @@ async function runNpmInstall(dir: string): Promise<{ ok: true } | { ok: false; e
     let child;
     const win = process.platform === 'win32';
     try {
-      // FORK-WIN: `npm` is a .cmd shim on win32 and Node refuses to spawn a
-      // .cmd/.bat without a shell (EINVAL since the Node 18/20 hardening).
-      // shell:true routes it through the shell; the args are a FIXED safe set
-      // (no user input) so shell concatenation carries no injection surface.
+      // FORK-WIN / V4-14 (E13): `npm` is a .cmd shim on win32 and Node refuses
+      // to spawn a .cmd/.bat without a shell (EINVAL since the Node 18/20
+      // hardening). The previous `spawn('npm', [...], { shell: true })` passed
+      // args through a shell and Node 24 warns DEP0190 on every call. Spawning
+      // `cmd.exe /d /s /c "<command line>"` with the command as ONE literal
+      // argument runs the same npm shim without ever handing arguments to a
+      // shell — no DEP0190, and the command line is a fixed literal (no user
+      // input, no concatenation surface). /d skips AutoRun, /s keeps the
+      // command string after /c intact. NOTE (verified live): the command
+      // string must NOT carry inner quotes around `npm` — Node's argv quoting
+      // escapes them and cmd then execs the literal file `"npm"` (not
+      // recognized). POSIX spawns `npm` directly (a shebang'd shim, no shell).
       child = win
-        ? spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: dir, shell: true })
+        ? spawn('cmd.exe', ['/d', '/s', '/c', 'npm install --no-audit --no-fund'], { cwd: dir })
         : spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: dir });
     } catch (error) {
       finish({ ok: false, error: `could not run npm install: ${error instanceof Error ? error.message : String(error)}` });

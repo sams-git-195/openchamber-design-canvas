@@ -5,14 +5,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { access, mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
 
+import { liveTest } from './helpers/chrome.ts';
+
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const CHROME = process.env.DS_CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const TOKEN = 'provider-acceptance-token';
 const AUTH = { authorization: `Bearer ${TOKEN}` };
 
@@ -20,15 +21,6 @@ const OVERFLOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   html, body { margin: 0; }
   .wide { width: 2000px; height: 120px; background: #f00; }
 </style></head><body><h1>Wide</h1><div class="wide"></div></body></html>`;
-
-async function exists(file: string): Promise<boolean> {
-  try {
-    await access(file);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -78,10 +70,7 @@ type ProviderBody = {
 };
 
 test('browser-control returns a verification block and fails G1 on a wide page', { timeout: 90_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
 
   const sitePort = 47_500 + Math.floor(Math.random() * 1500);
   const site = createServer((_req, res) => {

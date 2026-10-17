@@ -7,9 +7,9 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 
 import { Browser, PICK_SCRIPT, buildLaunchArgs, otherLoopback } from '../service/browser.ts';
+import { liveTest } from './helpers/chrome.ts';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const CHROME = process.env.DS_CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const TOKEN = 'browser-acceptance-token';
 
 const AUTH = { authorization: `Bearer ${TOKEN}` };
@@ -191,10 +191,7 @@ test('PICK_SCRIPT gates on metaKey/ctrlKey, draws a transient outline, has no to
 });
 
 test('POST /open settles the required IPv4 baseline and reuses its window', { timeout: 60_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
   const testStartedMs = Date.now() - 1000;
 
   // IPv6 is optional under the user's release contract. IPv4 remains mandatory:
@@ -298,10 +295,7 @@ test('POST /open settles the required IPv4 baseline and reuses its window', { ti
 // of their own. DS_WINDOW pins the window offscreen; the launch is headful, so
 // this runs only when Chrome is present.
 test('real window: reuses one window, opens a url, picks and captures', { timeout: 90_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
 
   const previousWindow = process.env.DS_WINDOW;
   process.env.DS_WINDOW = OFFSCREEN;
@@ -486,10 +480,7 @@ test('real window: reuses one window, opens a url, picks and captures', { timeou
 // the app running after its last window closes), remove the throwaway profile,
 // and leave a later open() launching a fresh window.
 test('close() quits Chrome, removes the profile, and a later open relaunches fresh', { timeout: 90_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
 
   const previousWindow = process.env.DS_WINDOW;
   process.env.DS_WINDOW = OFFSCREEN;
@@ -527,10 +518,7 @@ test('close() quits Chrome, removes the profile, and a later open relaunches fre
 // `POST /open` runs; the same launch args and the same window result, so the
 // window mode measured here is the window mode the service opens.
 test('the live window is chromeless: standalone, no browser chrome, no omnibox target', { timeout: 60_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
 
   const { server, port } = await serve('<!doctype html><html><head><title>chromeless</title></head><body><h1>ok</h1></body></html>');
   const url = `http://127.0.0.1:${port}/`;

@@ -1,19 +1,32 @@
-// Service-side project scaffolding. Hermetic and network-free: `install` and
-// `boot` are turned off, so the tests assert the file set, the config and the
-// no-clobber refusal without pulling `vite` or spawning a dev server. The
-// install/boot paths are exercised (indirectly) by service.test.ts and
-// project-server.test.ts.
+// Service-side project scaffolding. Hermetic and network-free by default:
+// `install` and `boot` are turned off, so the tests assert the file set, the
+// config and the no-clobber refusal without pulling `vite` or spawning a dev
+// server. The one exception is the V4-14 DEP0190 pin, which runs a REAL
+// `npm install` in a subprocess (no shell:true → stderr must stay clean);
+// set DS_SKIP_INSTALL_PROBE=1 to skip just that test. The install/boot paths
+// are exercised (indirectly) by service.test.ts and project-server.test.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import { scaffoldProject, PORT_SCAN_START, PORT_SCAN_END, findFreePort } from '../service/scaffold.ts';
+import {
+  scaffoldProject,
+  writeScaffoldFiles,
+  installAndBoot,
+  PORT_SCAN_START,
+  PORT_SCAN_END,
+  findFreePort,
+} from '../service/scaffold.ts';
 import { canBindPort } from '../service/project-server.ts';
 import { DESIGN_SYSTEMS } from '../shared/design-systems.ts';
 import type { StudioConfig } from '../service/studio-config.ts';
+
+const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 async function tempDir(): Promise<string> {
   return mkdtemp(path.join(tmpdir(), 'ds-scaffold-'));
@@ -129,12 +142,22 @@ test('scaffolds a runnable multi-page Vite skeleton with a pinned loopback URL',
   assert.equal(config.url, result.url);
   assert.deepEqual(config.harness, { direction: 'editorial', fidelity: 'interactive' });
 
-  // package.json pins the same port into the dev script.
+  // package.json pins the same port into the dev script — and the script binds
+  // the IPv4 loopback only (V4-14/E12): a bare `--host` exposes the workspace
+  // to the LAN. preview must not regress either.
   const pkg = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as {
     scripts: Record<string, string>;
     devDependencies: Record<string, string>;
   };
   assert.match(pkg.scripts.dev ?? '', new RegExp(`--port ${port}\\b`));
+  assert.equal(pkg.scripts.dev, `vite --host 127.0.0.1 --strictPort --port ${port}`, 'dev binds 127.0.0.1 only');
+  assert.equal(
+    pkg.scripts.preview,
+    `vite preview --host 127.0.0.1 --strictPort --port ${port}`,
+    'preview binds 127.0.0.1 only',
+  );
+  assert.doesNotMatch(pkg.scripts.dev ?? '', /--host(?!\s+127\.0\.0\.1)/, 'no bare --host in the dev script');
+  assert.equal(config.url, `http://127.0.0.1:${port}/`, 'the config url is the IPv4 loopback literal');
   assert.equal(typeof pkg.devDependencies.vite, 'string');
 
   // The skeleton carries the design-system authority stub.
@@ -339,3 +362,220 @@ function insideOrEqualHelper(root: string, dir: string): boolean {
   const d = path.resolve(dir);
   return d === r || d.startsWith(r + path.sep);
 }
+
+// ---- V4-3 (E5): the scaffold token bridge ----
+//
+// STYLES_CSS speaks the default skeleton vocabulary (--font-sans, --step-*,
+// --radius, --measure); every shared preset defines the OpenDesign vocabulary
+// (--font-body, --text-*, --radius-md) instead. presetTokensCss must bridge
+// every gap so no `var(--x)` in styles.css dangles — a dangling font var is
+// what rendered every preset workspace in Times New Roman.
+
+/** Every custom-property name a CSS file references through `var(--…)`. */
+function cssVarUses(css: string): string[] {
+  return [...new Set([...css.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1] as string))];
+}
+
+/** Every custom-property name a CSS file declares (`--name: value`). */
+function cssVarDecls(css: string): string[] {
+  return [...new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1] as string))];
+}
+
+/** The scaffold's styles.css vocabulary that presets do NOT define. */
+const BRIDGED_ALIASES: Array<[string, string]> = [
+  ['--font-sans', 'var(--font-body)'],
+  ['--font-serif', 'var(--font-display)'],
+  ['--step--1', 'var(--text-sm)'],
+  ['--step-0', 'var(--text-base)'],
+  ['--step-1', 'var(--text-xl)'],
+  ['--step-2', 'var(--text-2xl)'],
+  ['--step-3', 'var(--text-3xl)'],
+  ['--step-4', 'var(--text-4xl)'],
+  ['--radius', 'var(--radius-md)'],
+  ['--measure', '68ch'],
+];
+
+/** Scaffold one throwaway workspace with the given preset id and read back its CSS pair. */
+async function scaffoldCssPair(
+  designSystemId?: string,
+): Promise<{ tokens: string; styles: string }> {
+  const dir = await tempDir();
+  const result = await writeScaffoldFiles({ dir, type: 'hi-fi', designSystemId, install: false, boot: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  return {
+    tokens: await readFile(path.join(dir, 'tokens.css'), 'utf8'),
+    styles: await readFile(path.join(dir, 'styles.css'), 'utf8'),
+  };
+}
+
+test('V4-3: for EVERY preset the generated tokens.css covers every var(--…) styles.css uses', async () => {
+  // The default skeleton (no preset) is covered by its own token block — pin
+  // the same subset property for it too.
+  for (const preset of [null, ...DESIGN_SYSTEMS]) {
+    const { tokens, styles } = await scaffoldCssPair(preset?.id);
+    const declared = new Set(cssVarDecls(tokens));
+    const dangling = cssVarUses(styles).filter((name) => !declared.has(name));
+    assert.deepEqual(dangling, [], `${preset?.id ?? '(default skeleton)'}: dangling vars ${JSON.stringify(dangling)}`);
+  }
+});
+
+test('V4-3: bridge alias targets resolve to tokens the preset itself declares', async () => {
+  for (const preset of DESIGN_SYSTEMS) {
+    const { tokens } = await scaffoldCssPair(preset.id);
+    const declared = new Set(cssVarDecls(tokens));
+    for (const [, value] of BRIDGED_ALIASES) {
+      const target = value.match(/^var\(\s*(--[\w-]+)\s*\)$/)?.[1];
+      if (target) {
+        assert.ok(declared.has(target), `${preset.id}: alias target ${target} is declared in the preset block`);
+      }
+    }
+  }
+});
+
+test('V4-3: warm-editorial, neon, brutalism and mono carry the exact alias block', async () => {
+  for (const id of ['warm-editorial', 'neon', 'brutalism', 'mono']) {
+    const preset = DESIGN_SYSTEMS.find((p) => p.id === id);
+    assert.ok(preset, `preset ${id} exists`);
+    if (!preset) continue;
+    const { tokens } = await scaffoldCssPair(id);
+    assert.match(tokens, /\/\* scaffold aliases — styles\.css vocabulary → preset tokens \*\//, `${id}: bridge comment present`);
+    for (const [name, value] of BRIDGED_ALIASES) {
+      // Only names the preset does not itself define are aliased.
+      if (name in preset.tokens) {
+        assert.ok(
+          !tokens.includes(`${name}: ${value};`),
+          `${id}: preset-defined ${name} is NOT overwritten by an alias`,
+        );
+      } else {
+        assert.ok(tokens.includes(`  ${name}: ${value};`), `${id}: ${name}: ${value}; is bridged`);
+      }
+    }
+    // The headline regression: the body font must come from the preset, not UA.
+    assert.match(tokens, /--font-sans: var\(--font-body\);/, `${id}: --font-sans is bridged`);
+  }
+});
+
+// ---- V4-11 (E15): scaffold split — writeScaffoldFiles + installAndBoot ----
+
+test('writeScaffoldFiles writes the whole file set and installs/boots nothing', async () => {
+  const dir = await tempDir();
+  const result = await writeScaffoldFiles({ dir, type: 'hi-fi', install: false, boot: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  if (!result.ok) return;
+
+  assert.equal(result.dir, dir, 'the result carries the dir for the async job half');
+  assert.match(result.url, /^http:\/\/127\.0\.0\.1:\d+\/$/, 'and the pinned loopback url');
+  for (const rel of ['package.json', 'home.html', 'index.html', 'tokens.css', 'styles.css', 'DESIGN.md', 'app.js', 'screens.json', '.design-studio.json', 'vite.config.mjs']) {
+    assert.ok(result.files.includes(rel), `${rel} is reported`);
+    assert.equal((await stat(path.join(dir, rel))).isFile(), true, `${rel} exists on disk`);
+  }
+
+  // No install half ran: the workspace has no node_modules of its own…
+  await assert.rejects(() => stat(path.join(dir, 'node_modules')), 'install did not run');
+  // …and no boot half ran: the pinned port is STILL free (nothing is listening).
+  const port = Number(new URL(result.url).port);
+  assert.equal(await canBindPort(port), true, 'the dev server was not started');
+
+  // The no-clobber guard lives in the write half: a second write is refused.
+  const second = await writeScaffoldFiles({ dir, type: 'deck', install: false, boot: false });
+  assert.equal(second.ok, false);
+  if (second.ok) return;
+  assert.match(second.error, /already exists/);
+});
+
+test('installAndBoot skips cleanly, honours the flags, and runs an injected install hook (V4-11 seam)', async () => {
+  const dir = await tempDir();
+  const written = await writeScaffoldFiles({ dir, type: 'hi-fi', install: false, boot: false });
+  assert.equal(written.ok, true);
+  if (!written.ok) return;
+
+  // install:false + boot:false — the trivially green composition path.
+  assert.deepEqual(await installAndBoot(dir, written.url, { install: false, boot: false }), { ok: true });
+
+  // A's /scaffold job runner calls the OPTIONS-OBJECT form (main.ts binds
+  // `installAndBoot({...options, url})`); pin that call shape too — both forms
+  // are contract, per the §3 integration note.
+  const jobOptions = { dir, url: written.url, type: 'hi-fi', install: false, boot: false };
+  assert.deepEqual(await installAndBoot(jobOptions), { ok: true }, 'the options-object call form works');
+
+  // The injected hook replaces the real npm install (fake-npm-sleeps seam).
+  const calls: string[] = [];
+  const hooked = await installAndBoot(dir, written.url, {
+    install: async (d) => {
+      calls.push(d);
+      return { ok: true };
+    },
+    boot: false,
+  });
+  assert.deepEqual(hooked, { ok: true });
+  assert.deepEqual(calls, [dir], 'the hook ran exactly once with the workspace dir');
+
+  // A failing hook fails the job with its error text.
+  const failed = await installAndBoot(dir, written.url, {
+    install: async () => ({ ok: false, error: 'fake npm exploded' }),
+    boot: false,
+  });
+  assert.equal(failed.ok, false);
+  if (failed.ok) return;
+  assert.match(failed.error, /fake npm exploded/);
+
+  // An installed workspace skips the hook entirely (node_modules present).
+  await mkdir(path.join(dir, 'node_modules'), { recursive: true });
+  const callsAfter = [...calls];
+  await installAndBoot(dir, written.url, {
+    install: async (d) => {
+      calls.push(d);
+      return { ok: true };
+    },
+    boot: false,
+  });
+  assert.deepEqual(calls, callsAfter, 'existing node_modules means no install at all');
+});
+
+// ---- V4-14 (E13): real win32/POSIX npm install must not warn DEP0190 ----
+//
+// `spawn('npm', [...], {shell:true})` made Node 24 print DEP0190 on every
+// scaffold install. The fix spawns `cmd.exe /d /s /c "npm install …"` (a
+// single literal command string, no args through a shell) on win32 and plain
+// `npm` elsewhere. This pin RUNS THE REAL INSTALL in a child process (warm
+// cache: ~5 s; cold cache may take a while) and fails if DEP0190 appears on
+// the child's stderr or node_modules/vite is missing. Escape hatch:
+// DS_SKIP_INSTALL_PROBE=1 (the integrator runs WITHOUT it).
+test('a real scaffold + npm install emits no DEP0190 and produces node_modules/vite', { timeout: 420_000 }, async (t) => {
+  if (process.env.DS_SKIP_INSTALL_PROBE === '1') {
+    t.skip('DS_SKIP_INSTALL_PROBE=1 — real install probe skipped (integrator must run without it)');
+    return;
+  }
+  const dir = await tempDir();
+  const scaffoldModule = new URL('../service/scaffold.ts', import.meta.url).href;
+  const probe = `
+import { writeScaffoldFiles, installAndBoot } from ${JSON.stringify(scaffoldModule)};
+let depWarn = false;
+process.on('warning', (w) => {
+  if (/DEP0190/.test(\`\${w.code ?? ''} \${w.message}\`)) depWarn = true;
+});
+const written = await writeScaffoldFiles({ dir: ${JSON.stringify(dir)}, type: 'hi-fi', install: false, boot: false });
+if (!written.ok) { console.error('WRITE-FAILED', written.error); process.exit(2); }
+const booted = await installAndBoot(written.dir, written.url, { boot: false });
+if (!booted.ok) { console.error('INSTALL-FAILED', booted.error ?? ''); process.exit(3); }
+if (depWarn) { console.error('PROBE-DEP0190'); process.exit(4); }
+console.log('INSTALL-OK');
+`;
+  const probeFile = path.join(await tempDir(), 'dep0190-probe.mts');
+  await writeFile(probeFile, probe, 'utf8');
+
+  const child = spawn(process.execPath, [probeFile], { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (c) => (stdout += String(c)));
+  child.stderr.on('data', (c) => (stderr += String(c)));
+  const code = await new Promise<number | null>((resolve) => child.on('exit', resolve));
+
+  assert.equal(stdout.includes('INSTALL-OK'), true, `install probe finished ok (code=${code})\nstderr: ${stderr.slice(-400)}`);
+  assert.doesNotMatch(stderr, /DEP0190/, `child stderr carries no DEP0190\n${stderr.slice(-400)}`);
+  assert.equal(
+    (await stat(path.join(dir, 'node_modules', 'vite'))).isDirectory(),
+    true,
+    'node_modules/vite was really installed',
+  );
+});

@@ -2,15 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createConnection } from 'node:net';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { inflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Browser } from '../service/browser.ts';
 import { ensureBrowser } from '../service/surface.ts';
 import { runVerification } from '../service/verify.ts';
+import { liveTest } from './helpers/chrome.ts';
 
-const chrome = process.env.DS_CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const mods = { alt: false, ctrl: false, meta: false, shift: false };
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const fixture = '<!doctype html><title>Artifact fixture</title><style>html,body{margin:0;min-height:100vh;background:#0000ff}#a{position:absolute;left:0;top:0;width:8px;height:8px;background:#ff0000}#z{position:fixed;right:0;bottom:0;width:8px;height:8px;background:#00ff00}button{position:absolute;left:40px;top:40px;width:80px;height:40px}input{position:absolute;left:140px;top:40px}</style><div id=a></div><div id=z></div><button id=button onclick="this.textContent=\'Clicked\'">Button</button><input id=input><script>window.fixtureIdentity=crypto.randomUUID();window.inputReceipts=[];document.addEventListener("click",e=>inputReceipts.push({x:e.clientX,y:e.clientY,id:e.target.id}))</script>';
@@ -64,7 +64,7 @@ function pngPixels(png: Buffer) {
 }
 
 test('actual Browser canvas keeps artifact viewport fixed under native window resize', { timeout: 60000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
     assert.equal((await browser.open(url)).settled, true);
     assert.equal(await browser.evaluate('innerWidth'), 1280);
@@ -93,7 +93,7 @@ async function boardStates(browser: Browser): Promise<Array<{ id: string; state:
 }
 
 test('functional redirect confirms the new canonical document rather than rejecting its final URL', { timeout:60000 }, async(t)=>{
-  try { await access(chrome); } catch { t.skip('Chrome unavailable');return; }
+  if (!(await liveTest(t))) return;
   await owned(async(browser,url,nav)=>{
     await browser.open(url);
     await until(async()=>(await boardStates(browser)).find(b=>b.id==='preview')?.state==='ready','the first board reaches shell-ready before the redirect counts');
@@ -117,7 +117,7 @@ test('functional redirect confirms the new canonical document rather than reject
 });
 
 test('same Browser recovers from refused IPv4 to authoritative IPv6 commit, reload and canonical redirect', {timeout:60000},async(t)=>{
-  try { await access(chrome); } catch { t.skip('Chrome unavailable');return; }
+  if (!(await liveTest(t))) return;
   const server=createServer((req,res)=>{
     if(req.url==='/redirect'){res.writeHead(302,{location:'/'});res.end();return;}
     res.writeHead(200,{'content-type':'text/html','cache-control':'no-store'});
@@ -168,7 +168,7 @@ test('same Browser recovers from refused IPv4 to authoritative IPv6 commit, relo
 });
 
 test('functional request barrier rejects cached old document; same-URL reload is once and hash navigation retains identity', {timeout:60000},async(t)=>{
-  try { await access(chrome); } catch { t.skip('Chrome unavailable');return; }
+  if (!(await liveTest(t))) return;
   await owned(async(browser,url,nav)=>{
     await browser.open(url);
     const prior=await browser.evaluate('fixtureIdentity');
@@ -204,7 +204,7 @@ test('functional request barrier rejects cached old document; same-URL reload is
 });
 
 test('actual Browser canvas maps native input and excludes shell/siblings from artifact operations', { timeout: 60000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
     await browser.open(url);
     assert.equal(await shell(browser, '!!window.__dsCanvas'), true);
@@ -274,7 +274,7 @@ test('actual Browser canvas maps native input and excludes shell/siblings from a
 });
 
 test('actual Browser captures exact wide artifact corners and restores camera even on capture failure', { timeout: 60000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
     await browser.open(url);
     assert.equal(await shell(browser, '!!window.__dsCanvas'), true);
@@ -315,7 +315,7 @@ test('actual Browser captures exact wide artifact corners and restores camera ev
 });
 
 test('direct verification restores artifact viewport and manual camera after success and an injected matrix exception', { timeout: 60000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
     await browser.open(url);
     await browser.resize(1280, 800);
@@ -346,7 +346,7 @@ async function poll(check: () => boolean, message: string, timeoutMs = 8000): Pr
 }
 
 test('canvas workspace: two artboards, per-screen contexts, shell-driven activate/mode/pick', { timeout: 120000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
     await browser.openWorkspace({
       screens: [
@@ -389,7 +389,7 @@ test('canvas workspace: two artboards, per-screen contexts, shell-driven activat
 });
 
 test('setScreens rebuilds the grid warm without a second capability URL', { timeout: 90000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
     await browser.openWorkspace({ screens: [{ id: 'one', url: url + 'one', width: 1280, height: 800, title: 'One' }], baseUrl: url, mode: 'play' });
     const firstTargets = await browser.pageTargetCount();
@@ -407,7 +407,7 @@ test('setScreens rebuilds the grid warm without a second capability URL', { time
 // ---- P2-A pins (SPEC-V3-P2-SCOPE.md R3/R5/R6, D5 write path) ---------------
 
 test('canvas workspace: capture(screen) reports natural size and viewport() tracks the active artboard (R5/R-CAP)', { timeout: 120000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
     await browser.openWorkspace({
       screens: [
@@ -433,7 +433,7 @@ test('canvas workspace: capture(screen) reports natural size and viewport() trac
 });
 
 test('retry(screen) reloads ONLY that artboard — sibling artboards are untouched (R3)', { timeout: 120000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url, nav) => {
     await browser.openWorkspace({
       screens: [
@@ -457,7 +457,7 @@ test('retry(screen) reloads ONLY that artboard — sibling artboards are untouch
 });
 
 test('shell camera-changed/screen-move persist into view.json (D5 write path, coalesced)', { timeout: 120000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   const workdir = await mkdtemp(path.join(tmpdir(), 'ds-view-shell-'));
   try {
     await owned(async (browser, url) => {
@@ -496,7 +496,7 @@ test('shell camera-changed/screen-move persist into view.json (D5 write path, co
 });
 
 test('restoreCamera accepts the §C grid extents (64–65536) and rejects below (R6)', { timeout: 120000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
     await browser.openWorkspace({ screens: [{ id: 'a', url: url + 'a', width: 1280, height: 800, title: 'A' }], baseUrl: url, mode: 'play' });
     await until(async () => (await boardStates(browser)).every((board) => board.state === 'ready'), 'the artboard is ready');
@@ -515,7 +515,7 @@ test('restoreCamera accepts the §C grid extents (64–65536) and rejects below 
 });
 
 test('positioned screens ride the cold bake and warm setScreens; null=auto, absent=inherit (D6/R9)', { timeout: 120000 }, async (t) => {
-  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
     const screenList = () => shell(browser, "JSON.stringify(__dsCanvas.getScreens())").then((raw: unknown) => JSON.parse(String(raw)) as Array<{ id: string; x?: number | null; y?: number | null }>);
     // Cold open: the positioned pair is baked INTO the ViewerConfig (P2-B
