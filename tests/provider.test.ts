@@ -5,14 +5,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { access, mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
 
+import { liveTest } from './helpers/chrome.ts';
+
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const CHROME = process.env.DS_CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const TOKEN = 'provider-acceptance-token';
 const AUTH = { authorization: `Bearer ${TOKEN}` };
 
@@ -20,15 +21,6 @@ const OVERFLOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   html, body { margin: 0; }
   .wide { width: 2000px; height: 120px; background: #f00; }
 </style></head><body><h1>Wide</h1><div class="wide"></div></body></html>`;
-
-async function exists(file: string): Promise<boolean> {
-  try {
-    await access(file);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -78,10 +70,7 @@ type ProviderBody = {
 };
 
 test('browser-control returns a verification block and fails G1 on a wide page', { timeout: 90_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
 
   const sitePort = 47_500 + Math.floor(Math.random() * 1500);
   const site = createServer((_req, res) => {
@@ -162,4 +151,18 @@ test('browser-control returns a verification block and fails G1 on a wide page',
     await delay(600);
     if (child.exitCode === null) child.kill('SIGKILL');
   }
+});
+
+// Static identity guard for the canvas provider layer (spec §1): the
+// browser-control problem feed reports the fork's own id, and every canvas
+// action accepts an optional `screen` (default: the active artboard). This
+// runs without Chrome; the end-to-end matrix above covers the runtime path
+// once the rebuilt bundle carries the canvas code.
+test('browser-control reports source design-canvas and threads an optional screen', async () => {
+  const source = await readFile(path.join(root, 'service', 'browser-control.ts'), 'utf8');
+  assert.match(source, /source:\s*'design-canvas'/, 'gate findings are labelled design-canvas');
+  assert.doesNotMatch(source, /source:\s*'design-studio'/, 'the old provider literal is gone');
+  assert.match(source, /requestScreen/, 'the dispatcher reads the optional screen parameter');
+  assert.match(source, /browser\.navigate\(params\.screen,\s*params\.url\)/, 'browser.open navigates the named screen (undefined = active)');
+  assert.match(source, /currentWorkspaceDir\(\)/, 'dir falls back to the service-recorded workspace (spec §B lastWorkspace)');
 });

@@ -1,0 +1,105 @@
+{
+  "at": "2026-10-17T23:39:14.930Z",
+  "results": [
+    {
+      "name": "scaffold workspace (warm-editorial)",
+      "status": "PASS",
+      "note": "http://127.0.0.1:5662/"
+    },
+    {
+      "name": "scaffold token bridge (E5): styles.css vars all declared",
+      "status": "PASS",
+      "note": "no dangling vars; --font-sans → --font-body"
+    },
+    {
+      "name": "write 3 screen files + registry",
+      "status": "PASS",
+      "note": "home 1280×800 · phone 390×844 · tall 390×1600"
+    },
+    {
+      "name": "open the canvas window",
+      "status": "PASS",
+      "note": "mode edit, screens home:ready, phone:ready, tall:ready"
+    },
+    {
+      "name": "E5 live: body fontFamily ≠ Times for warm-editorial",
+      "status": "PASS",
+      "note": "body fontFamily = Inter, system-ui, sans-serif (3 screen context(s))"
+    },
+    {
+      "name": "overview screenshot at fit-all",
+      "status": "PASS",
+      "note": "01-overview-fit-all.png (1263×1513) + out/canvas-overview.png"
+    },
+    {
+      "name": "activate header: home (E1: size stays exact)",
+      "status": "PASS",
+      "note": "home now 1280×800 ✓ (registry size kept)"
+    },
+    {
+      "name": "screenshot after activating home",
+      "status": "PASS",
+      "note": "02-active-home.png (1263×1513)"
+    },
+    {
+      "name": "activate header: phone (E1: size stays exact)",
+      "status": "PASS",
+      "note": "phone now 390×844 ✓ (registry size kept)"
+    },
+    {
+      "name": "screenshot after activating phone",
+      "status": "PASS",
+      "note": "02-active-phone.png (1263×1513)"
+    },
+    {
+      "name": "activate header: tall (E1: size stays exact)",
+      "status": "PASS",
+      "note": "tall now 390×1600 ✓ (registry size kept)"
+    },
+    {
+      "name": "screenshot after activating tall",
+      "status": "PASS",
+      "note": "02-active-tall.png (1263×1513)"
+    },
+    {
+      "name": "screenshot at 100% zoom (toolbar zoom menu)",
+      "status": "PASS",
+      "note": "03-zoom-100.png (1263×1513) via toolbar \"100%\""
+    },
+    {
+      "name": "pick → chip timing (edit mode, real click)",
+      "status": "PASS",
+      "note": "click→service-visible within the ≤300 ms p50 target via GET /picks (panel hop not in this measure)"
+    },
+    {
+      "name": "4th screen added live appears ≤3 s (V4-4 watch)",
+      "status": "PASS",
+      "note": "about appeared in 421 ms"
+    },
+    {
+      "name": "corrupt screens.json surfaces registryError in /state (V4-4)",
+      "status": "PASS",
+      "note": "banner captured; registryError shown then cleared"
+    },
+    {
+      "name": "export after activations",
+      "status": "PASS",
+      "note": "job export-1 → done"
+    },
+    {
+      "name": "exported PNG dims == registry (E2)",
+      "status": "PASS",
+      "note": "4 screens exported at exact registry dims"
+    },
+    {
+      "name": "screenshot with the artboard context menu open (V4-10)",
+      "status": "PASS",
+      "note": "05-context-menu.png (1263×1513)"
+    },
+    {
+      "name": "final overview screenshot",
+      "status": "PASS",
+      "note": "06-final-overview.png (1263×1513)"
+    }
+  ]
+}

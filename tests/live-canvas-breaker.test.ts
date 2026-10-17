@@ -10,18 +10,30 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 const approved='/private/var/folders/hx/6ykzfqb5519dsfc25bzxxrzc0000gn/T/opencode';
 const scratch=await mkdtemp(path.join(await access(approved).then(()=>approved,()=>tmpdir()),'live-canvas-breaker-'));
 await mkdir(path.join(scratch,'service'));await mkdir(path.join(scratch,'viewer-client/src'),{recursive:true});
-for(const file of ['browser','artifact-context','viewer-server','viewer-ui'])await cp(path.join(root,'service',file+'.ts'),path.join(scratch,'service',file+'.ts'));
+for(const file of ['browser','artifact-context','viewer-server','viewer-ui','view-state','screens','last-workspace','pick-queue'])await cp(path.join(root,'service',file+'.ts'),path.join(scratch,'service',file+'.ts'));
 await cp(path.join(root,'shared'),path.join(scratch,'shared'),{recursive:true});
 // Stock controller + compiled asset module are real imports of viewer-ui.ts.
 await cp(path.join(root,'viewer-client/src/canvas-controller.js'),path.join(scratch,'viewer-client/src/canvas-controller.js'));
 await cp(path.join(root,'viewer-client/src/canvas-controller.d.ts'),path.join(scratch,'viewer-client/src/canvas-controller.d.ts'));
 await cp(path.join(root,'service/viewer-assets.generated.ts'),path.join(scratch,'service/viewer-assets.generated.ts'));
-await symlink(path.join(root,'node_modules'),path.join(scratch,'node_modules'));
+await symlink(path.join(root,'node_modules'),path.join(scratch,'node_modules'),process.platform==='win32'?'junction':undefined);
 const mutant=process.env.LIVE_CANVAS_MUTANT;
 async function mutate(file:string,from:string,to:string){const location=path.join(scratch,'service',file+'.ts'),source=await readFile(location,'utf8');assert.equal(source.split(from).length-1,1,'one scratch guard match');await writeFile(location,source.replace(from,to));}
-if(mutant==='artifact-authorization')await mutate('browser','if(context.matches(context.artifact(),session,params.executionContextId)) {',"if(params.name==='__dsPick'||params.name==='__dsArtifactEvent') {");
+// FIX-3 sweep maintenance: two anchors had drifted from the source they mutate
+// (both verified stale at HEAD 81f6afb, before any FIX-3 edit — the same class
+// the FIX-1 round fixed for fit-page's capture-renderer-finally):
+//  - artifact-authorization still named the pre-FIX-1 inline handler's
+//    `params.*`; the dispatchBinding extraction (170dadc) renamed them. The
+//    fault is unchanged: the trusted-artifact execution-context gate is
+//    replaced by a name-only check, so ANY frame's pick is honoured (A1/A3
+//    kill it).
+//  - capture-finally's bare endCapture line matched TWICE after the V4-2
+//    capture restructure added the overrideApplied/else branch; re-anchored to
+//    the !overrideApplied early-failure path C1 exercises (the renderer
+//    transaction never ends -> __dsCaptureActive stays true -> C1 kills it).
+if(mutant==='artifact-authorization')await mutate('browser','if(screen&&context.matches(context.artifact(screen),session,executionContextId)) {',"if(name==='__dsPick'||name==='__dsArtifactEvent') {");
 else if(mutant==='payload-bound')await mutate('browser',"if(typeof params.payload!=='string'||params.payload.length>24000)return;","if(typeof params.payload!=='string')return;");
-else if(mutant==='capture-finally')await mutate('browser','finally{await this.shellEval(`__dsCanvas.endCapture(${JSON.stringify(token)})`);}','finally{/* scratch: no renderer capture restoration */}');
+else if(mutant==='capture-finally')await mutate('browser','if(!overrideApplied){\n        try{await this.shellEvalSettled(`__dsCanvas.endCapture(${JSON.stringify(token)})`);}','if(!overrideApplied){\n        try{ /* scratch: no renderer capture restoration */ }');
 else if(mutant==='server-path')await mutate('viewer-server','req.url !== capability ? 404 :','false ? 404 :');
 else if(mutant==='pointer-cancellation'){
   await mutate('browser','    consumed=null;\n    if(!window.__dsViewerFlags.menu)return;','    /* scratch: stale sequence remains */\n    if(!window.__dsViewerFlags.menu)return;');
@@ -49,22 +61,30 @@ async function owned(run:(browser:InstanceType<typeof Browser>,url:string,receip
   try{const url=`http://localhost:${address.port}`;assert.equal((await browser.open(url+'/')).settled,true,'owned artifact is actually ready');await run(browser,url,receipts);}
   finally{await browser.close();app.closeAllConnections();await new Promise<void>(resolve=>app.close(()=>resolve()));}
 }
-async function nativeClick(browser:InstanceType<typeof Browser>,x=70,y=60){const b=internal(browser);await shell(browser,'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');const point=await shell(browser,`(()=>{const f=document.getElementById('preview'),r=f.getBoundingClientRect();return {x:r.x+${x}*r.width/f.clientWidth,y:r.y+${y}*r.height/f.clientHeight}})()`);assert.ok(point.x>=0&&point.y>=0,'native fixture target remains within main viewport');for(const type of ['mousePressed','mouseReleased'])await b.cdp.send('Input.dispatchMouseEvent',{type,x:point.x,y:point.y,button:'left',buttons:type==='mousePressed'?1:0,clickCount:1},b.sessionId);}
-test('A4 escaped top-level attacker must not acquire shell binding authority',{timeout:30000},async()=>{
+async function nativeClick(browser:InstanceType<typeof Browser>,x=70,y=60){const b=internal(browser);await shell(browser,'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');const point=await shell(browser,`(()=>{const f=document.getElementById('ds-frame-preview'),r=f.getBoundingClientRect();return {x:r.x+${x}*r.width/f.clientWidth,y:r.y+${y}*r.height/f.clientHeight}})()`);assert.ok(point.x>=0&&point.y>=0,'native fixture target remains within main viewport');for(const type of ['mousePressed','mouseReleased'])await b.cdp.send('Input.dispatchMouseEvent',{type,x:point.x,y:point.y,button:'left',buttons:type==='mousePressed'?1:0,clickCount:1},b.sessionId);}
+test('A4 sandboxed top-navigation is refused; an artifact-origin canvas command cannot command the shell',{timeout:30000},async()=>{
   await owned(async(browser,url)=>{
     // This tests document authority, not asynchronous Page-height qualification.
     // Use an exact controlled viewport before arranging its one native link click.
     await browser.resize(1280,800);
     assert.deepEqual(await browser.evaluate('({width:innerWidth,height:innerHeight})'),{width:1280,height:800});
     const before={viewport:browser.viewport(),flags:{...internal(browser).canvasFlags}};
-    await nativeClick(browser,70,130); // real artifact target=_top navigation
-    let location='';for(let i=0;i<40;i++){location=await shell(browser,'location.href');if(location===url+'/attacker')break;await pause(25);}assert.equal(location,url+'/attacker','attacker loaded by native link');
-    const identity=await shell(browser,'attackerIdentity');
-    const bindingType=await shell(browser,'typeof __dsCanvasSend');assert.equal(bindingType,'function','runtime binding persists across actual navigation');
-    await shell(browser,"__dsCanvasSend(JSON.stringify({type:'viewport',width:390,height:844}));__dsShellState(JSON.stringify({menu:true,pan:true}));");await pause(150);
+    await nativeClick(browser,70,130); // real artifact target=_top link
+    await pause(400);
+    // §C/D shipped surface: artboard frames carry the sandbox WITHOUT
+    // allow-top-navigation, so Chrome REFUSES the escape (or side-channels it
+    // into a popup) — the shell never leaves its private capability page and
+    // the attacker document never loads in it.
+    const location=await shell(browser,'location.href');
+    assert.match(location,/\/canvas\//,'the sandboxed artboard cannot navigate the shell away from its private capability page');
+    assert.equal(await shell(browser,'typeof attackerIdentity'),'undefined','the top-navigation attempt never loaded the attacker document');
+    const bindingType=await shell(browser,'typeof __dsCanvasSend');assert.equal(bindingType,'function','the shell bridge persists');
+    // The would-be attacker's only channel is the artifact context itself: a
+    // canvas command sent from there must never command the backend.
+    await browser.evaluate("__dsCanvasSend(JSON.stringify({type:'viewport',width:390,height:844}));'spoofed'");await pause(150);
     const after={viewport:browser.viewport(),flags:{...internal(browser).canvasFlags}};
-    console.info('A4 evidence:',JSON.stringify({attackerIdentity:identity,bindingType,input:{viewport:[390,844],menu:true,pan:true},before,after}));
-    assert.deepEqual(after,before,'non-private top document must not command backend viewport or flags');
+    console.info('A4 evidence:',JSON.stringify({location,attackerRefused:true,input:{viewport:[390,844]},before,after}));
+    assert.deepEqual(after,before,'a non-shell canvas command must not command backend viewport or flags');
   });
 });
 
@@ -95,12 +115,17 @@ test('A3 oversized complete artifact payload cannot increment pick before one va
 
 test('C1 failure immediately after beginCapture restores renderer transaction and native interaction',{timeout:30000},async()=>{
   await owned(async(browser)=>{
+    // Settle the layout qualification tail BEFORE posing the camera (the same
+    // warm-up the live-canvas input suite uses): the post-failure click must
+    // not race an unrelated relayout that moves the artboard mid-press.
+    const internalTail=browser as unknown as {operationTail:Promise<unknown>};
+    await internalTail.operationTail;await pause(300);
     await browser.restoreCamera({mode:'manual',scale:.35,panX:11,panY:-9});
-    const before={camera:await browser.getCamera(),styles:await shell(browser,"['camera','canvas','preview'].map(id=>document.getElementById(id).style.cssText)"),body:await shell(browser,'document.body.style.cssText'),identity:await browser.evaluate('identity'),width:await browser.evaluate('innerWidth')};
+    const before={camera:await browser.getCamera(),styles:await shell(browser,"['camera','canvas','ds-frame-preview'].map(id=>document.getElementById(id).style.cssText)"),body:await shell(browser,'document.body.style.cssText'),identity:await browser.evaluate('identity'),width:await browser.evaluate('innerWidth')};
     const b=internal(browser),send=b.cdp.send.bind(b.cdp);let injected=false;
     b.cdp.send=(method,params,session)=>{if(method==='Emulation.setDeviceMetricsOverride'&&!injected){injected=true;return Promise.reject(new Error('owned early metrics failure'));}return send(method,params,session);};
     try{await assert.rejects(browser.capture(),/owned early metrics failure/);}finally{b.cdp.send=send;}
-    const after={camera:await browser.getCamera(),styles:await shell(browser,"['camera','canvas','preview'].map(id=>document.getElementById(id).style.cssText)"),body:await shell(browser,'document.body.style.cssText'),identity:await browser.evaluate('identity'),width:await browser.evaluate('innerWidth')};
+    const after={camera:await browser.getCamera(),styles:await shell(browser,"['camera','canvas','ds-frame-preview'].map(id=>document.getElementById(id).style.cssText)"),body:await shell(browser,'document.body.style.cssText'),identity:await browser.evaluate('identity'),width:await browser.evaluate('innerWidth')};
     const active=await shell(browser,'__dsCaptureActive');await nativeClick(browser);const clicks=await browser.evaluate('clicks');
     console.info('C1 evidence:',JSON.stringify({injected,active,clicks,sameIdentity:before.identity===after.identity}));
     assert.deepEqual({after,active,clicks},{after:before,active:false,clicks:1},'early error cannot leave camera/frozen flags/styles or native interaction changed');
@@ -109,7 +134,7 @@ test('C1 failure immediately after beginCapture restores renderer transaction an
 
 async function raw(url:string,target:string,host?:string,method='GET'):Promise<number>{const u=new URL(url);return new Promise((resolve,reject)=>{const req=request({hostname:'127.0.0.1',port:u.port,path:target,method,headers:{host:host||u.host}},res=>{res.resume();res.on('end',()=>resolve(res.statusCode||0));});req.on('error',reject);req.end();});}
 test('A5 exact private-server targets and launch capabilities stay isolated; artifact referrer absent',{timeout:30000},async()=>{
-  const config={url:'',pages:[],viewport:{width:1280,height:800}};
+  const config={screens:[{id:'preview',url:process.platform==='win32'?'http://127.0.0.1/':'http://localhost/',width:1280,height:800,title:'Preview'}],viewport:{width:1280,height:800},mode:'edit' as const};
   const first=await startViewerServer(config),second=await startViewerServer(config);
   try{
     const p=new URL(first.url).pathname,q=new URL(second.url).pathname;
@@ -122,9 +147,10 @@ test('A5 exact private-server targets and launch capabilities stay isolated; art
 
 test('A6 native touch cancellation after menu dismissal must not consume next ordinary click',{timeout:30000},async()=>{
   await owned(async(browser)=>{
-    await shell(browser,"document.getElementById('zoom').click()");await pause(60);
-    assert.equal(internal(browser).canvasFlags.menu,true,'real menu flag propagated');
-    const p=await shell(browser,"(()=>{const f=document.getElementById('preview'),r=f.getBoundingClientRect();return {x:r.x+70*r.width/f.clientWidth,y:r.y+60*r.height/f.clientHeight}})()"),b=internal(browser);
+    await barrier(async()=>await shell(browser,"!!window.__dsToolbarBridge&&document.getElementById('zoom')!==null"),'the toolbar mounts before the menu test');
+    await shell(browser,"document.getElementById('zoom').click()");
+    await barrier(async()=>internal(browser).canvasFlags.menu,'real menu flag propagated');
+    const p=await shell(browser,"(()=>{const f=document.getElementById('ds-frame-preview'),r=f.getBoundingClientRect();return {x:r.x+70*r.width/f.clientWidth,y:r.y+60*r.height/f.clientHeight}})()"),b=internal(browser);
     await b.cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:p.x,y:p.y,id:1}]},b.sessionId);await pause(80);
     await b.cdp.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]},b.sessionId);await pause(60);
     assert.equal(internal(browser).canvasFlags.menu,false,'native pointerdown dismissed menu');
@@ -135,14 +161,19 @@ test('A6 native touch cancellation after menu dismissal must not consume next or
   });
 });
 
-async function barrier(check:()=>Promise<boolean>,description:string){for(let i=0;i<80;i++){if(await check())return;await pause(20);}assert.fail(description);}
+// 250×20 ms = 5 s: the dismissal/focus acknowledgement is a CDP→shell→binding-
+// message→service round trip; under full-suite machine load (Defender scanning
+// the scaffold test's fresh node_modules, prior files' Chrome teardown) the
+// original 1.6 s ceiling flaked once in three suite runs. Arrival is still
+// mandatory — the teeth are unchanged, only the patience.
+async function barrier(check:()=>Promise<boolean>,description:string){for(let i=0;i<250;i++){if(await check())return;await pause(20);}assert.fail(description);}
 async function nativeMouse(browser:InstanceType<typeof Browser>,type:string,point:{x:number;y:number}){const b=internal(browser);await b.cdp.send('Input.dispatchMouseEvent',{type,x:point.x,y:point.y,button:'left',buttons:type==='mousePressed'?1:0,clickCount:1},b.sessionId);}
-async function openZoom(browser:InstanceType<typeof Browser>){const p=await shell(browser,"(()=>{const r=document.getElementById('zoom').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()");await nativeMouse(browser,'mousePressed',p);await nativeMouse(browser,'mouseReleased',p);await barrier(async()=>internal(browser).canvasFlags.menu,'native Zoom menu did not open');}
+async function openZoom(browser:InstanceType<typeof Browser>){await barrier(async()=>await shell(browser,"!!window.__dsToolbarBridge&&document.getElementById('zoom')!==null"),'the toolbar mounts before the menu test');await shell(browser,"document.getElementById('zoom').click()");await barrier(async()=>internal(browser).canvasFlags.menu,'native Zoom menu did not open');}
 
 test('B6 uncancelled dismissal suppresses original native click but not next click or keyboard',{timeout:30000},async()=>{
   await owned(async(browser)=>{
     await openZoom(browser);
-    const p=await shell(browser,"(()=>{const f=document.getElementById('preview'),r=f.getBoundingClientRect();return {x:r.x+70*r.width/f.clientWidth,y:r.y+60*r.height/f.clientHeight}})()");
+    const p=await shell(browser,"(()=>{const f=document.getElementById('ds-frame-preview'),r=f.getBoundingClientRect();return {x:r.x+70*r.width/f.clientWidth,y:r.y+60*r.height/f.clientHeight}})()");
     await nativeMouse(browser,'mousePressed',p);
     await barrier(async()=>!internal(browser).canvasFlags.menu&&await shell(browser,"document.activeElement.id==='zoom'"),'dismissal acknowledgement/focus did not arrive');
     await nativeMouse(browser,'mouseReleased',p);

@@ -1,0 +1,8 @@
+# viewer-server.ts computes CSP integrity hashes over the LF-normalized text of
+# the inline scripts it serves (Chrome normalizes CRLF -> LF at parse), and
+# scripts/build-viewer.mjs hashes the raw bytes of viewer-client inputs for its
+# determinism digest. Pin LF for the sources whose bytes feed those hashes so
+# every checkout is byte-stable and the CSP can never silently block the shell
+# bootstrap.
+viewer-client/** text eol=lf
+*.ts text eol=lf

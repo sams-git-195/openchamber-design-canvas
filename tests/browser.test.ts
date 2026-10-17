@@ -7,9 +7,9 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 
 import { Browser, PICK_SCRIPT, buildLaunchArgs, otherLoopback } from '../service/browser.ts';
+import { liveTest } from './helpers/chrome.ts';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const CHROME = process.env.DS_CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const TOKEN = 'browser-acceptance-token';
 
 const AUTH = { authorization: `Bearer ${TOKEN}` };
@@ -115,11 +115,65 @@ test('start() refuses a non-http(s) URL and a missing URL without launching', as
   await assert.rejects(() => browser.start(), /no URL/, 'a window requested with no URL errors');
 });
 
+// ---- Design Canvas contract (spec §B), testable without Chrome -------------
+
+test('a fresh Browser reports an empty canvas in edit mode', () => {
+  const browser = new Browser();
+  const state = browser.getState();
+  assert.equal(state.mode, 'edit', 'default mode is edit');
+  assert.equal(browser.getMode(), 'edit');
+  assert.deepEqual(state.screens, [], 'no screens before any workspace opens');
+  assert.equal(state.activeScreen, null);
+  assert.equal(state.dir, null);
+  assert.equal(browser.currentWorkspaceDir(), null);
+  assert.equal(browser.pick(), null, 'pick() starts empty');
+  assert.equal(state.lastPick, null);
+  assert.equal(state.windowOpen, false);
+});
+
+test('openWorkspace records dir/baseUrl/screens and refuses an empty registry', async () => {
+  const browser = new Browser();
+  await assert.rejects(
+    () => browser.openWorkspace({ dir: 'C:\\canvas-test', screens: [], baseUrl: 'http://127.0.0.1:5173/', mode: 'edit' }),
+    /at least one valid screen/,
+    'zero valid screens is a refusal, not a silent empty canvas',
+  );
+  assert.equal(browser.currentWorkspaceDir(), 'C:\\canvas-test', 'the dir is recorded even on refusal');
+  // baseUrl persisted: setScreens may then join registry `file` entries (§A).
+  await browser.setScreens([
+    { id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 },
+    { id: 'BAD ID!', url: 'http://127.0.0.1:5173/bad.html' },
+    { id: 'checkout', url: 'http://127.0.0.1:5173/checkout.html', title: 'Checkout', width: 420, height: 900 },
+  ]);
+  const state = browser.getState();
+  assert.deepEqual(state.screens.map((s) => s.id), ['home', 'checkout'], 'invalid ids are normalized away like screens.ts does');
+  assert.equal(state.screens[0]!.url, 'http://127.0.0.1:5173/home.html', 'file joins baseUrl with a single slash (§A)');
+  assert.equal(state.activeScreen, 'home', 'the first valid screen becomes active');
+  // §A clamp 200–8192 on per-screen sizes:
+  await browser.setScreens([{ id: 'tiny', url: 'http://127.0.0.1:5173/t.html', width: 5, height: 99999 }]);
+  assert.deepEqual({ width: browser.getState().screens[0]!.width, height: browser.getState().screens[0]!.height }, { width: 200, height: 8192 });
+});
+
+test('setMode/setActive/pick gate the canvas contract without a window', async () => {
+  const browser = new Browser();
+  await browser.setScreens([{ id: 'a', url: 'http://127.0.0.1:5173/a.html' }, { id: 'b', url: 'http://127.0.0.1:5173/b.html' }]);
+  await browser.setActive('b');
+  assert.equal(browser.getState().activeScreen, 'b');
+  assert.deepEqual(browser.getState().screens.map((s) => s.active), [false, true]);
+  await assert.rejects(() => browser.setActive('c'), /unknown screen/, 'activating an unknown screen is refused');
+  await browser.setMode('play');
+  assert.equal(browser.getMode(), 'play', 'mode is recorded while cold (pushed once warm)');
+  await assert.rejects(() => browser.setMode('sideways' as 'play'), /Unsupported canvas mode/);
+  // navigate without url (spec §B two-form signature):
+  await assert.rejects(() => (browser as any).navigate(undefined, undefined), /needs a URL/);
+});
+
 // Highlighting needs a live window: with none up (a fresh Browser, never
 // started) it answers false rather than throwing.
 test('highlight() returns false when no window is open', async () => {
   const browser = new Browser();
   assert.equal(await browser.highlight('#anything'), false, 'no window: highlight is false');
+  assert.equal(await browser.highlight('home', '#anything'), false, 'two-form highlight without a window is false too');
 });
 
 // The pick gesture is defined entirely by the injected script. Pin its contract
@@ -137,10 +191,8 @@ test('PICK_SCRIPT gates on metaKey/ctrlKey, draws a transient outline, has no to
 });
 
 test('POST /open settles the required IPv4 baseline and reuses its window', { timeout: 60_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
+  const testStartedMs = Date.now() - 1000;
 
   // IPv6 is optional under the user's release contract. IPv4 remains mandatory:
   // an owned loopback fixture must settle and retain the exact requested URL.
@@ -197,9 +249,16 @@ test('POST /open settles the required IPv4 baseline and reuses its window', { ti
     assert.equal(state.windowOpen, true, 'the real window is open');
     assert.equal(state.url,siteUrl,'state reports the requested IPv4 URL');
     assert.equal(state.title, 'IPv4 baseline', 'state reports the page title');
-    const {readdir,readFile}=await import('node:fs/promises');
+    const {readdir,readFile,stat}=await import('node:fs/promises');
     const {tmpdir}=await import('node:os');
-    const profiles=(await readdir(tmpdir())).filter(name=>name.startsWith('ds-chrome-'));
+    // Hermetic count: only profiles this run created (mtime since the test
+    // started). Other test files on this machine legitimately leave throwaway
+    // profiles behind between runs; the assertion is about THIS window.
+    const allProfiles=(await readdir(tmpdir())).filter(name=>name.startsWith('ds-chrome-'));
+    const profiles: string[]=[];
+    for(const name of allProfiles){
+      try{const st=await stat(path.join(tmpdir(),name));if(st.mtimeMs>=testStartedMs)profiles.push(name);}catch{continue;}
+    }
     assert.equal(profiles.length,1,'one owned Chrome profile exists');
     const debugPort=Number((await readFile(path.join(tmpdir(),profiles[0]!,'DevToolsActivePort'),'utf8')).split('\n')[0]);
     const pageTargets=async()=>((await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json()) as Array<{type:string;id:string}>).filter(target=>target.type==='page');
@@ -236,10 +295,7 @@ test('POST /open settles the required IPv4 baseline and reuses its window', { ti
 // of their own. DS_WINDOW pins the window offscreen; the launch is headful, so
 // this runs only when Chrome is present.
 test('real window: reuses one window, opens a url, picks and captures', { timeout: 90_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
 
   const previousWindow = process.env.DS_WINDOW;
   process.env.DS_WINDOW = OFFSCREEN;
@@ -424,10 +480,7 @@ test('real window: reuses one window, opens a url, picks and captures', { timeou
 // the app running after its last window closes), remove the throwaway profile,
 // and leave a later open() launching a fresh window.
 test('close() quits Chrome, removes the profile, and a later open relaunches fresh', { timeout: 90_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
 
   const previousWindow = process.env.DS_WINDOW;
   process.env.DS_WINDOW = OFFSCREEN;
@@ -465,10 +518,7 @@ test('close() quits Chrome, removes the profile, and a later open relaunches fre
 // `POST /open` runs; the same launch args and the same window result, so the
 // window mode measured here is the window mode the service opens.
 test('the live window is chromeless: standalone, no browser chrome, no omnibox target', { timeout: 60_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  if (!(await liveTest(t))) return;
 
   const { server, port } = await serve('<!doctype html><html><head><title>chromeless</title></head><body><h1>ok</h1></body></html>');
   const url = `http://127.0.0.1:${port}/`;

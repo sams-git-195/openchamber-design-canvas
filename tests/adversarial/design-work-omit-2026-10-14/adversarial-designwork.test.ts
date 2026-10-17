@@ -1,16 +1,18 @@
-// Independent adversarial pass (breaker lane) over `designWorkRows`' new
-// `options.omitChatProjectIds` (panel/api.ts) and the `renderDesignSection`
-// wiring (panel/main.ts). Attacks the omission contract's failure modes the
-// appended suite tests do not pin: state precedence UNDER options, duplicate
-// project ids, exact-id matching (prefix / case), sort stability under ties,
-// input purity, and the renderer's omit-set derivation at source level — the
-// same way this suite pins main.ts by source text elsewhere.
+// Independent adversarial pass (breaker lane) over the workspaces design-work
+// list: `joinWorkspaceSessions` (panel/api.ts), `loadCanvasWorkspaces` and the
+// ws/ scan wiring (panel/main.ts). The fork moved the omission contract from
+// "a listed project hides its own chats" to "a /workspaces row is NEVER hidden
+// — an absent session is a null-join, an absent url is a badge, a broken
+// service is an error". This lane attacks the failure modes the appended suite
+// does not pin: state precedence, duplicate rows, exact-dir matching for the
+// session join (prefix / case / separator normalization), input purity, the
+// clash-avoiding slug, and the renderer's join derivation at source level.
 //
 // Run: node --test --test-concurrency=1 tests/adversarial/design-work-omit-2026-10-14/adversarial-designwork.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import type { DesignChatRow, DesignChatsView, DesignWorkRow, ProjectRow, ProjectsView } from '../../../panel/api.ts';
+import type { WorkspaceRow, WorkspaceWorkRow } from '../../../panel/api.ts';
 
 // Same shim contract as tests/panel-open.test.ts: the SDK's connectHost()
 // needs a `window` before panel/api.ts is imported.
@@ -25,140 +27,110 @@ const shim = {
   documentElement: {},
 };
 
-const { designWorkRows } = await import('../../../panel/api.ts');
+const { joinWorkspaceSessions, uniqueCanvasSlug, normalizeDirPath, wsSessionIdFromKey, workspaceMeta } = await import('../../../panel/api.ts');
 
-function projectRow(id: string, name: string): ProjectRow {
-  return { id, name, directory: `/p/${id}`, config: { type: 'hi-fi', url: 'http://localhost:5173' }, configError: null };
+function row(dir: string, name: string, url?: string): WorkspaceRow {
+  return url ? { dir, name, url } : { dir, name };
 }
 
-function chatRow(sessionId: string, projectId: string, updatedAt: number): DesignChatRow {
-  return { sessionId, projectId, projectName: 'Site', title: `Chat ${sessionId}`, directory: '/p/site', config: null, configError: null, updatedAt };
-}
-
-const listed: ProjectsView = { kind: 'list', rows: [projectRow('p1', 'Site')] };
-type ChatsList = Extract<DesignChatsView, { kind: 'list' }>;
-const chatsOf = (...rows: DesignChatRow[]): ChatsList => ({ kind: 'list', rows });
-const omitting = (...ids: string[]): { omitChatProjectIds: Set<string> } => ({ omitChatProjectIds: new Set(ids) });
-const sequence = (view: { kind: 'list'; rows: ReadonlyArray<DesignWorkRow> }): string[] =>
-  view.rows.map((row) => (row.kind === 'project' ? `project:${row.project.id}` : `chat:${row.chat.sessionId}`));
-
-test('with omit options a chats-source error still takes the merged error state', () => {
-  const view = designWorkRows(listed, { kind: 'error', message: 'Could not load design chats for Site.' }, omitting('p1'));
-  assert.ok(view.kind === 'error', 'an options object must not mask a chats-source failure');
-  assert.equal(view.message, 'Could not load design chats for Site.', 'the chats error message itself surfaces');
+test('every /workspaces row survives the join — missing url, missing screens, no session: all keep the row', () => {
+  const rows = [
+    row('/root/a', 'A'),
+    row('/root/b', 'B', 'http://localhost:5173'),
+    { dir: '/root/c', name: 'C', screens: [] },
+  ];
+  const joined = joinWorkspaceSessions(rows, new Map());
+  assert.equal(joined.length, 3, 'no row can drop out of the design-work list');
+  assert.ok(joined.every((r) => r.sessionId === null), 'nothing maps without a ws/ record');
+  assert.deepEqual(joined.map((r) => r.dir), ['/root/a', '/root/b', '/root/c'], 'the /workspaces order is preserved');
 });
 
-test('with omit options a projects-source error still outranks a chats-source error', () => {
-  const view = designWorkRows(
-    { kind: 'error', message: 'Could not load projects.' },
-    { kind: 'error', message: 'Could not load design chats for Site.' },
-    omitting('p1'),
-  );
-  assert.ok(view.kind === 'error');
-  assert.equal(view.message, 'Could not load projects.', 'the projects message wins when both sources failed');
+test('the session join matches dirs exactly after normalization: prefixes, separator and drive-case cannot conflate', () => {
+  const map = new Map<string, string>([
+    [normalizeDirPath('C:\\Docs\\Design Canvas\\a-1'), 'ses_a'],
+  ]);
+  const rows = [
+    row('c:/Docs/Design Canvas/a-1', 'A'),            // separators + drive-case only → MATCHES
+    row('C:\\Docs\\Design Canvas\\a-10', 'A ten'),     // prefix lookalike → must NOT match
+    row('/Docs/Design Canvas/a-1', 'posix lookalike'), // different root → must NOT match
+  ];
+  const joined = joinWorkspaceSessions(rows, map);
+  assert.equal(joined[0]!.sessionId, 'ses_a', 'the dir matches after separator/drive normalization');
+  assert.equal(joined[1]!.sessionId, null, 'a-10 is not a-1: exact-dir matching only');
+  assert.equal(joined[2]!.sessionId, null, 'a posix path is not the win32 dir');
 });
 
-test('with omit options a loading source still holds the merged list loading, in both directions', () => {
-  assert.equal(
-    designWorkRows(listed, { kind: 'loading' }, omitting('p1')).kind,
-    'loading',
-    'a loading chats source keeps the merged list loading even with an omit set',
+test('duplicate workspace rows keep both entries and share the mapped session', () => {
+  const joined = joinWorkspaceSessions(
+    [row('/root/a', 'first'), row('/root/a', 'second copy')],
+    new Map([[normalizeDirPath('/root/a'), 'ses_dup']]),
   );
-  assert.equal(
-    designWorkRows({ kind: 'loading' }, chatsOf(chatRow('s1', 'p1', 10)), omitting('p1')).kind,
-    'loading',
-    'a loading projects source keeps the merged list loading even with an omit set',
-  );
+  assert.equal(joined.length, 2, 'both rows stay in disk order');
+  assert.deepEqual(joined.map((r) => r.sessionId), ['ses_dup', 'ses_dup']);
 });
 
-test('duplicate listed project ids keep both rows and omit their shared chats once', () => {
-  const view = designWorkRows(
-    { kind: 'list', rows: [projectRow('p1', 'Site'), projectRow('p1', 'Site again')] },
-    chatsOf(chatRow('s1', 'p1', 10), chatRow('s2', 'p9', 5)),
-    omitting('p1'),
-  );
-  assert.ok(view.kind === 'list');
-  assert.deepEqual(
-    view.rows.map((row) => (row.kind === 'project' ? `project:${row.project.id}` : `chat:${row.chat.sessionId}`)),
-    ['project:p1', 'project:p1', 'chat:s2'],
-    'both duplicate rows stay in workspace order; the shared-id chat is omitted exactly once',
-  );
+test('joinWorkspaceSessions never mutates its inputs and returns fresh rows', () => {
+  const rows: WorkspaceWorkRow[] = [
+    { dir: '/root/a', name: 'A', sessionId: null },
+    { dir: '/root/b', name: 'B', url: 'http://localhost:5173', sessionId: null },
+  ];
+  Object.freeze(rows);
+  for (const r of rows) Object.freeze(r);
+  const map = new Map<string, string>([[normalizeDirPath('/root/a'), 'ses_a']]);
+  const before = structuredClone(rows);
+  const first = joinWorkspaceSessions(rows, map);
+  const second = joinWorkspaceSessions(rows, map);
+  assert.deepEqual(rows, before, 'the input rows are untouched');
+  assert.ok(first[0] !== second[0], 'each call returns fresh row objects');
+  assert.ok(first[0] !== rows[0], 'the input objects are never reused');
 });
 
-test('the renderer derives the omit set from the listed project rows only, and passes it only unfiltered', async () => {
+test('a workspace row with neither a url nor a name still renders (meta and label fall back, the row is never filtered)', async () => {
+  assert.equal(workspaceMeta({ dir: '/root/c', name: '' }), '/root/c', 'meta falls back to the dir');
   const text = await readFile(new URL('../../../panel/main.ts', import.meta.url), 'utf8');
-  assert.match(
-    text,
-    /const listedIds = state\.projects\?\.kind === 'list' \? new Set\(state\.projects\.rows\.map\(\(row\) => row\.id\)\) : new Set<string>\(\);/,
-    'the omit set is built from the LISTED project rows, so a config-less project that dropped out keeps its chats',
-  );
-  assert.match(
-    text,
-    /state\.projectFilter\s*\?\s*undefined\s*:\s*\{\s*omitChatProjectIds/,
-    'the omit set is passed only when no project filter is active, so Open sessions keeps its chats',
-  );
-  assert.doesNotMatch(
-    text,
-    /omitChatProjectIds:(?!\s*listedIds\b)/,
-    'nothing but the listed-rows set is ever passed as the omit set',
-  );
+  const listStart = text.indexOf('function renderWorkspaceListRow(');
+  const list = text.slice(listStart, text.indexOf('async function openWorkspaceListRow('));
+  assert.match(list, /row\.name \|\| fileBaseName\(row\.dir\)/, 'the label falls back to the dir basename');
+  assert.equal(/(configError|continue;)/.test(list), false, 'no filter drops a rendered workspace row');
 });
 
-test('designWorkRows never mutates its inputs and returns a fresh list', () => {
-  const chats = chatsOf(chatRow('s1', 'p2', 5), chatRow('s2', 'p9', 10), chatRow('s3', 'p1', 100));
-  const projects: ProjectsView = { kind: 'list', rows: [projectRow('p1', 'Site')] };
-  const options = omitting('p1');
-  Object.freeze(chats.rows);
-  for (const row of chats.rows) Object.freeze(row);
-  Object.freeze(projects.rows);
-  for (const row of projects.rows) Object.freeze(row);
-  Object.freeze(options);
-  const chatsBefore = structuredClone(chats.rows);
-  const setIdsBefore = [...options.omitChatProjectIds];
-  const first = designWorkRows(projects, chats, options);
-  const second = designWorkRows(projects, chats, options);
-  assert.ok(first.kind === 'list' && second.kind === 'list');
-  assert.deepEqual(
-    sequence(first),
-    ['project:p1', 'chat:s2', 'chat:s1'],
-    'the newest-first order comes from a copy, not from reordering the input',
-  );
-  assert.deepEqual(chats.rows, chatsBefore, 'the chats input array and its row objects are untouched');
-  assert.equal(Object.keys(options).length, 1, 'the options object keeps exactly its own key');
-  assert.deepEqual([...options.omitChatProjectIds], setIdsBefore, 'the omit set is not drained or reordered');
-  assert.ok(first.rows !== second.rows, 'each call returns a fresh list');
+test('a /workspaces failure surfaces the error state — it never masquerades as "empty"', async () => {
+  const text = await readFile(new URL('../../../panel/main.ts', import.meta.url), 'utf8');
+  const start = text.indexOf('async function loadCanvasWorkspaces(');
+  const body = text.slice(start, text.indexOf('async function loadDesignHome('));
+  assert.match(body, /state\.workspaces = \{ kind: 'error', message: error instanceof Error \? error\.message : String\(error\) \}/, 'a failed read is an error, not a list');
+  const errorLine = body.indexOf("kind: 'error'");
+  const emptyLine = body.indexOf("kind: 'empty'");
+  assert.ok(errorLine > 0 && emptyLine > errorLine, 'the error state precedes the empty computation — precedence is pinned');
 });
 
-test('chats with equal updatedAt keep their snapshot order (the recency sort is stable)', () => {
-  const view = designWorkRows(
-    { kind: 'empty' },
-    chatsOf(chatRow('z9', 'p9', 7), chatRow('a1', 'p9', 7), chatRow('m5', 'p9', 3)),
-    omitting('p1'),
-  );
-  assert.ok(view.kind === 'list');
-  assert.deepEqual(
-    view.rows.map((row) => (row.kind === 'project' ? `project:${row.project.id}` : `chat:${row.chat.sessionId}`)),
-    ['chat:z9', 'chat:a1', 'chat:m5'],
-    'equal timestamps resolve in snapshot order, with no hidden tie-break',
-  );
+test('the ws/ scan is one storage.keys() pass whose values are read per key — and the permission flag never parses as a session', async () => {
+  const text = await readFile(new URL('../../../panel/main.ts', import.meta.url), 'utf8');
+  const start = text.indexOf('async function readWorkspaceSessionMap(');
+  const body = text.slice(start, text.indexOf('async function loadCanvasWorkspaces('));
+  assert.equal((body.match(/storage\.keys\(\)/g) ?? []).length, 1, 'a SINGLE keys() pass per refresh (audit #19)');
+  assert.match(body, /isWorkspaceRecord\(value\)/, 'a value is validated before it maps');
+  assert.match(body, /map\.set\(normalizeDirPath\(value\.dir\), id\)/, 'the map key is the normalized dir');
+  assert.equal(wsSessionIdFromKey('ws-permission-notified'), null, 'the flat permission flag key is never a session id');
+  assert.equal(wsSessionIdFromKey('ws/'), null);
+  assert.equal(wsSessionIdFromKey('ws/a/b'), 'a/b', 'session ids keep their own slashes');
 });
 
-test('a chat whose projectId extends a listed id is kept (exact-id match only)', () => {
-  const view = designWorkRows(listed, chatsOf(chatRow('s1', 'p1-x', 10)), omitting('p1'));
-  assert.ok(view.kind === 'list');
-  assert.deepEqual(
-    sequence(view),
-    ['project:p1', 'chat:s1'],
-    'p1-x is not p1: a prefix match must not omit the chat',
-  );
+test('the unique slug always avoids the exact basenames already on disk, suffixing deterministically', () => {
+  const existing = ['/root/landing-one', 'C:\\root\\landing-one-2', '/root/landing-one-3'];
+  const slugs = Array.from({ length: 6 }, (_, i) => uniqueCanvasSlug('landing', 'ses_one', [...existing, ...Array.from({ length: i }, (_, k) => `/root/landing-one-${k + 4}`)]));
+  assert.equal(slugs[0], 'landing-one-4', 'all of one, one-2 and one-3 are taken');
+  assert.equal(new Set(slugs).size, slugs.length, 'each call yields a fresh suffix');
+  assert.ok(slugs.every((slug) => /^[a-z0-9-]+$/.test(slug)), 'every slug is [a-z0-9-] sanitized');
+  assert.equal(uniqueCanvasSlug('landing', 'ses_one', ['/root/other']), 'landing-one', 'the tail is the id segment, not the id prefix');
 });
 
-test('a chat whose projectId differs only by case is kept (exact-id match only)', () => {
-  const view = designWorkRows(listed, chatsOf(chatRow('s1', 'P1', 10)), omitting('p1'));
-  assert.ok(view.kind === 'list');
-  assert.deepEqual(
-    sequence(view),
-    ['project:p1', 'chat:s1'],
-    'P1 is not p1: case-insensitive matching must not omit the chat',
-  );
+test('the workspace-target resolution has no refusal state at all (decision 2)', async () => {
+  const text = await readFile(new URL('../../../panel/api.ts', import.meta.url), 'utf8');
+  const start = text.indexOf('export function resolveCanvasTarget(');
+  const end = text.indexOf('// ---- slug creation');
+  const body = text.slice(start, end);
+  assert.equal(/needs-project|refuse/i.test(body), false, 'no refusal kind exists');
+  assert.match(body, /kind: 'workspace'/, 'a bound workspace is a real target');
+  assert.match(body, /kind: 'new'/, 'an unbound session scaffolds fresh');
 });

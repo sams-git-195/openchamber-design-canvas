@@ -128,3 +128,13 @@
     @apply font-sans;
     }
 }
+
+/* V4-12: the "Designing…" toolbar chip pulses while the agent owns the turn. */
+@keyframes ds-agent-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+.ds-agent-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 9999px;
+    background: var(--primary);
+    animation: ds-agent-pulse 1.2s ease-in-out infinite;
+}

@@ -11,8 +11,9 @@ import { fileURLToPath } from 'node:url';
 import { createServer, type Server } from 'node:http';
 import path from 'node:path';
 
+import { liveTest } from './helpers/chrome.ts';
+
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const CHROME = process.env.DS_CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const TOKEN = 'verify-acceptance-token';
 const AUTH = { authorization: `Bearer ${TOKEN}` };
 
@@ -72,10 +73,9 @@ type Report = {
 };
 
 test('POST /verify runs the five-gate matrix and GET /verify/report returns it', { timeout: 120_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  // V4-16 sweep (D carry-over 1, integrator): honest Chrome gate — the old
+  // mac-path constant silently skipped this suite on Windows/Linux.
+  if (!(await liveTest(t))) return;
 
   const site = createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });

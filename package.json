@@ -1,7 +1,7 @@
 {
-  "name": "openchamber-design-studio",
-  "version": "0.1.0",
-  "description": "OpenChamber Design Studio \u2014 a chat-driven design harness with a live sandboxed preview and point-and-edit into the standard OpenChamber chat.",
+  "name": "openchamber-design-canvas",
+  "version": "0.2.0",
+  "description": "OpenChamber Design Canvas — a project-free, multi-screen artboard canvas with live edit/play and point-and-edit into the standard OpenChamber chat.",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -14,13 +14,13 @@
     "live-preview",
     "ai-agent"
   ],
-  "homepage": "https://github.com/lastonoga/openchamber-design-studio#readme",
+  "homepage": "https://github.com/sams-git-195/openchamber-design-canvas#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lastonoga/openchamber-design-studio.git"
+    "url": "https://github.com/sams-git-195/openchamber-design-canvas.git"
   },
   "bugs": {
-    "url": "https://github.com/lastonoga/openchamber-design-studio/issues"
+    "url": "https://github.com/sams-git-195/openchamber-design-canvas/issues"
   },
   "openchamber": {
     "apiVersion": 1,
@@ -29,19 +29,19 @@
     },
     "contributes": {
       "panel": {
-        "id": "design-studio",
-        "name": "OpenChamber Design Studio",
+        "id": "design-canvas",
+        "name": "Design Canvas",
         "icon": "icon.svg",
         "entry": "panel/index.html"
       },
       "page": {
         "entry": "panel/index.html",
-        "title": "OpenChamber Design Studio"
+        "title": "Design Canvas"
       },
       "commands": [
         {
-          "name": "design",
-          "description": "Toggle Design Mode and attach design context"
+          "name": "canvas",
+          "description": "Start or toggle the design canvas and attach design context"
         }
       ],
       "capabilities": [
@@ -50,8 +50,8 @@
       ],
       "statusSection": {
         "entry": "panel/index.html",
-        "title": "Design Mode",
-        "requiresProject": true,
+        "title": "Canvas",
+        "requiresProject": false,
         "defaultExpanded": true,
         "height": 84
       },
@@ -69,7 +69,7 @@
     "build:viewer": "node scripts/build-viewer.mjs",
     "typecheck:viewer": "tsc --noEmit -p viewer-client/tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --test-concurrency=1 'tests/*.test.ts'",
+    "test": "node --test --test-concurrency=1 \"tests/*.test.ts\"",
     "check": "npm run typecheck && npm run build && npm run test"
   },
   "devDependencies": {
@@ -90,5 +90,10 @@
     "tailwindcss": "^4.3.3",
     "tw-animate-css": "^1.4.0",
     "typescript": "^5.7.0"
+  },
+  "allowScripts": {
+    "esbuild@0.24.2": true,
+    "@tailwindcss/oxide@4.3.3": true,
+    "@parcel/watcher@2.5.1": true
   }
 }

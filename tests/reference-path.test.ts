@@ -6,7 +6,27 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import * as projectFiles from '../service/project-files.ts';
+
+/**
+ * True when this platform can create a plain FILE symlink. win32 needs
+ * developer mode (EPERM otherwise); junctions cannot stand in for file links,
+ * so the symlink-semantics pins run where the fixture can actually exist.
+ */
+async function symlinkCapable(): Promise<boolean> {
+  if (process.platform !== 'win32') return true;
+  const dir = await mkdtemp(path.join(tmpdir(), 'ds-ref-linkcap-'));
+  try {
+    await writeFile(path.join(dir, 'a'), 'x');
+    await symlink(path.join(dir, 'a'), path.join(dir, 'b'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
 
 async function fixture(run: (root: string, base: string) => Promise<void>): Promise<void> {
   const base = await mkdtemp(path.join(tmpdir(), 'ds-reference-'));
@@ -23,7 +43,11 @@ function resolver(): (dir: string, input: string) => Promise<{ path: string; sou
   return resolve as ReturnType<typeof resolver>;
 }
 
-test('relative pasted paths capture a canonical source root and resolve file symlinks', async () => {
+test('relative pasted paths capture a canonical source root and resolve file symlinks', async (t) => {
+  if (!(await symlinkCapable())) {
+    t.skip('plain symlinks need developer mode on this win32 host');
+    return;
+  }
   await fixture(async (root, base) => {
     const resolve = resolver();
     await symlink(root, path.join(base, 'source-link'));
@@ -56,7 +80,11 @@ test('nonexistent files and directories are rejected with an actionable reason',
   });
 });
 
-test('relative traversal and file/directory symlink escapes are rejected', async () => {
+test('relative traversal and file/directory symlink escapes are rejected', async (t) => {
+  if (!(await symlinkCapable())) {
+    t.skip('plain symlinks need developer mode on this win32 host');
+    return;
+  }
   await fixture(async (root, base) => {
     const resolve = resolver();
     await symlink(path.join(base, 'external.ts'), path.join(root, 'escape.ts'));
@@ -80,7 +108,7 @@ test('empty/control-character paths and non-absolute source roots are rejected',
   });
 });
 
-test('an unreadable regular file is rejected', { skip: process.getuid?.() === 0 ? 'root can read mode-000 files' : false }, async () => {
+test('an unreadable regular file is rejected', { skip: process.getuid?.() === 0 ? 'root can read mode-000 files' : process.platform === 'win32' ? 'windows cannot express mode-0 unreadability' : false }, async () => {
   await fixture(async (root) => {
     const resolve = resolver();
     const file = path.join(root, 'same.ts');
@@ -99,7 +127,7 @@ test('source service exposes authenticated POST /reference validation without a 
     assert.ok(address && typeof address === 'object');
     const port = address.port;
     await new Promise<void>((resolve) => probe.close(() => resolve()));
-    const child = spawn(process.execPath, [new URL('../service/main.ts', import.meta.url).pathname], {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../service/main.ts', import.meta.url))], {
       env: { ...process.env, OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: 'reference-test' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

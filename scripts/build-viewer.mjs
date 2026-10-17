@@ -1,5 +1,6 @@
 // Packaging seam only. The real stage-2 entry must exist; no placeholder UI.
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -11,7 +12,7 @@ const option=name=>{const at=process.argv.indexOf(name);return at<0?undefined:pr
 const entry=path.resolve(root,option('--entry')??'viewer-client/src/main.tsx');
 const output=path.resolve(root,option('--out')??'service/viewer-assets.generated.ts');
 try{await fs.access(entry);}catch{throw new Error(`Viewer entry missing: ${entry}. Stage 2 must provide the real React toolbar entry before npm run build:viewer; no placeholder assets were written.`);}
-const scratch=await fs.mkdtemp(path.join(process.env.TMPDIR??'/tmp','stock-viewer-build-'));
+const scratch=await fs.mkdtemp(path.join(os.tmpdir(),'stock-viewer-build-'));
 const hash=value=>createHash('sha256').update(value).digest('hex');
 try{
   const cssSource=path.join(root,'viewer-client/src/index.css'),tailwindOutput=path.join(scratch,'tailwind.css');

@@ -45,6 +45,14 @@ test('readStudioConfig returns nulls when no config exists', async () => {
   assert.deepEqual(await readStudioConfig(root), { config: null, path: null });
 });
 
+test('canvas pagesRoot round-trips (scaffold writes it)', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'ds-config-pages-'));
+  const text = JSON.stringify({ version: 1, url: 'http://localhost:5173', pagesRoot: '.' }, null, 2);
+  await writeStudioConfig(root, null, text);
+  const { config } = await readStudioConfig(root);
+  assert.equal((config as Record<string, unknown> | null)?.pagesRoot, '.');
+});
+
 test('writeStudioConfig refuses escapes and invalid JSON', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'ds-config-bad-'));
   await assert.rejects(() => writeStudioConfig(root, '../evil.json', '{}'));
