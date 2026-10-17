@@ -124,15 +124,6 @@ export function openWorkspace(input: { dir: string; screen?: string }): Promise<
 }
 
 /**
- * Legacy helper retained for the raw-url flow (shared by server-stop paths):
- * open (or navigate) the real window to `url`, sending `dir` so the service can
- * start the workspace's dev server when the url is loopback.
- */
-export function openLive(url: string, dir?: string): Promise<OpenResult> {
-  return callService<OpenResult>('/open', undefined, 'POST', JSON.stringify(dir ? { url, dir } : { url }));
-}
-
-/**
  * Close the live Chrome window and quit Chrome. The service removes the
  * throwaway profile, so a later open relaunches fresh.
  */
@@ -295,6 +286,70 @@ export function getScreens(dir: string): Promise<ScreensRegistry> {
  * row action can repair a registry; the agent normally writes screens.json. */
 export function putScreens(dir: string, registry: ScreensRegistry): Promise<{ path: string }> {
   return callService<{ path: string }>('/screens', { dir }, 'PUT', JSON.stringify(registry));
+}
+
+// ---- export (SPEC-V3-P2-SCOPE.md D4, `POST /export` + `GET /export/status`) ----
+
+/** The formats an export job can write (D4): per-screen PNG and/or PDF. */
+export type ExportFormat = 'png' | 'pdf';
+
+/** What `POST /export` answers: the single-flight job to poll, or the failure. */
+export type ExportStartResult =
+  | { ok: true; jobId: string; screens: number; formats: ExportFormat[] }
+  | { ok: false; error: string };
+
+/** One file outcome inside a job result; partial success is a valid outcome (D4). */
+export type ExportFileResult = { ok: true; file: string } | { ok: false; error: string };
+
+/** One screen's outcome inside a job result (D4/D7-B `results[]` entries). */
+export type ExportScreenResult = { screen: string; png?: ExportFileResult; pdf?: ExportFileResult };
+
+/** What `GET /export/status?dir=&job=` answers while polling the job. */
+export type ExportStatusResult = {
+  state: 'running' | 'done' | 'failed';
+  startedAt?: string;
+  results: ExportScreenResult[];
+};
+
+/**
+ * Start (or join) the workspace's export job. Formats omitted → the service
+ * writes both. The service is single-flight: if a job is already running the
+ * answer carries THAT job's id — "join-running" is just polling it (D4).
+ */
+export function exportJob(dir: string, formats?: ExportFormat[]): Promise<ExportStartResult> {
+  const body = formats && formats.length > 0 ? { dir, formats } : { dir };
+  return callService<ExportStartResult>('/export', undefined, 'POST', JSON.stringify(body));
+}
+
+/** Poll one export job: `GET /export/status?dir=<dir>&job=<job>` (D4). */
+export function exportStatus(dir: string, job: string): Promise<ExportStatusResult> {
+  return callService<ExportStatusResult>('/export/status', { dir, job });
+}
+
+// ---- critique (SPEC-V3-P2-SCOPE.md D7-C, `POST /critique {dir}`) ----
+
+/** One gate's outcome inside a critique digest (findings capped at 3, service-side). */
+export type CritiqueGateDigest = { id: string; status: string; findings: string[] };
+
+/** One screen's line in the critique digest (the bounded shape spec D7-C names). */
+export type CritiqueScreenDigest = {
+  screen: string;
+  state: string;
+  url: string;
+  width: number;
+  height: number;
+  gates: CritiqueGateDigest[];
+  probeCounts: unknown;
+};
+
+/** What `POST /critique` answers: the bounded digest (≤12 screens, `truncated` beyond). */
+export type CritiqueResult =
+  | { ok: true; screens: CritiqueScreenDigest[]; truncated?: boolean }
+  | { ok: false; error?: string };
+
+/** Ask the service for the deterministic per-screen gate digest (D7-C). */
+export function critiqueWorkspace(dir: string): Promise<CritiqueResult> {
+  return callService<CritiqueResult>('/critique', undefined, 'POST', JSON.stringify({ dir }));
 }
 
 /** What the workspaces list should show, derived from a `GET /workspaces` read. */

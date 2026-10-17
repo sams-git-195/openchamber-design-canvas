@@ -115,10 +115,23 @@ test('the generated source has no relocation or isolation filesystem machinery',
   assert.doesNotMatch(source, /workspace is EMPTY|scaffold the project HERE/);
 });
 
-test('the workspace note preserves root apps and legacy session directories', () => {
-  assert.match(DESIGN_WORKSPACE_NOTE, /selected registered design project itself is the workspace/);
-  assert.match(DESIGN_WORKSPACE_NOTE, /reuse the existing app/);
-  assert.match(DESIGN_WORKSPACE_NOTE, /legacy child directories stay there/);
+test('the workspace note is the shipped canvas protocol, not the old relocation note', () => {
+  // P1-panel's mandated reword (FORK-DESIGN-CANVAS.md decision 5, shipped):
+  // the note now teaches the canvas workspace — absolute-path discipline and
+  // the screens.json protocol. The registered-project relocation copy is gone.
+  assert.match(DESIGN_WORKSPACE_NOTE, /The canvas workspace is a Vite multi-page app/);
+  assert.match(DESIGN_WORKSPACE_NOTE, /screens\.json/);
+  assert.match(DESIGN_WORKSPACE_NOTE, /root-level \*\.html/);
+  assert.match(DESIGN_WORKSPACE_NOTE, /200–8192/);
+  assert.match(DESIGN_WORKSPACE_NOTE, /meta-refresh redirect to home\.html/);
+  assert.match(DESIGN_WORKSPACE_NOTE, /absolute path in every file write/, 'the absolute-path discipline is stated');
+  assert.match(DESIGN_WORKSPACE_NOTE, /does NOT run inside the workspace/);
+  assert.doesNotMatch(DESIGN_WORKSPACE_NOTE, /selected registered design project itself is the workspace/, 'the project-relocation copy is gone');
+  assert.doesNotMatch(DESIGN_WORKSPACE_NOTE, /legacy child directories stay there/, 'the legacy-directory copy is gone');
+  // The adversarial intent stays: the CANVAS_PROTOCOL lines must NOT sneak into
+  // this note — the protocol ships via the session prompt / mode chip (D8), and
+  // positions (view.json) are the user's, never agent copy.
+  assert.doesNotMatch(DESIGN_WORKSPACE_NOTE, /view\.json/, 'position persistence is not the note\'s business');
 });
 
 /** Import the generated plugin as real ESM from a temp file. */

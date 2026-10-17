@@ -17,7 +17,7 @@
 // (Start creates the workspace on first use). The canvas itself is a real
 // headful Chrome window the local service opens on the workspace dir; this page
 // only opens it, raises it and reads its state. English-only copy by requirement.
-import { type HostReadyContext } from '@openchamber/sdk';
+import { type HostReadyContext, GUEST_COMPOSE_TEXT_MAX } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 
 import {
@@ -35,6 +35,9 @@ import {
   canvasSessionStatus,
   closeLive,
   countOtherActiveDesignSessions,
+  critiqueWorkspace,
+  exportJob,
+  exportStatus,
   focusLive,
   formatOpenStatus,
   getConfig,
@@ -63,6 +66,7 @@ import {
   workspaceMeta,
   wsSessionIdFromKey,
   type CanvasScreenState,
+  type ExportFormat,
   type LiveState,
   type PickPayload,
   type RegisteredProject,
@@ -85,6 +89,7 @@ import {
   TYPE_HINT,
   attachUrl,
   buildModeChip,
+  critiqueReviewChip,
   designMarkerKey,
   designMarkerValue,
   designSessionIdFromKey,
@@ -92,11 +97,14 @@ import {
   designSystemGroups,
   designSystemLabel,
   designSystemSwatches,
+  exportFailureSummary,
+  exportJobSummary,
   fileBaseName,
   fileReferenceChip,
   filterDesignSystems,
   findDesignSystem,
   modeStorageKey,
+  parseCanvasExportArgs,
   parseDesignArgs,
   popoverStep,
   projectHttpUrl,
@@ -614,6 +622,16 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
   // `/canvas` toggles Design Mode ON/OFF; "play"/"edit" switch the canvas mode,
   // "on…" turns it ON, "off" turns it OFF, and a brief turns it ON for this chat
   // — the canvas workspace is created when the chat does not have one yet.
+  // `export` and `critique` are reserved verbs (SPEC-V3-P2-SCOPE.md D7-B/C):
+  // they never fall through to the brief branch.
+  const [head = '', ...rest] = args.trim().split(/\s+/);
+  if (/^export$/i.test(head!)) {
+    await canvasExportCommand(rest.join(' '));
+    return null;
+  }
+  if (/^critique$/i.test(head!)) {
+    return await canvasCritiqueCommand();
+  }
   const parsed = parseDesignArgs(args);
   if (!parsed.on) {
     await toggleMode(false);
@@ -645,6 +663,112 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
   }
   await toggleMode(true, parsed.type, parsed.brief || undefined);
   return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), state.config?.url);
+}
+
+// ---- /canvas export & critique (SPEC-V3-P2-SCOPE.md D4/D7-B/D7-C) ----
+
+/** The export poll contract (D4): every 700 ms, giving up with a heads-up after ~60 s. */
+const EXPORT_POLL_MS = 700;
+const EXPORT_POLL_MAX_MS = 60_000;
+
+const EXPORT_STILL_RUNNING_MESSAGE = 'Export is still running — files land in the workspace exports folder as each screen finishes.';
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * POST /export for the workspace, then poll /export/status every 700 ms until
+ * the job is done/failed or ~60 s pass (then toast "still running" and stop).
+ * Join-running (D4) is service-side: a second POST while a job runs answers
+ * with THAT job's id — the panel's only job is to poll the returned id, so a
+ * repeated command during a long export simply re-polls the same job.
+ * `timing` is a test seam; production always uses the D4 defaults.
+ */
+export async function runCanvasExport(
+  dir: string,
+  formats: ExportFormat[] | undefined,
+  timing: { pollMs: number; maxMs: number } = { pollMs: EXPORT_POLL_MS, maxMs: EXPORT_POLL_MAX_MS },
+): Promise<void> {
+  let start: Awaited<ReturnType<typeof exportJob>>;
+  try {
+    start = await exportJob(dir, formats);
+  } catch (error) {
+    await host.toast({ kind: 'error', message: `Export failed: ${error instanceof Error ? error.message : String(error)}` });
+    return;
+  }
+  if (!start.ok) {
+    await host.toast({ kind: 'error', message: start.error || 'Export failed.' });
+    return;
+  }
+  const job = start.jobId;
+  const deadline = Date.now() + timing.maxMs;
+  for (;;) {
+    let status: Awaited<ReturnType<typeof exportStatus>>;
+    try {
+      status = await exportStatus(dir, job);
+    } catch (error) {
+      await host.toast({ kind: 'error', message: `Could not read the export status: ${error instanceof Error ? error.message : String(error)}` });
+      return;
+    }
+    if (status.state === 'done') {
+      const lines = exportJobSummary(status);
+      const text = lines.join('\n');
+      // GUEST_TOAST_MAX (500) bounds every toast; truncate honestly rather
+      // than let the host silently cut a path mid-character.
+      await host.toast({ kind: 'success', message: text.length > 480 ? `${text.slice(0, 480)}…` : text });
+      return;
+    }
+    if (status.state === 'failed') {
+      const text = exportFailureSummary(status);
+      await host.toast({ kind: 'error', message: text.length > 480 ? `${text.slice(0, 480)}…` : text });
+      return;
+    }
+    if (Date.now() >= deadline) {
+      await host.toast({ kind: 'info', message: EXPORT_STILL_RUNNING_MESSAGE });
+      return;
+    }
+    await sleep(timing.pollMs);
+  }
+}
+
+/** `/canvas export [png|pdf]`: the workspace's screens → files under <dir>/exports. */
+export async function canvasExportCommand(raw: string): Promise<void> {
+  const parsed = parseCanvasExportArgs(raw);
+  if ('error' in parsed) {
+    await host.toast({ kind: 'error', message: parsed.error });
+    return;
+  }
+  const ws = state.workspace;
+  if (!ws || ws.dir.trim() === '') {
+    await host.toast({ kind: 'error', message: 'No canvas workspace yet — /canvas <brief> creates one, then export again.' });
+    return;
+  }
+  await runCanvasExport(ws.dir, 'formats' in parsed ? parsed.formats : undefined);
+}
+
+/**
+ * `/canvas critique`: POST /critique for the workspace and compose the bounded
+ * gate digest into the chat as a REVIEW REQUEST (D7-C) — the agent writes the
+ * prose; the service guarantees the gate-backed part. The chip text is capped
+ * at GUEST_COMPOSE_TEXT_MAX by critiqueReviewChip.
+ */
+export async function canvasCritiqueCommand(): Promise<null | Awaited<ReturnType<typeof buildModeChip>>> {
+  const ws = state.workspace;
+  if (!ws || ws.dir.trim() === '') {
+    await host.toast({ kind: 'error', message: 'No canvas workspace yet — /canvas <brief> creates one, then critique again.' });
+    return null;
+  }
+  let digest: Awaited<ReturnType<typeof critiqueWorkspace>>;
+  try {
+    digest = await critiqueWorkspace(ws.dir);
+  } catch (error) {
+    await host.toast({ kind: 'error', message: `Critique failed: ${error instanceof Error ? error.message : String(error)}` });
+    return null;
+  }
+  if (!digest.ok) {
+    await host.toast({ kind: 'error', message: digest.error || 'Critique failed.' });
+    return null;
+  }
+  return critiqueReviewChip(state.sessionId, state.config?.url, digest);
 }
 
 // ---- canvas sessions ----
@@ -804,6 +928,15 @@ async function startNewDesign(): Promise<void> {
   const references = state.surface === 'page' ? [...state.references] : undefined;
   rerender();
   try {
+    // An oversized brief fails loudly instead of letting the host silently
+    // clamp the draft (the compose cap the SDK enforces is
+    // GUEST_COMPOSE_TEXT_MAX — a clamped brief is data loss, never delivery).
+    if (spec.brief.length > GUEST_COMPOSE_TEXT_MAX) {
+      state.pageError = `The design brief is too long (${spec.brief.length} of ${GUEST_COMPOSE_TEXT_MAX} characters). Shorten it, then send again.`;
+      rerender();
+      await host.toast({ kind: 'error', message: state.pageError });
+      return;
+    }
     const prep = await scaffoldCurrentProject(spec);
     if (prep.kind === 'failed') {
       // The session still starts in the agent-scaffolds fallback: the prompt
@@ -2802,10 +2935,9 @@ export function buildRow(root: HTMLElement): void {
   modeToggleBtn.addEventListener('click', () => {
     void toggleMode(!state.mode.on);
   });
-  // The play/edit toggle, sourced from /state (spec §F).
-  // FORK-MERGE: ds-play-toggle / ds-screen-select / ds-focus reuse existing
-  // classes only — a styling pass for the new controls needs styles.css (owned
-  // by the P2 integration phase; not editable from the panel lane).
+  // The play/edit toggle, sourced from /state (spec §F). The row controls
+  // (ds-play-toggle / ds-screen-select / ds-focus) are styled in
+  // panel/styles.css — same 30px rhythm as the Start/Stop icon button.
   playToggleBtn = q<HTMLButtonElement>('button', 'ds-chip ds-play-toggle');
   playToggleBtn.hidden = true;
   playToggleBtn.addEventListener('click', () => void onPlayToggleClick());

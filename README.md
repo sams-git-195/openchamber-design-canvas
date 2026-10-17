@@ -57,6 +57,31 @@ of 2026-10-14".
 - **The chat lives OUTSIDE the workspace.** Your agent's prompts mandate the
   absolute workspace path for every file write, edit and bash call — the
   session never needs to move into the workspace folder.
+- **`/canvas critique`** runs the deterministic per-screen gate report and
+  composes it into the chat as a review request for the agent (the 0–10
+  critique is advisory — the agent writes the prose, the service guarantees
+  the gate-backed part).
+- **`/canvas export [png|pdf]`** exports every screen: per-screen PNGs come
+  from the canvas camera, screen-sized PDFs from a hidden throwaway page.
+  Files land in `<workspace>/exports/`. `/canvas export` alone exports both
+  formats. The export is an async job: the panel polls the service for up to
+  ~60 seconds and then asks you to check back ("Export is still running…") —
+  files appear in `exports/` as each screen finishes, and a failing screen is
+  skipped and counted, never a blocker for the rest.
+
+## Usage patterns
+
+The canvas is built for comparison. Three patterns the prompt rules
+(SPEC-V3-P2-SCOPE.md D8) encode, with the preset numbers:
+
+| Ask for… | You get… | The rule |
+| --- | --- | --- |
+| **Responsive triple** — "make it responsive" | Three artboards of the SAME screen: 390×844 phone · 768×1024 tablet · 1280×800 desktop (default) | Responsive = one artboard per real size, never breakpoints hidden inside one file |
+| **Poster / print variants** — "two directions for the poster" | 2–3 complete sibling screens (`home-a`, `home-b`), each its own file + screens.json entry, same size | Variants = side-by-side artboards, never stacked in one file, never hidden behind toggles |
+| **App flow** — "the checkout flow from cart to confirmation" | One artboard per step (cart → details → confirmation), plain `<a href>` links between the screens — clickable in play mode | Each step is its own real HTML page; the flow is the screens' order on the canvas |
+
+Other presets the protocol names: 1440×900 large desktop · 1080×1080 social
+post · 794×1123 A4 print at 96 dpi. Any size within 200–8192 px is allowed.
 
 ## Install
 
@@ -80,6 +105,8 @@ Requirements:
   the workspace folder, which lives outside the chat's own directory. This is
   a one-time heads-up (see decision 4b in `docs/FORK-DESIGN-CANVAS.md`) and the
   only extra prompt the agent will raise beside its normal edit approvals.
+  Exports after that are prompt-free: the panel polls the running export job
+  every ~0.7 s and toasts the file paths when it lands in `exports/`.
 
 ### Coexistence with the original Design Studio
 

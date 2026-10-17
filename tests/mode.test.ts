@@ -16,7 +16,8 @@ const shim = {
   documentElement: {},
 };
 
-const { DEFAULT_MODE, GUEST_ATTACH_TEXT_MAX, VERIFY_PROTOCOL, attachUrl, buildModeChip, designSessionPrompt, isHttpUrl, modeStorageKey, workspaceStorageKey, parseDesignArgs, seedModeFromConfig, seedModeValue, seedSessionData, NO_DESIGN_SYSTEM, designSystemGroups, designSystemLabel, designSystemSwatches, filterDesignSystems, findDesignSystem, isColorTokenValue, attachAvailable, designMarkerKey, designMarkerValue, designSessionIdFromKey, fileBaseName, fileReferenceChip, isDesignMarker, popoverStep, projectHttpUrl, projectReferenceChip } = await import('../panel/mode.ts');
+const { DEFAULT_MODE, GUEST_ATTACH_TEXT_MAX, VERIFY_PROTOCOL, attachUrl, buildModeChip, designSessionPrompt, isHttpUrl, modeStorageKey, workspaceStorageKey, parseDesignArgs, seedModeFromConfig, seedModeValue, seedSessionData, NO_DESIGN_SYSTEM, designSystemGroups, designSystemLabel, designSystemSwatches, filterDesignSystems, findDesignSystem, isColorTokenValue, attachAvailable, designMarkerKey, designMarkerValue, designSessionIdFromKey, fileBaseName, fileReferenceChip, isDesignMarker, popoverStep, projectHttpUrl, projectReferenceChip, parseCanvasExportArgs, exportJobSummary, exportFailureSummary, critiqueReviewText, critiqueReviewChip, CRITIQUE_ADVISORY } = await import('../panel/mode.ts');
+const { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP } = await import('../shared/harness-text.ts');
 const { isModeChipData } = await import('../panel/api.ts');
 const { DESIGN_SYSTEMS } = await import('../shared/design-systems.ts');
 // A type-only import: erased at compile time, so it needs no window shim.
@@ -310,4 +311,171 @@ test('popoverStep walks a list, wraps at both ends and enters from the right sid
   assert.equal(popoverStep(2, 3, 1), 0, 'wraps forward');
   assert.equal(popoverStep(0, 3, -1), 2, 'wraps back');
   assert.equal(popoverStep(0, 0, 1), -1, 'an empty list has no next');
+});
+
+// ---- the CANVAS_PROTOCOL wording (SPEC-V3-P2-SCOPE.md D8 — verbatim) ----
+
+test('CANVAS_PROTOCOL ships the D8 wording verbatim: five lines, exact openings', () => {
+  const lines = CANVAS_PROTOCOL.split('\n');
+  assert.equal(lines.length, 5, 'exactly the five D8 lines');
+  const openings = [
+    'Screens are artboards on one shared canvas. The',
+    'Add or change a screen: write its HTML',
+    'Positions are not design content: never write',
+    'Variants = side-by-side artboards. "Two directions", "options",',
+    'Responsive = one artboard per real size. Presets:',
+  ];
+  for (const [index, opening] of openings.entries()) {
+    assert.equal(lines[index]!.slice(0, opening.length), opening, `line ${index + 1} opens verbatim`);
+  }
+  // The binding details, pinned individually.
+  assert.match(lines[0]!, /\{ "version": 1, "screens": \[ \{ "id", "file", "title", "width", "height" \} \] \}/);
+  assert.match(lines[1]!, /\^\[a-z0-9\]\[a-z0-9-\]\{0,30\}\$/);
+  assert.match(lines[1]!, /sizes 200–8192/);
+  assert.match(lines[2]!, /\.design-studio\/view\.json/);
+  assert.match(lines[3]!, /2–3 complete sibling screens/);
+  assert.match(lines[4]!, /390×844 phone · 768×1024 tablet · 1280×800 desktop \(default\) · 1440×900 large desktop · 1080×1080 social post · 794×1123 A4 print at 96 dpi/);
+  assert.match(lines[4]!, /three artboards of the same screen \(phone, tablet, desktop\)/);
+});
+
+test('the full protocol ships in the session prompt; the trimmed copy ships in the chip', () => {
+  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x' }, WORKSPACE);
+  assert.ok(text.includes(CANVAS_PROTOCOL), 'the prompt embeds the FULL protocol verbatim');
+  const chip = buildModeChip('ses_p', { ...DEFAULT_MODE, on: true }, WORKSPACE);
+  assert.ok((chip.text ?? '').includes(CANVAS_PROTOCOL_CHIP), 'the chip embeds the trimmed protocol verbatim');
+  // Trimmed = D8 lines 1–2 verbatim + the preset numbers of 4–5; the
+  // positions line (3) stays OUT of the chip.
+  assert.ok((chip.text ?? '').includes('Screens are artboards on one shared canvas.'));
+  assert.ok((chip.text ?? '').includes('^[a-z0-9][a-z0-9-]{0,30}$'));
+  assert.ok((chip.text ?? '').includes('mean 2–3 complete sibling screens'));
+  assert.ok((chip.text ?? '').includes('390×844 phone · 768×1024 tablet · 1280×800 desktop (default)'));
+  assert.doesNotMatch(chip.text ?? '', /Positions are not design content/, 'the view.json positions line is not chip text');
+  // The chip order (audit #16): protocol → screens → IDENTITY → authority → VERIFY_PROTOCOL.
+  const t = chip.text ?? '';
+  const at = (needle: string): number => { const i = t.indexOf(needle); assert.ok(i >= 0, `chip contains ${needle}`); return i; };
+  assert.ok(at('screens.json') < at('You are an expert designer'), 'protocol before the trimmed rules');
+  assert.ok(at('You are an expert designer') < at('DESIGN.md and tokens.css'), 'IDENTITY before authority');
+  assert.ok(at('DESIGN.md and tokens.css') < at('Before editing, state'), 'authority before VERIFY_PROTOCOL');
+});
+
+test('the chip budget holds at the 40-screen worst case with the protocol lines (≤16000)', () => {
+  const mode: DesignMode = { ...DEFAULT_MODE, on: true, type: 'hi-fi', brief: 'worst case brief' };
+  // Worst case within the cap: 40 screens at the registry's id/file/title limits.
+  const screens = Array.from({ length: 40 }, (_, i) => ({
+    id: `screen-${String(i).padStart(2, '0')}-abcdefghijklmnop`,
+    file: `screen-${String(i).padStart(2, '0')}-abcdefghijklmnop.html`,
+    title: `Screen ${String(i).padStart(2, '0')} with a long descriptive title`,
+  }));
+  const chip = buildModeChip('ses_budget_worst', mode, WORKSPACE, screens);
+  const length = (chip.text ?? '').length;
+  console.info('chip budget measurement:', JSON.stringify({ screens: 40, worstCaseChipLength: length, cap: GUEST_ATTACH_TEXT_MAX }));
+  assert.ok(length <= GUEST_ATTACH_TEXT_MAX, `the assembled chip fits the cap (${length} ≤ ${GUEST_ATTACH_TEXT_MAX}) — if this ever overflows, drop the chip rules to IDENTITY+VERIFY_PROTOCOL only`);
+  // The full rulebook stays out regardless of the budget.
+  assert.doesNotMatch(chip.text ?? '', /Hick: cut the number/);
+  assert.doesNotMatch(chip.text ?? '', /Build one modular scale/);
+});
+
+// ---- /canvas export: argument parsing and toast summaries ----
+
+test('parseCanvasExportArgs accepts png/pdf mixes and refuses unknown tokens', () => {
+  assert.deepEqual(parseCanvasExportArgs(''), {}, 'no tokens → formats omitted (both, service-side)');
+  assert.deepEqual(parseCanvasExportArgs('png'), { formats: ['png'] });
+  assert.deepEqual(parseCanvasExportArgs('pdf'), { formats: ['pdf'] });
+  assert.deepEqual(parseCanvasExportArgs('png pdf'), { formats: ['png', 'pdf'] });
+  assert.deepEqual(parseCanvasExportArgs('pdf png'), { formats: ['pdf', 'png'] });
+  assert.deepEqual(parseCanvasExportArgs('PNG'), { formats: ['png'] }, 'case-insensitive');
+  assert.deepEqual(parseCanvasExportArgs('png png'), { formats: ['png'] }, 'duplicates collapse');
+  assert.deepEqual(parseCanvasExportArgs('svg'), { error: 'Unknown export format "svg" — use png, pdf, or both.' });
+  assert.deepEqual(parseCanvasExportArgs('png jpeg'), { error: 'Unknown export format "jpeg" — use png, pdf, or both.' });
+});
+
+test('exportJobSummary counts files and per-screen failures, bounded for the toast', () => {
+  const joiner = (file: string) => `C:\\Design Canvas\\ws\\exports\\${file}`;
+  const summary = exportJobSummary({
+    state: 'done',
+    results: [
+      { screen: 'home', png: { ok: true, file: joiner('home.png') }, pdf: { ok: true, file: joiner('home.pdf') } },
+      { screen: 'checkout', png: { ok: true, file: joiner('checkout.png') }, pdf: { ok: false, error: 'print failed' } },
+      { screen: 'void', png: { ok: false, error: 'screen not loaded' } },
+    ],
+  });
+  const text = summary.join('\n');
+  assert.match(text, /Export done: 3 screens/);
+  assert.match(text, /2 PNG \+ 1 PDF/);
+  assert.match(text, /2 failed \(checkout, void\)/);
+  assert.match(text, /checkout\.png/);
+  const large = exportJobSummary({
+    state: 'done',
+    results: Array.from({ length: 9 }, (_, i) => ({ screen: `s${i}`, png: { ok: true, file: joiner(`s${i}.png`) } })),
+  });
+  assert.match(large.join('\n'), /\+5 more/, 'the enumerated path list is capped for the toast');
+});
+
+test('exportFailureSummary names the failures the service reported', () => {
+  const summary = exportFailureSummary({
+    state: 'failed',
+    results: [
+      { screen: 'home', png: { ok: false, error: 'screen not loaded' } },
+      { screen: 'checkout', pdf: { ok: false, error: 'print failed' } },
+    ],
+  });
+  assert.match(summary, /Export failed: 2 screens — home \(screen not loaded\), checkout \(print failed\)/);
+  assert.equal(exportFailureSummary({ state: 'failed', results: [] }), 'Export failed.');
+});
+
+// ---- /canvas critique: the digest composition ----
+
+test('critiqueReviewText composes the bounded digest with the advisory note', () => {
+  const digest = {
+    screens: [
+      {
+        screen: 'home',
+        state: 'ready',
+        url: 'http://localhost:5173/home.html',
+        width: 1280,
+        height: 800,
+        gates: [
+          { id: 'overflow', status: 'P1', findings: ['x-overflow at 390', 'body wider than viewport'] },
+          { id: 'contrast', status: 'P0', findings: ['4.0 < 4.5 on muted text', 'badge text', 'third finding', 'fourth finding must drop'] },
+        ],
+        probeCounts: { passed: 7, failed: 1 },
+      },
+      { screen: 'checkout', state: 'error', url: 'http://localhost:5173/checkout.html', width: 1280, height: 800, gates: [], probeCounts: {} },
+    ],
+    truncated: true,
+  };
+  const text = critiqueReviewText(digest);
+  assert.match(text, /^Canvas critique — deterministic gate digest \(advisory\):/);
+  assert.match(text, /- home · 1280×800 · ready · http:\/\/localhost:5173\/home\.html/);
+  assert.match(text, /overflow: P1 — x-overflow at 390; body wider than viewport/);
+  assert.doesNotMatch(text, /fourth finding must drop/, 'findings are bounded at 3 — a 4th drops from the composed text');
+  assert.match(text, /- checkout · 1280×800 · error · /);
+  assert.match(text, /no gate findings/);
+  assert.match(text, /… more screens exist; the digest covers the first 12 \(service-bound\)\./);
+  assert.ok(text.endsWith(CRITIQUE_ADVISORY), 'the standing advisory note closes the digest');
+  assert.equal(CRITIQUE_ADVISORY, VERIFY_PROTOCOL.split('\n').filter((line) => line.startsWith('The 0–10 critique')).join('\n'), 'the note IS the protocol clause, never a reword');
+});
+
+test('critiqueReviewChip is a design-canvas chip, capped at the compose limit and self-replacing', () => {
+  const huge = {
+    screens: Array.from({ length: 12 }, (_, i) => ({
+      screen: `screen-${i}`,
+      state: 'ready',
+      url: `http://localhost:5173/screen-${i}.html`,
+      width: 1280,
+      height: 800,
+      gates: [{ id: 'gate', status: 'P0', findings: ['a very long finding text padded out to measure the cap '.repeat(8).trim()] }],
+      probeCounts: {},
+    })),
+    truncated: true,
+  };
+  const chip = critiqueReviewChip('ses_c', 'http://localhost:5173', huge);
+  assert.equal(chip.providerId, 'design-canvas');
+  assert.equal(chip.id, 'canvas-critique-ses_c');
+  assert.equal(chip.title, 'Canvas critique — gate digest');
+  assert.equal(chip.url, 'http://localhost:5173');
+  assert.match(chip.text ?? '', /Canvas critique — deterministic gate digest \(advisory\):/);
+  assert.ok((chip.text ?? '').length <= 16000, 'the composed text respects GUEST_COMPOSE_TEXT_MAX');
+  assert.equal(critiqueReviewChip('ses_c', 'http://localhost:5173', { screens: [] }).id, chip.id, 'same session → the critique chip replaces itself');
+  assert.equal(critiqueReviewChip('ses_c', null, { screens: [] }).url, 'https://design.local/session', 'a missing url falls back to the placeholder');
 });

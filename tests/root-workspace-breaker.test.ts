@@ -24,7 +24,17 @@ for (const name of ['api', 'attach-dialog', 'compose', 'craft', 'harness', 'main
   await cp(path.join(root, 'panel', `${name}.ts`), path.join(scratch, 'panel', `${name}.ts`));
 }
 await cp(path.join(root, 'shared'), path.join(scratch, 'shared'), { recursive: true });
-await symlink(path.join(root, 'node_modules'), path.join(scratch, 'node_modules'));
+// The scratch copies import @openchamber/sdk through the REAL node_modules.
+// Plain symlinks need developer mode on Windows; junctions do not (spec §G).
+async function linkNodeModules(target: string, dest: string): Promise<void> {
+  try {
+    await symlink(target, dest);
+  } catch (error) {
+    if (process.platform !== 'win32') throw error;
+    await symlink(target, dest, 'junction');
+  }
+}
+await linkNodeModules(path.join(root, 'node_modules'), path.join(scratch, 'node_modules'));
 function replaceOnce(source: string, from: string, to: string): string {
   assert.equal(source.split(from).length - 1, 1, 'scratch mutation must match exactly once');
   return source.replace(from, to);
@@ -131,26 +141,32 @@ test('R1 current panel cannot arm delayed already-loaded old plugin after harnes
   main.setSurface('page');
   main.resetReferenceDraft();
   main.setPrompt('Keep this app at its selected registered root.');
-  main.setSelectedProject('selected-root');
+  // The canvas target model (P1-panel rewrite): the "selected project" seam is
+  // gone — binding the WORKSPACE to the registered root's dir is what makes
+  // decision 4c carry that projectId on the delivery.
+  main.setWorkspace({ dir: project, name: 'Fixture' });
   main.setProjectDirectory(path.join(project, 'designs/legacy'));
   main.setSessionId(null);
   try {
     await main.loadProjects();
     await main.loadStudioConfig();
     await main.attachProjectPath('reference-R.svg');
-    await main.startNewDesign(); // wait through failed ancillary refresh
+    await main.startNewDesign(); // wait through the (dropped) harness refresh
     assert.equal(sessions.length, 1, 'one confirmed fixture send reached the SDK');
     assert.equal(sessions[0]!.projectId, 'selected-root');
-    assert.ok(sessions[0]!.text?.includes(path.join(project, 'reference-R.svg')), 'reference R delivered explicitly');
-    assert.ok(requests.some((request) => request.path === '/harness'), 'refresh failure actually exercised');
+    assert.ok(
+      sessions[0]!.text?.includes(JSON.stringify(path.join(project, 'reference-R.svg'))),
+      'reference R delivered explicitly',
+    );
+    assert.ok(!requests.some((request) => request.path === '/harness'), 'the canvas panel never refreshes harness plugins — the already-loaded old plugin stays loaded by construction (decision 5)');
     await running.context('ses_new_unique_S'); // old callback runs only now
     const dirs = await readdir(project);
     const observed = { moves: running.moves.length, isolationWrites: requests.filter((request) => request.method === 'PUT').length, newPaths: dirs, worktree: sessions[0]!.worktree };
     console.info('R1 evidence:', JSON.stringify(observed));
-    assert.deepEqual(observed, { moves: 0, isolationWrites: 0, newPaths: [], worktree: undefined }, 'current delivery must not arm old plugin relocation, even when refresh fails');
+    assert.deepEqual(observed, { moves: 0, isolationWrites: 0, newPaths: [], worktree: undefined }, 'current delivery must not arm old plugin relocation — no harness refresh is part of the contract');
   } finally {
     main.setSurface('status');
-    main.setSelectedProject(null);
+    main.setWorkspace(null);
   }
 });
 

@@ -158,6 +158,34 @@ export const DESIGN_WORKSPACE_NOTE = [
   'Inspect and reuse the existing app, design system and .design-studio.json; do not scaffold over existing work.',
 ].join(' ');
 
+/**
+ * The canvas screens protocol — SPEC-V3-P2-SCOPE.md D8, wording VERBATIM (the
+ * five lines below are the binding copy; do not reword). How screens, variants
+ * and sizes map to artboards on the one canvas. The full text ships in the
+ * session prompt; a trimmed copy ships in the mode chip (see
+ * CANVAS_PROTOCOL_CHIP, §F chip budget).
+ */
+export const CANVAS_PROTOCOL = [
+  'Screens are artboards on one shared canvas. The workspace-root screens.json registry maps each screen to its own .html file and its natural size: { "version": 1, "screens": [ { "id", "file", "title", "width", "height" } ] }.',
+  'Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200–8192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.',
+  'Positions are not design content: never write x/y into screens.json; the canvas stores them in .design-studio/view.json and the user arranges artboards by hand.',
+  'Variants = side-by-side artboards. "Two directions", "options", "alternatives" mean 2–3 complete sibling screens (ids like home-a, home-b), each its own file + entry, each at the same size unless the brief says otherwise. Never stack variants inside one file, never hide alternates behind toggles.',
+  'Responsive = one artboard per real size. Presets: 390×844 phone · 768×1024 tablet · 1280×800 desktop (default) · 1440×900 large desktop · 1080×1080 social post · 794×1123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop). Other sizes are allowed within 200–8192.',
+].join('\n');
+
+/**
+ * The trimmed protocol copy the mode chip carries (D8 placement, §F chip
+ * budget): lines 1–2 verbatim plus the preset numbers of lines 4–5 (the 2–3
+ * sibling rule and the six size presets). Line 3 (positions → view.json)
+ * stays out of the chip — positions are the user's, not the agent's.
+ */
+export const CANVAS_PROTOCOL_CHIP = [
+  'Screens are artboards on one shared canvas. The workspace-root screens.json registry maps each screen to its own .html file and its natural size: { "version": 1, "screens": [ { "id", "file", "title", "width", "height" } ] }.',
+  'Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200–8192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.',
+  '"Two directions", "options", "alternatives" mean 2–3 complete sibling screens, each its own file + entry — never stacked in one file, never hidden behind toggles.',
+  'Size presets: 390×844 phone · 768×1024 tablet · 1280×800 desktop (default) · 1440×900 large desktop · 1080×1080 social post · 794×1123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop).',
+].join('\n');
+
 /** The standing mandate to verify, independent of any single edit. */
 export const VERIFY_MANDATE = [
   'Verify at every stage, not only at the end: after each edit, before showing work, and before calling',

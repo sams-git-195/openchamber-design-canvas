@@ -10,10 +10,11 @@
 //    id (`mode/<id>` and `ws/<id>`): starting a canvas session seeds them, so
 //    the new session opens with the widget ON and its workspace bound.
 import type { AttachIssueRequest } from '@openchamber/sdk';
+import { GUEST_COMPOSE_TEXT_MAX } from '@openchamber/sdk';
 import { DIRECTIONS, type DirectionId } from './craft.ts';
-import { DESIGN_AUTHORITY, DESIGN_WORKSPACE_NOTE, IDENTITY, VERIFY_PROTOCOL, defaultCraft } from '../shared/harness-text.ts';
+import { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP, DESIGN_AUTHORITY, DESIGN_WORKSPACE_NOTE, IDENTITY, VERIFY_PROTOCOL, defaultCraft } from '../shared/harness-text.ts';
 import { DESIGN_SYSTEMS, type DesignSystemPreset } from '../shared/design-systems.ts';
-import type { ScreenInfo, StudioConfig, WorkspaceRecord } from './api.ts';
+import type { CritiqueScreenDigest, ExportFormat, ExportStatusResult, ScreenInfo, StudioConfig, WorkspaceRecord } from './api.ts';
 
 export { VERIFY_PROTOCOL };
 
@@ -408,9 +409,15 @@ export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceR
       workspacePathRule(workspace.dir),
       '',
       DESIGN_WORKSPACE_NOTE,
+      '',
+      CANVAS_PROTOCOL,
     );
   } else {
-    lines.push('Design Canvas workspace: created by the Design Canvas service before this prompt (ask if the path is missing).');
+    lines.push(
+      'Design Canvas workspace: created by the Design Canvas service before this prompt (ask if the path is missing).',
+      '',
+      CANVAS_PROTOCOL,
+    );
   }
   lines.push(
     '',
@@ -451,9 +458,11 @@ export function workspaceOpenPrompt(workspace: WorkspaceRecord): string {
 /**
  * The chip the composer shows while Design Mode is on. Same id → replaces itself.
  * Chip budget (audit #16), in order: mode state → workspace path + screens
- * protocol → screens id/URL list (cap 40) → TRIMMED rules (IDENTITY +
- * design-system authority + VERIFY_PROTOCOL only — the craft rulebook ships via
- * `designSessionPrompt` instead). Text is capped at `GUEST_ATTACH_TEXT_MAX`.
+ * protocol (the canvas workspace note + the trimmed CANVAS_PROTOCOL lines,
+ * SPEC-V3-P2-SCOPE.md D8) → screens id/URL list (cap 40) → TRIMMED rules
+ * (IDENTITY + design-system authority + VERIFY_PROTOCOL only — the craft
+ * rulebook and the FULL protocol ship via `designSessionPrompt` instead).
+ * Text is capped at `GUEST_ATTACH_TEXT_MAX`.
  */
 export function buildModeChip(
   sessionId: string | null,
@@ -476,6 +485,8 @@ export function buildModeChip(
       workspacePathRule(workspace.dir),
       '',
       DESIGN_WORKSPACE_NOTE,
+      '',
+      CANVAS_PROTOCOL_CHIP,
     );
   } else {
     lines.push('Workspace: the Design Canvas service creates it on /canvas — do not write design files anywhere else.');
@@ -513,5 +524,143 @@ export function buildModeChip(
         title: screen.title,
       })),
     },
+  };
+}
+
+// ---- /canvas export (SPEC-V3-P2-SCOPE.md D4/D7-B) ----
+
+/** Preset chars the export summary may spend enumerating file paths. */
+const EXPORT_SUMMARY_FILE_CAP = 4;
+/** Preset chars the export summary may spend naming failed screens. */
+const EXPORT_SUMMARY_FAILURE_CAP = 3;
+
+/**
+ * `/canvas export [png|pdf]`: any mix of `png`/`pdf` tokens, in any order
+ * (duplicates ignored). No tokens → formats omitted, the service exports both.
+ * A non-format token is an actionable error, never a silent brief.
+ */
+export function parseCanvasExportArgs(raw: string): { formats?: ExportFormat[] } | { error: string } {
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return {};
+  const formats: ExportFormat[] = [];
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    if (lower !== 'png' && lower !== 'pdf') {
+      return { error: `Unknown export format "${token}" — use png, pdf, or both.` };
+    }
+    if (!(formats as string[]).includes(lower)) formats.push(lower as ExportFormat);
+  }
+  return { formats };
+}
+
+/**
+ * A bounded toast summary of a finished (or failed) export job: how many PNG/PDF
+ * files landed, their paths, and the per-screen failure count (D4: partial
+ * success is a valid outcome — failures are counted, never re-run here). The
+ * enumerated file list is capped so the toast stays readable (GUEST_TOAST_MAX).
+ */
+export function exportJobSummary(status: ExportStatusResult): string[] {
+  const pngOk: string[] = [];
+  let pdfCount = 0;
+  const failedScreens: string[] = [];
+  for (const row of status.results ?? []) {
+    if (row.png) {
+      if (row.png.ok) pngOk.push(row.png.file);
+      else if (!failedScreens.includes(row.screen)) failedScreens.push(row.screen);
+    }
+    if (row.pdf) {
+      if (row.pdf.ok) pdfCount += 1;
+      else if (!failedScreens.includes(row.screen)) failedScreens.push(row.screen);
+    }
+  }
+  const parts: string[] = [];
+  const total = (status.results ?? []).length;
+  parts.push(`Export done: ${total} screen${total === 1 ? '' : 's'}`);
+  const kinds: string[] = [];
+  if (pngOk.length > 0) kinds.push(`${pngOk.length} PNG`);
+  if (pdfCount > 0) kinds.push(`${pdfCount} PDF`);
+  parts.push(kinds.length > 0 ? kinds.join(' + ') : '0 files');
+  if (failedScreens.length > 0) {
+    const shown = failedScreens.slice(0, EXPORT_SUMMARY_FAILURE_CAP).join(', ');
+    parts.push(`${failedScreens.length} failed (${shown}${failedScreens.length > EXPORT_SUMMARY_FAILURE_CAP ? ', …' : ''})`);
+  }
+  const lines = [parts.join(' · ')];
+  if (pngOk.length > 0) {
+    const shown = pngOk.slice(0, EXPORT_SUMMARY_FILE_CAP);
+    const more = pngOk.length - shown.length;
+    lines.push(`PNG: ${shown.join(', ')}${more > 0 ? `, … +${more} more` : ''}`);
+  }
+  return lines;
+}
+
+/**
+ * The toast message for a job that failed outright (state 'failed'): the
+ * per-screen failures the service reported, bounded like the summary.
+ */
+export function exportFailureSummary(status: ExportStatusResult): string {
+  const failed = (status.results ?? []).filter((row) => row.png?.ok === false || row.pdf?.ok === false);
+  if (failed.length === 0) return 'Export failed.';
+  const shown = failed
+    .slice(0, EXPORT_SUMMARY_FAILURE_CAP)
+    .map((row) => {
+      const error = row.png?.ok === false ? row.png.error : row.pdf?.ok === false ? row.pdf.error : undefined;
+      return error ? `${row.screen} (${error})` : row.screen;
+    })
+    .join(', ');
+  return `Export failed: ${failed.length} screen${failed.length === 1 ? '' : 's'} — ${shown}${failed.length > EXPORT_SUMMARY_FAILURE_CAP ? ', …' : ''}`;
+}
+
+// ---- /canvas critique (SPEC-V3-P2-SCOPE.md D7-C) ----
+
+/**
+ * The standing advisory line every critique digest carries: the VERIFY_PROTOCOL
+ * clause itself, so the 0–10 critique can never drift from the protocol text.
+ */
+export const CRITIQUE_ADVISORY =
+  'The 0–10 critique is advisory only; never treat it as pass/fail and never optimise for it.';
+
+/**
+ * The review-request text for a critique digest (D7-C): the bounded digest the
+ * service guarantees, composed table-ish for the chat — header, one line per
+ * screen with its gates (≤3 findings each, already bounded service-side), and
+ * the standing advisory note. The chip text is capped at
+ * `GUEST_COMPOSE_TEXT_MAX` by the caller; the digest is first 12 screens +
+ * `truncated` service-side.
+ */
+export function critiqueReviewText(digest: { screens: CritiqueScreenDigest[]; truncated?: boolean }): string {
+  const lines: string[] = ['Canvas critique — deterministic gate digest (advisory):'];
+  for (const screen of digest.screens) {
+    lines.push(`- ${screen.screen} · ${screen.width}×${screen.height} · ${screen.state === 'ready' ? 'ready' : screen.state} · ${screen.url}`);
+    if (screen.gates && screen.gates.length > 0) {
+      for (const gate of screen.gates) {
+        const findings = (gate.findings ?? []).slice(0, 3).join('; ');
+        lines.push(`    ${gate.id}: ${gate.status}${findings ? ` — ${findings}` : ''}`);
+      }
+    } else {
+      lines.push('    no gate findings');
+    }
+  }
+  if (digest.truncated) lines.push('… more screens exist; the digest covers the first 12 (service-bound).');
+  lines.push('', CRITIQUE_ADVISORY);
+  return lines.join('\n');
+}
+
+/**
+ * The chat chip `/canvas critique` hands to the composer (D7-C: composed into
+ * the chat via the existing compose/attach path as a review REQUEST). Same id
+ * per session → a repeated critique replaces its own chip.
+ */
+export function critiqueReviewChip(
+  sessionId: string | null,
+  workspaceUrl: string | null | undefined,
+  digest: { screens: CritiqueScreenDigest[]; truncated?: boolean },
+): AttachIssueRequest {
+  const id = `canvas-critique-${(sessionId || 'adhoc').slice(0, 110)}`;
+  return {
+    providerId: 'design-canvas',
+    id,
+    title: 'Canvas critique — gate digest',
+    url: attachUrl(workspaceUrl ?? undefined),
+    text: critiqueReviewText(digest).slice(0, GUEST_COMPOSE_TEXT_MAX),
   };
 }

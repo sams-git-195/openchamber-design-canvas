@@ -849,3 +849,213 @@ test('the workspaces list loader and the /state-driven controls are wired to the
   assert.match(source, /void readStudioConfig\(false\)/, 'the poll re-reads the workspace config');
   assert.match(source, /await applyState\(await getState\(\)\)/, 'the poll applies /state');
 });
+
+// ---- /canvas export & critique (SPEC-V3-P2-SCOPE.md D4/D7-B/D7-C) ----
+
+test('/canvas export png posts POST /export and polls /export/status until done, then toasts the summary', async () => {
+  setWorkspace(null);
+  const exported: Array<{ method?: string; path?: string; query?: Record<string, string>; body?: string }> = [];
+  const calls = stubService((request) => {
+    if (request.path === '/export') {
+      exported.push({ method: request.method, path: request.path, body: request.body });
+      return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-1', screens: 2, formats: ['png'] }) };
+    }
+    if (request.path === '/export/status') {
+      exported.push({ path: request.path, query: request.query });
+      const polls = exported.filter((call) => call.path === '/export/status').length;
+      return polls === 1
+        ? { status: 200, body: JSON.stringify({ state: 'running', results: [] }) }
+        : {
+            status: 200,
+            body: JSON.stringify({
+              state: 'done',
+              results: [
+                { screen: 'home', png: { ok: true, file: 'C:\\Design Canvas\\ws\\exports\\home.png' } },
+                { screen: 'checkout', png: { ok: false, error: 'screen not loaded' } },
+              ],
+            }),
+          };
+    }
+    return { status: 404, body: '{}' };
+  });
+  const toasts = stubToast();
+  stubStorage();
+  setWorkspace({ dir: '/p/site', name: 'Site' });
+  allowResolve(true);
+
+  const chip = await resolveCanvasCommand('export png');
+
+  assert.equal(chip, null, 'export toasts, it never returns a chat chip');
+  const post = calls.find((call) => call.path === '/export');
+  assert.ok(post, 'POST /export reached the service');
+  assert.equal(post!.method, 'POST');
+  assert.deepEqual(JSON.parse(post!.body ?? ''), { dir: '/p/site', formats: ['png'] }, 'D4 body: {dir, formats}');
+  const statuses = calls.filter((call) => call.path === '/export/status');
+  assert.equal(statuses.length, 2, 'one running poll, then the done state');
+  for (const status of statuses) assert.deepEqual(status.query, { dir: '/p/site', job: 'job-1' }, 'status polls the job id the POST returned');
+  const summary = toasts.find((toast) => toast.kind === 'success');
+  assert.ok(summary, 'a summary toast lands');
+  assert.match(summary!.message, /Export done: 2 screens/);
+  assert.match(summary!.message, /1 PNG/);
+  assert.match(summary!.message, /1 failed \(checkout\)/);
+  assert.match(summary!.message, /home\.png/, 'the toast names the file path');
+});
+
+test('/canvas export without format args omits formats (the service writes both)', async () => {
+  const calls = stubService((request) => {
+    if (request.path === '/export') return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-both', screens: 1, formats: ['png', 'pdf'] }) };
+    if (request.path === '/export/status') return { status: 200, body: JSON.stringify({ state: 'done', results: [{ screen: 'home', png: { ok: true, file: '/ws/exports/home.png' }, pdf: { ok: true, file: '/ws/exports/home.pdf' } }] }) };
+    return { status: 404, body: '{}' };
+  });
+  const toasts = stubToast();
+  stubStorage();
+  setWorkspace({ dir: '/p/site', name: 'Site' });
+  allowResolve(true);
+
+  await resolveCanvasCommand('export');
+
+  const post = calls.find((call) => call.path === '/export');
+  assert.deepEqual(JSON.parse(post!.body ?? ''), { dir: '/p/site' }, 'formats omitted → both formats');
+  assert.match(toasts.find((toast) => toast.kind === 'success')!.message, /1 PNG \+ 1 PDF/);
+});
+
+test('/canvas export surfaces a failed job with the per-screen failures', async () => {
+  const calls = stubService((request) => {
+    if (request.path === '/export') return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-fail', screens: 1, formats: ['pdf'] }) };
+    if (request.path === '/export/status') {
+      return { status: 200, body: JSON.stringify({ state: 'failed', results: [{ screen: 'checkout', pdf: { ok: false, error: 'print failed' } }] }) };
+    }
+    return { status: 404, body: '{}' };
+  });
+  const toasts = stubToast();
+  stubStorage();
+  setWorkspace({ dir: '/p/site', name: 'Site' });
+  allowResolve(true);
+
+  await resolveCanvasCommand('export pdf');
+
+  assert.ok(toasts.some((toast) => toast.kind === 'error' && /Export failed: 1 screen — checkout \(print failed\)/.test(toast.message)), 'the failure is named');
+  assert.ok(!toasts.some((toast) => toast.kind === 'success'), 'no success summary on failure');
+});
+
+test('/canvas export with an unknown format refuses before touching the service', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  const toasts = stubToast();
+  setWorkspace({ dir: '/p/site', name: 'Site' });
+  allowResolve(true);
+
+  await resolveCanvasCommand('export svg');
+
+  assert.equal(calls.some((call) => call.path === '/export'), false, 'no export is posted for a bad format');
+  assert.ok(toasts.some((toast) => toast.kind === 'error' && /Unknown export format "svg"/.test(toast.message)));
+});
+
+test('/canvas export with no workspace refuses with the actionable line', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  const toasts = stubToast();
+  stubStorage();
+  setWorkspace(null);
+  allowResolve(true);
+
+  await resolveCanvasCommand('export png');
+
+  assert.equal(calls.some((call) => call.path === '/export'), false);
+  assert.ok(toasts.some((toast) => toast.kind === 'error' && /No canvas workspace yet/.test(toast.message)));
+});
+
+test('a still-running export beyond the budget toasts the heads-up instead of polling forever', async () => {
+  const calls = stubService((request) => {
+    if (request.path === '/export') return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-long', screens: 3, formats: ['png'] }) };
+    if (request.path === '/export/status') return { status: 200, body: JSON.stringify({ state: 'running', results: [] }) };
+    return { status: 404, body: '{}' };
+  });
+  const toasts = stubToast();
+  setWorkspace({ dir: '/p/site', name: 'Site' });
+
+  await main.runCanvasExport('/p/site', ['png'], { pollMs: 1, maxMs: 6 });
+
+  assert.ok(
+    toasts.some((toast) => toast.kind === 'info' && /still running/.test(toast.message)),
+    'the 60s-style budget ends with a heads-up, not a silent hang',
+  );
+  assert.ok(!toasts.some((toast) => toast.kind === 'success'));
+});
+
+test('/canvas critique posts POST /critique and returns the digest chip as a review request', async () => {
+  const calls = stubService((request) => {
+    if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
+    if (request.path === '/critique') {
+      return {
+        status: 200,
+        body: JSON.stringify({
+          ok: true,
+          screens: [
+            { screen: 'home', state: 'ready', url: 'http://localhost:5173/home.html', width: 1280, height: 800, gates: [{ id: 'overflow', status: 'P1', findings: ['x-overflow at 390'] }], probeCounts: { passed: 7 } },
+          ],
+          truncated: false,
+        }),
+      };
+    }
+    return { status: 404, body: '{}' };
+  });
+  stubToast();
+  stubStorage();
+  setWorkspace({ dir: '/p/site', name: 'Site' });
+  setSessionId('ses_crit');
+  await loadStudioConfig();
+  allowResolve(true);
+
+  const chip = await resolveCanvasCommand('critique');
+
+  const critique = calls.find((call) => call.path === '/critique');
+  assert.ok(critique, 'POST /critique reached the service');
+  assert.deepEqual(JSON.parse(critique!.body ?? ''), { dir: '/p/site' }, 'D7-C body: {dir}');
+  assert.ok(chip, 'the digest returns as a chat chip (the compose path)');
+  assert.equal(chip!.providerId, 'design-canvas');
+  assert.match(chip!.text ?? '', /^Canvas critique — deterministic gate digest \(advisory\):/);
+  assert.match(chip!.text ?? '', /- home · 1280×800 · ready · http:\/\/localhost:5173\/home\.html/);
+  assert.match(chip!.text ?? '', /overflow: P1 — x-overflow at 390/);
+  assert.match(chip!.text ?? '', /never optimise for it/, 'the standing advisory line rides along');
+  assert.equal(chip!.url, 'http://localhost:5173', 'the chip carries the workspace url');
+});
+
+test('/canvas critique service failure toasts the error and returns no chip', async () => {
+  const calls = stubService((request) =>
+    request.path === '/critique'
+      ? { status: 200, body: JSON.stringify({ ok: false, error: 'no browser window open' }) }
+      : { status: 200, body: JSON.stringify({ ok: true }) },
+  );
+  const toasts = stubToast();
+  stubStorage();
+  setWorkspace({ dir: '/p/site', name: 'Site' });
+  allowResolve(true);
+
+  const chip = await resolveCanvasCommand('critique');
+
+  assert.equal(chip, null);
+  assert.ok(toasts.some((toast) => toast.kind === 'error' && /no browser window open/.test(toast.message)));
+});
+
+test('/canvas critique without a workspace refuses without posting', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  const toasts = stubToast();
+  stubStorage();
+  setWorkspace(null);
+  allowResolve(true);
+
+  const chip = await resolveCanvasCommand('critique');
+
+  assert.equal(chip, null);
+  assert.equal(calls.some((call) => call.path === '/critique'), false);
+  assert.ok(toasts.some((toast) => toast.kind === 'error' && /No canvas workspace yet/.test(toast.message)));
+});
+
+// The panel command verbs never leak into the brief/mode paths.
+test('export and critique are reserved /canvas verbs, never briefs', async () => {
+  const source = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('async function resolveCanvasCommand(');
+  const end = source.indexOf('// ---- /canvas export & critique');
+  const resolver = source.slice(start, end);
+  assert.match(resolver, /if \(\/\^export\$\/i\.test\(head!\)\)/, 'export is intercepted before parseDesignArgs');
+  assert.match(resolver, /if \(\/\^critique\$\/i\.test\(head!\)\)/, 'critique is intercepted before parseDesignArgs');
+});

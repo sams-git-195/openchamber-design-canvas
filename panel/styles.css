@@ -871,6 +871,44 @@ button.on { background: var(--oc-selection); color: var(--oc-selection-fg); bord
 .ds-server-control:focus-visible,
 .ds-rowline button:focus-visible { outline: 2px solid var(--oc-focus); outline-offset: 1px; }
 
+/* The canvas-mode row controls (FORK-MERGE resolved — the P1-panel controls
+   share one styling pass): the play/edit toggle and Focus chips keep the same
+   30px rhythm as the Start/Stop icon button, so the whole control group aligns
+   on one line. Their `.on` state reuses `button.on` (selection background +
+   focus border); the pill radius comes from .ds-chip. */
+.ds-statusmode .ds-rowline .ds-play-toggle,
+.ds-statusmode .ds-rowline .ds-focus {
+  height: 30px;
+  padding: 0 10px;
+  line-height: 1;
+}
+
+/* The active-screen dropdown is the one genuinely new control: a compact
+   select that matches its siblings instead of native chrome (matching
+   background/border/font, an explicit 30px height for the shared center line,
+   and a cap so long titles never blow the row width). */
+.ds-statusmode .ds-rowline select.ds-screen-select {
+  flex: 0 1 auto;
+  height: 30px;
+  max-width: 170px;
+  min-width: 0;
+  padding: 0 6px;
+  border: 1px solid var(--oc-border);
+  border-radius: var(--oc-radius);
+  background: var(--oc-surface);
+  color: var(--oc-fg);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 140ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
+}
+.ds-statusmode .ds-rowline select.ds-screen-select:hover { background: var(--oc-hover); }
+.ds-statusmode .ds-rowline select.ds-screen-select:focus-visible {
+  outline: 2px solid var(--oc-focus);
+  outline-offset: 1px;
+}
+
 /* Screen-reader-only announcement of dev-server state changes. */
 .ds-server-announce {
   position: absolute;
@@ -888,7 +926,8 @@ button.on { background: var(--oc-selection); color: var(--oc-selection-fg); bord
 /* Coarse/narrow viewports get the standard 44 px minimum touch target. */
 @media (max-width: 768px), (pointer: coarse) {
   .ds-server-control,
-  .ds-statusmode .ds-rowline button:not(.ds-server-control) {
+  .ds-statusmode .ds-rowline button:not(.ds-server-control),
+  .ds-statusmode .ds-rowline select.ds-screen-select {
     min-width: var(--ds-control-touch);
     min-height: var(--ds-control-touch);
     width: auto;
