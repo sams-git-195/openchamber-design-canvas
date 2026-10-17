@@ -215,10 +215,69 @@ export class ArtifactContexts {
         if (this.artifact(screen) === context && !this.armed.has(key)) {
           await this.evaluate(context, 'window.__dsTrustedArtifact=true;'+this.scripts);
           if (this.artifact(screen) === context) this.armed.add(key);
+          // FIX-3 (F5): arming the script is only HALF the arm — the script's
+          // send path needs the frame's `__dsPick` BINDING, and on Windows the
+          // addBinding→context propagation can lag (or silently miss) a
+          // context that already existed when the binding was issued. Verify
+          // the binding actually landed in THIS context right after arming;
+          // the re-arm below is the recovery (its script re-run flushes the
+          // in-frame __dsPickPending buffer, so queued clicks are delivered).
+          if (this.artifact(screen) === context) await this.verifyArtifactBinding(screen, context);
         }
       } catch { /* world destroyed mid-arm; a later event rediscovers the frame */ }
     }
     this.changed();
+  }
+  /**
+   * FIX-3 (F5 root fix): verify the artifact bindings reached one armed
+   * context and re-arm when they did not. `Runtime.addBinding` responses can
+   * land BEFORE the binding itself propagates into a pre-existing execution
+   * context (the same Windows lag this repo documents above SHELL_BRIDGE); the
+   * in-frame picker then buffers every click into `__dsPickPending` forever —
+   * the silent per-session pick-loss class (Sonnet re-verify F5: ~12% of fresh
+   * sessions had `typeof window.__dsPick === 'undefined'` with buffered picks).
+   * Recovery: re-issue the two artifact bindings on the context's OWN session
+   * (idempotent, and re-adding forces propagation into the existing context —
+   * FIX-1's proven shell-side mechanism) and re-run the payload scripts, whose
+   * idempotent guards make the re-run a pure `flushPending()`. Returns true
+   * when a re-arm was performed. Deliberately NOT a replay of dropped
+   * bindingCalled messages (FIX-1's rationale stands): re-arming the frame IS
+   * the replay — the buffer lives in the frame and flushes itself.
+   */
+  async verifyArtifactBinding(screen: string, context: DefaultContext): Promise<boolean> {
+    if (!this.active || !this.matches(context, context.session, context.id)) return false;
+    let kind: unknown;
+    try {
+      kind = await this.evaluate(context, 'typeof window.__dsPick');
+    } catch {
+      return false; // world died mid-check; the next frame/context event re-arms
+    }
+    if (kind === 'function') return false;
+    try {
+      for (const name of ['__dsPick', '__dsArtifactEvent']) {
+        await this.cdp.send('Runtime.addBinding', { name }, context.session);
+      }
+      if (!this.active || !this.matches(context, context.session, context.id)) return false;
+      await this.evaluate(context, 'window.__dsTrustedArtifact=true;'+this.scripts);
+      this.armed.add(context.session + ':' + context.id);
+      console.log(`[design-canvas] artifact binding re-armed for "${screen}" (in-frame __dsPick was ${typeof kind === 'string' ? kind : 'unreachable'}; buffered picks flushed)`);
+      return true;
+    } catch {
+      return false; // context swapped mid-recovery; the sweep/event path retries
+    }
+  }
+  /**
+   * FIX-3: one arming sweep over every known artifact context — the cheap
+   * periodic self-heal for late propagation races the per-arm verification
+   * could not see (a binding that lands, then a context created after it that
+   * missed the script re-run). Called by the Browser's unref'd sweep timer.
+   */
+  async verifyArtifactBindings(): Promise<void> {
+    if (!this.active) return;
+    for (const [screen, context] of this.artifacts()) {
+      if (!this.active) break;
+      await this.verifyArtifactBinding(screen, context).catch(() => undefined);
+    }
   }
   /** A new OOPIF may commit before Page.enable can report frameNavigated. */
   private async seedArtifactLoader(screen:string,context:DefaultContext):Promise<void>{

@@ -1102,6 +1102,30 @@ const ARTIFACT_BRIDGE = `(() => {
     e.preventDefault();window.__dsArtifactEvent(JSON.stringify({type:'wheel',x:e.clientX,y:e.clientY,deltaX:e.deltaX,deltaY:e.deltaY}));
   },{passive:false});
 })();`;
+// FIX-3 (F16a): canvas CHROME, not design content. A workspace artboard shows
+// the page at its registry size inside the canvas; the document's own native
+// root scrollbar is a rendering artifact of that framing (Sonnet re-verify F16:
+// the tall artboard showed a native scrollbar across the art wall). It is
+// hidden for the ROOT scroller only (inner scrollable widgets keep theirs) and
+// ONLY in workspace canvas sessions — the legacy single-url launch keeps its
+// byte-identical script (see the two variants below), and exports are
+// unaffected either way: PNG capture and PDF print run against separate
+// throwaway targets that never receive this script. Scrolling itself still
+// works (wheel/keyboard/scrollBy) — only the bar hides.
+const SCROLLBAR_CHROME = `(() => {
+  if (window.__dsScrollbarHidden) return;
+  window.__dsScrollbarHidden = true;
+  const apply = () => {
+    if (document.getElementById('__ds-scrollbar-style')) return;
+    const style = document.createElement('style');
+    style.id = '__ds-scrollbar-style';
+    style.setAttribute('data-ds-overlay', 'chrome');
+    style.textContent = 'html{scrollbar-width:none}html::-webkit-scrollbar{display:none;width:0;height:0}';
+    (document.head || document.documentElement).appendChild(style);
+  };
+  if (document.head || document.documentElement) apply();
+  else document.addEventListener('DOMContentLoaded', apply, { once: true });
+})();`;
 // Injection timing (spec §D). Page.addScriptToEvaluateOnNewDocument (enable(),
 // artifact-context.ts) runs this at document start — BEFORE any page script.
 // The in-frame trust gate is `window.name.startsWith('__dsArtifact:')`: the
@@ -1111,11 +1135,17 @@ const ARTIFACT_BRIDGE = `(() => {
 // bridge and probe install on that gate or the post-attach trust flag;
 // PICK_SCRIPT installs unconditionally in any non-top frame and only sends
 // once armed (unarmed frames buffer).
-const ARTIFACT_SCRIPTS = `if(window!==top){
-  if(window.__dsTrustedArtifact || window.name.startsWith('__dsArtifact:')){${ARTIFACT_BRIDGE}}
+function artifactScripts(scrollbarChrome: boolean): string {
+  return `if(window!==top){
+  if(window.__dsTrustedArtifact || window.name.startsWith('__dsArtifact:')){${ARTIFACT_BRIDGE}${scrollbarChrome ? SCROLLBAR_CHROME : ''}}
   ${PICK_SCRIPT}
   if((window.__dsTrustedArtifact || window.name.startsWith('__dsArtifact:')) && !window.__dsProbe){${PROBE_SCRIPT}}
 }`;
+}
+/** Legacy single-url launch: byte-identical to the pre-FIX-3 script. */
+const ARTIFACT_SCRIPTS = artifactScripts(false);
+/** Workspace canvas sessions add the F16a scrollbar chrome (canvas-only). */
+const WORKSPACE_ARTIFACT_SCRIPTS = artifactScripts(true);
 // The shell-side bridge the service injects after attach (and on every `ready`).
 // v2 deletions (spec §D): the `document.getElementById('preview')` lookup and
 // the post-load `frame.name='__dsArtifact'` naming — artboards are static
@@ -1451,6 +1481,15 @@ export class Browser {
   private handshakeAttempts = 0;
   /** Test seam: the recovery cadence (product default ~2 s per the QA fix). */
   private handshakeRecoveryIntervalMs = 2_000;
+  // ---- FIX-3 (F5): periodic artifact binding-arming sweep -----------------------
+  /** Unref'd sweep over the known artifact contexts: verify each frame's
+   *  `__dsPick` binding actually landed and re-arm (addBinding + script re-run,
+   *  which flushes the in-frame pending buffer) when it did not. This is the
+   *  self-heal for late propagation races the per-arm check could not see; the
+   *  dead-session silent pick-loss class (Sonnet re-verify F5) is what it kills. */
+  private artifactSweepTimer: ReturnType<typeof setInterval> | null = null;
+  /** Test seam: the sweep cadence (product default 4 s). */
+  private artifactSweepIntervalMs = 4_000;
   // ---- F1 (V4 QA): bounded replay of shell bindings dropped by the lease -------
   private shellReplay: Array<{
     context: ArtifactContexts;
@@ -1477,6 +1516,10 @@ export class Browser {
   private menuExportHandler: ((screen: string, format: 'png' | 'pdf') => void) | null = null;
   /** V4-15: main.ts wires the dev-server ensure for per-screen Retry (cycle-free). */
   private devServerEnsure: ((dir: string) => Promise<{ up: boolean; error?: string }>) | null = null;
+  /** FIX-3 (F17): main.ts wires the dev-server STOP for the artboard context
+   *  menu's `stop-server` action — the same recorded-process-group kill the
+   *  `POST /server/stop` route runs (cycle-free, same injection pattern). */
+  private devServerStop: ((dir: string) => Promise<{ stopped: boolean; error?: string }>) | null = null;
 
   constructor() {
     // Captured at construct time: tests pin DS_WINDOW before constructing, and
@@ -2004,7 +2047,10 @@ export class Browser {
     // check after every await — a window death mid-boot (target destroyed,
     // child exit, an explicit stop) races these awaits and used to surface as
     // a null-deref TypeError out of `this.contexts`.
-    const contexts = new ArtifactContexts(cdp, session, ARTIFACT_SCRIPTS, () => { this.frameEventsChanged(); }, url);
+    // FIX-3 (F16a): workspace canvas sessions carry the scrollbar-hiding
+    // chrome in their artifact scripts; the legacy single-url launch keeps the
+    // byte-identical script (same gate as the `workspace:` ViewerConfig bake).
+    const contexts = new ArtifactContexts(cdp, session, this.workspaceMode ? WORKSPACE_ARTIFACT_SCRIPTS : ARTIFACT_SCRIPTS, () => { this.frameEventsChanged(); }, url);
     this.contexts = contexts;
     contexts.activeScreenId = this.activeScreenId;
     const alive = (): boolean => this.contexts === contexts && this.cdp === cdp && this.closedAt === null && !this.quitting;
@@ -2042,6 +2088,11 @@ export class Browser {
     this.assertLaunchAlive(alive, 'after shellHandshakeFlush');
     this.logHandshake(`initial flush ${flushed ? 'reported sent' : 'timed out'}${flushed ? '' : ' — arming continuous recovery'}`);
     this.startShellHandshakeRecovery();
+    // FIX-3 (F5): the artifact-frame counterpart of the shell-handshake
+    // recovery — a cheap unref'd sweep that verifies each artboard's
+    // `__dsPick` binding actually landed and re-arms (flushing buffered
+    // clicks) when it did not, so a late propagation race self-heals.
+    this.startArtifactBindingSweep();
   }
 
   /** F2: throw a diagnostic LaunchDiedError when the launch integrity check
@@ -2179,7 +2230,20 @@ export class Browser {
       if(name==='__dsPick'&&validPick(value)){this.lastPick={...value,screen};this.pickSeq+=1;/* V4-5: every honoured pick ALSO enters the ordered queue GET /picks drains (its own seq; lastPick/pickSeq stay back-compat). */this.enqueueElementPick(screen,value);}
       if(name==='__dsArtifactEvent'&&value&&['dismiss','changed','height-dirty','wheel','camera-zoom'].includes(value.type)){
         if(value.type==='dismiss'&&this.canvasFlags.menu)void this.shellEval('__dsCanvas.dismissMenu()').catch(()=>undefined);
-        if(value.type==='changed')void this.refreshScreen(screen);
+        if(value.type==='changed'){
+          void this.refreshScreen(screen);
+          // FIX-3 (F13): in PLAY mode the user drives the screens by clicking
+          // through them, so in-frame navigation inside artboard B moves the
+          // active outline to B (the 'changed' signal is already tagged per
+          // screen by the executionContextId→screenId authority). Guarded to
+          // boards that already reached 'ready' so a boot-time load storm
+          // cannot flap the active screen; camera + focus only, and NEVER a
+          // window raise (setActive does not bringToFront — V4-8 compliant).
+          // Edit mode keeps the user's explicit activation untouched.
+          if(this.mode==='play'&&screen!==this.activeScreenId&&this.screens.get(screen)?.state==='ready'){
+            void this.setActive(screen).catch(()=>undefined);
+          }
+        }
         // Height machinery is active-screen-only in v1 (spec §C).
         if(value.type==='height-dirty'&&screen===this.activeScreenId)this.queueLayout();
         if(value.type==='camera-zoom'&&validCameraZoom(value)&&!this.captureInFlight){
@@ -2439,6 +2503,42 @@ export class Browser {
   /** F1 diagnostics: every flush outcome is logged (QA acceptance). */
   private logHandshake(message: string): void {
     console.log(`[design-canvas] shell handshake: ${message}`);
+  }
+
+  // ---- FIX-3 (F5): periodic artifact arming sweep ------------------------------
+
+  /**
+   * The dead-session pick-loss root fix, self-heal half. `verifyArtifactBinding`
+   * (artifact-context.ts) checks `typeof window.__dsPick` in each armed frame
+   * and re-issues `Runtime.addBinding` + re-runs the payload scripts when the
+   * binding never landed (the Windows addBinding-propagation race); the in-frame
+   * `__dsPickPending` buffer then flushes any clicks queued while it was
+   * missing, so a late race heals WITHOUT dropping the user's pick. This sweep
+   * runs that verification over every known artifact context every few seconds
+   * (unref'd, so it never holds the process open) and stops with the window.
+   * Each re-arm is logged with its screen id (acceptance diagnostics).
+   */
+  private startArtifactBindingSweep(): void {
+    this.stopArtifactBindingSweep();
+    const timer = setInterval(() => {
+      if (!this.cdp || this.closedAt !== null || this.quitting) {
+        this.stopArtifactBindingSweep();
+        return;
+      }
+      const contexts = this.contexts;
+      if (!contexts || typeof contexts.verifyArtifactBindings !== 'function') return;
+      void contexts.verifyArtifactBindings().catch(() => undefined);
+    }, this.artifactSweepIntervalMs);
+    timer.unref?.();
+    this.artifactSweepTimer = timer;
+  }
+
+  /** Disarm the sweep (teardown, or a relaunch re-arms it). */
+  private stopArtifactBindingSweep(): void {
+    if (this.artifactSweepTimer) {
+      clearInterval(this.artifactSweepTimer);
+      this.artifactSweepTimer = null;
+    }
   }
   /**
    * shellEval that waits for a shell lease instead of failing mid-load. The
@@ -2712,9 +2812,10 @@ export class Browser {
       this.queueHover('end');
     }
     // V4-10: the artboard context menu (B renders it; the service owns every
-    // action's meaning — the frozen §3 action list).
+    // action's meaning — the frozen §3 action list, plus FIX-3's F17
+    // 'stop-server' which rides the same {type:'screen-menu'} contract).
     else if(value.type==='screen-menu'&&typeof screen==='string'&&this.screens.has(screen)&&typeof value.action==='string'){
-      await this.screenMenuAction(screen,value.action as 'send-to-chat'|'reload'|'reset-position'|'export-png'|'export-pdf'|'copy-path');
+      await this.screenMenuAction(screen,value.action as 'send-to-chat'|'reload'|'reset-position'|'export-png'|'export-pdf'|'copy-path'|'stop-server');
     }
     // V4-17 (P2): inline rename. The registry title is agent-owned; this is a
     // single-entry read-modify-write of screens.json — the V4-4 watcher then
@@ -2849,10 +2950,11 @@ export class Browser {
 
   // ---- V4-10 artboard context-menu actions ------------------------------------
 
-  /** The frozen §3 action list; unknown strings are refused silently. */
+  /** The frozen §3 action list plus FIX-3's 'stop-server' (F17); unknown
+   *  strings are refused silently. */
   private async screenMenuAction(
     screen: string,
-    action: 'send-to-chat' | 'reload' | 'reset-position' | 'export-png' | 'export-pdf' | 'copy-path',
+    action: 'send-to-chat' | 'reload' | 'reset-position' | 'export-png' | 'export-pdf' | 'copy-path' | 'stop-server',
   ): Promise<void> {
     const record = this.screens.get(screen);
     if (!record) return;
@@ -2870,8 +2972,9 @@ export class Browser {
     if (action === 'reset-position') {
       const dir = this.workspaceDir;
       if (!dir) return;
-      // mergeView null = "back to auto" (D6); the warm push carries the null
-      // pair so the shell re-flows that artboard into its auto slot.
+      // mergeView null = "back to auto" (D6) and DELETES the position key
+      // (FIX-3/F15: no null residue in view.json); the warm push still carries
+      // the null pair so the shell re-flows that artboard into its auto slot.
       const merged = await mergeView(dir, { positions: { [screen]: null } }).catch(() => null);
       if (merged) updateLastWorkspaceView(merged);
       record.x = null;
@@ -2899,7 +3002,32 @@ export class Browser {
       } else {
         await this.pushToast('warn', 'No file path is known for this screen');
       }
+      return;
     }
+    if (action === 'stop-server') {
+      // FIX-3 (F17): dev servers OUTLIVE the canvas window by design (the
+      // documented policy in project-server.ts); this is the in-canvas escape
+      // hatch beside the panel's row control. It runs the SAME recorded-
+      // process-group kill as `POST /server/stop {dir}` for the workspace dir
+      // — only a server this service recorded for this dir can ever die, and
+      // the outcome is confirmed through the existing §3 showToast.
+      const dir = this.workspaceDir;
+      const handler = this.devServerStop;
+      if (!dir || !handler) {
+        await this.pushToast('warn', 'No dev server is recorded for this canvas');
+        return;
+      }
+      const result = await handler(dir).catch(() => ({ stopped: false, error: 'could not stop the dev server' }));
+      if (result.error) await this.pushToast('warn', `Stop failed: ${result.error}`.slice(0, 300));
+      else await this.pushToast('ok', result.stopped ? 'Dev server stopped' : 'No dev server was running');
+    }
+  }
+
+  /** FIX-3 (F17): main.ts injects the dev-server stopper (`stopDevServer`) so
+   *  browser.ts stays free of the project-server import cycle — the same
+   *  injection pattern as setDevServerEnsure. */
+  setDevServerStop(handler: ((dir: string) => Promise<{ stopped: boolean; error?: string }>) | null): void {
+    this.devServerStop = handler;
   }
 
   /** Registry-file lookup fallback for copy-path when the push carried urls. */
@@ -3933,6 +4061,7 @@ export class Browser {
     // queue; lastShellCommandAt was the half that never got reset, which
     // would have made a RELAUNCH's recovery loop stop before it started).
     this.stopShellHandshakeRecovery();
+    this.stopArtifactBindingSweep();
     this.shellReplay = [];
     if (this.shellReplayPump) {
       clearTimeout(this.shellReplayPump);
@@ -4035,6 +4164,7 @@ export class Browser {
     // F1: window-scoped recovery state dies with the window (same intent as
     // doQuit's reset; stop() may run without a quit ever having happened).
     this.stopShellHandshakeRecovery();
+    this.stopArtifactBindingSweep();
     this.shellReplay = [];
     if (this.shellReplayPump) {
       clearTimeout(this.shellReplayPump);

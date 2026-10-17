@@ -19,9 +19,21 @@ await cp(path.join(root,'service/viewer-assets.generated.ts'),path.join(scratch,
 await symlink(path.join(root,'node_modules'),path.join(scratch,'node_modules'),process.platform==='win32'?'junction':undefined);
 const mutant=process.env.LIVE_CANVAS_MUTANT;
 async function mutate(file:string,from:string,to:string){const location=path.join(scratch,'service',file+'.ts'),source=await readFile(location,'utf8');assert.equal(source.split(from).length-1,1,'one scratch guard match');await writeFile(location,source.replace(from,to));}
-if(mutant==='artifact-authorization')await mutate('browser','if(screen&&context.matches(context.artifact(screen),session,params.executionContextId)) {',"if(params.name==='__dsPick'||params.name==='__dsArtifactEvent') {");
+// FIX-3 sweep maintenance: two anchors had drifted from the source they mutate
+// (both verified stale at HEAD 81f6afb, before any FIX-3 edit — the same class
+// the FIX-1 round fixed for fit-page's capture-renderer-finally):
+//  - artifact-authorization still named the pre-FIX-1 inline handler's
+//    `params.*`; the dispatchBinding extraction (170dadc) renamed them. The
+//    fault is unchanged: the trusted-artifact execution-context gate is
+//    replaced by a name-only check, so ANY frame's pick is honoured (A1/A3
+//    kill it).
+//  - capture-finally's bare endCapture line matched TWICE after the V4-2
+//    capture restructure added the overrideApplied/else branch; re-anchored to
+//    the !overrideApplied early-failure path C1 exercises (the renderer
+//    transaction never ends -> __dsCaptureActive stays true -> C1 kills it).
+if(mutant==='artifact-authorization')await mutate('browser','if(screen&&context.matches(context.artifact(screen),session,executionContextId)) {',"if(name==='__dsPick'||name==='__dsArtifactEvent') {");
 else if(mutant==='payload-bound')await mutate('browser',"if(typeof params.payload!=='string'||params.payload.length>24000)return;","if(typeof params.payload!=='string')return;");
-else if(mutant==='capture-finally')await mutate('browser','await this.shellEvalSettled(`__dsCanvas.endCapture(${JSON.stringify(token)})`);','/* scratch: no renderer capture restoration */');
+else if(mutant==='capture-finally')await mutate('browser','if(!overrideApplied){\n        try{await this.shellEvalSettled(`__dsCanvas.endCapture(${JSON.stringify(token)})`);}','if(!overrideApplied){\n        try{ /* scratch: no renderer capture restoration */ }');
 else if(mutant==='server-path')await mutate('viewer-server','req.url !== capability ? 404 :','false ? 404 :');
 else if(mutant==='pointer-cancellation'){
   await mutate('browser','    consumed=null;\n    if(!window.__dsViewerFlags.menu)return;','    /* scratch: stale sequence remains */\n    if(!window.__dsViewerFlags.menu)return;');

@@ -200,7 +200,7 @@ test('setScreens adopts baked artboards, diffs without reloads, and recomputes t
   assert.equal(e.api.setScreens([{ ...home, title: 'Home v2' }, other]), true);
   assert.equal(e.frameOf('home').srcWrites.length, 0, 'same id + same url = no reload');
   assert.equal(e.camera.children.length, 2);
-  assert.equal(e.sectionOf('home').querySelector('.ds-ab-title').textContent, '1 · Home v2');
+  assert.equal(e.sectionOf('home').querySelector('.ds-ab-label').textContent, '1 · Home v2'); // N1 (FIX-3): the header text lives in the inner label span
   assert.equal(e.sectionOf('other').querySelector('.ds-ab-size').textContent, '768×1024');
   assert.equal(e.api.setScreens([{ ...home, url: home.url + 'next' }, other]), true);
   assert.deepEqual(e.frameOf('home').srcWrites, [home.url + 'next'], 'a changed url rewrites exactly that frame');
@@ -216,7 +216,7 @@ test('setScreens adopts baked artboards, diffs without reloads, and recomputes t
   // budget, so all three share row 1; height = max(800,1024,844) = 1024.
   assert.equal(e.camera.style.width, '2534px'); assert.equal(e.camera.style.height, '1024px');
   assert.equal(e.sectionOf('third').style.left, '2144px'); assert.equal(e.sectionOf('third').style.top, '0px');
-  assert.equal(e.sectionOf('third').querySelector('.ds-ab-title').textContent, '3 · Third');
+  assert.equal(e.sectionOf('third').querySelector('.ds-ab-label').textContent, '3 · Third'); // N1 (FIX-3)
 });
 
 test('fit-all is the DEFAULT camera when the shell first becomes ready (V4-9/E10)', () => {
@@ -389,20 +389,21 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   assert.equal(menus().length, 1, 'right-click on an artboard opens exactly one menu');
   const menu = menus()[0];
   assert.equal(menu.getAttribute('role'), 'menu');
-  // F10: 8 items in 4 groups, joined by 3 role=separator dividers — the
-  // separators are never menuitems, so the keyboard ring skips them.
-  assert.equal(menu.children.length, 11, '8 items + 3 group separators');
+  // F10 + FIX-3 (F17): 9 items in 5 groups, joined by 4 role=separator
+  // dividers — the separators are never menuitems, so the keyboard ring skips
+  // them. Stop dev server (F17) is alone in its group before Rename.
+  assert.equal(menu.children.length, 13, '9 items + 4 group separators');
   assert.deepEqual(menu.children.map((c: any) => c.getAttribute('role')),
-    ['menuitem', 'separator', 'menuitem', 'menuitem', 'separator', 'menuitem', 'menuitem', 'menuitem', 'menuitem', 'separator', 'menuitem']);
+    ['menuitem', 'separator', 'menuitem', 'menuitem', 'separator', 'menuitem', 'menuitem', 'menuitem', 'menuitem', 'separator', 'menuitem', 'separator', 'menuitem']);
   const itemsOf = () => menus()[0].children.filter((c: any) => c.getAttribute('role') === 'menuitem');
   // Every frozen §3 action maps to exactly {type:'screen-menu',screen,action}.
   const fired = (index: number) => itemsOf()[index].onclick();
   const labels = itemsOf().map((c: any) => c.textContent);
-  assert.deepEqual(labels, ['Send to chat', 'Zoom to screen', 'Reload screen', 'Reset position', 'Export PNG', 'Export PDF', 'Copy file path', 'Rename…']);
+  assert.deepEqual(labels, ['Send to chat', 'Zoom to screen', 'Reload screen', 'Reset position', 'Export PNG', 'Export PDF', 'Copy file path', 'Stop dev server', 'Rename…']);
   assert.deepEqual(itemsOf().map((c: any) => c.dataset.action),
-    ['send-to-chat', 'zoom', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path', 'rename'],
+    ['send-to-chat', 'zoom', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path', 'stop-server', 'rename'],
     'data-action drives the subtle CSS icons; Rename… stays last, in its own group');
-  for (const [index, action] of [[0, 'send-to-chat'], [2, 'reload'], [3, 'reset-position'], [4, 'export-png'], [5, 'export-pdf'], [6, 'copy-path']] as const) {
+  for (const [index, action] of [[0, 'send-to-chat'], [2, 'reload'], [3, 'reset-position'], [4, 'export-png'], [5, 'export-pdf'], [6, 'copy-path'], [7, 'stop-server']] as const) {
     openVia(section);
     assert.equal(menus().length, 1);
     fired(index);
@@ -415,7 +416,7 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   assert.equal(e.commands.length, before, "'zoom' is local focus, no message");
   assert.equal(e.api.getCamera().mode, 'manual');
   // Rename (V4-17): inline input over the header; Enter commits <=120 chars.
-  openVia(section); fired(7);
+  openVia(section); fired(8);
   const input = e.elementOf('home', '.ds-ab-rename');
   assert.ok(input, 'the menu Rename… opens the inline header input');
   assert.equal(input.value, 'Home');
@@ -423,13 +424,13 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   e.fire(input.id, 'keydown', { key: 'Enter', preventDefault() {} });
   assert.deepEqual(e.commands.at(-1), { type: 'screen-rename', screen: 'home', title: 'Landing' });
   assert.equal(e.elementOf('home', '.ds-ab-rename'), null, 'committing removes the input');
-  openVia(section); fired(7);
+  openVia(section); fired(8);
   const input2 = e.elementOf('home', '.ds-ab-rename');
   input2.value = 'x'.repeat(160);
   e.fire(input2.id, 'keydown', { key: 'Enter', preventDefault() {} });
   assert.equal(e.commands.at(-1).title.length, 120, 'titles clamp to 120');
   const count = e.commands.length;
-  openVia(section); fired(7);
+  openVia(section); fired(8);
   const input3 = e.elementOf('home', '.ds-ab-rename');
   e.fire(input3.id, 'keydown', { key: 'Escape', preventDefault() {} });
   assert.equal(e.commands.length, count, 'Escape cancels without emitting');
@@ -860,7 +861,7 @@ test('title-bar drag repositions artboards with the pointerdown-bound scale and 
   e.api.setStatus({ state: 'ready' });
   e.api.restoreCamera({ mode: 'manual', scale: 0.5, panX: 0, panY: 0 });
   const title = e.elementOf('other', '.ds-ab-title');
-  assert.equal(title.textContent, '2 · Checkout');
+  assert.equal(e.elementOf('other', '.ds-ab-label').textContent, '2 · Checkout'); // N1 (FIX-3): label span carries the text
   const auto = e.api.getScreens().find((s: any) => s.id === 'other');
   assert.equal(auto.x, null, 'unpositioned screens start on the auto flow');
   const down = { button: 0, clientX: 300, clientY: 120, pointerId: 9, preventDefault() {}, stopPropagation() {} };

@@ -114,3 +114,54 @@ test('shell leases reject an attacker origin, destruction and close',async()=>{
   const fresh=f.contexts.captureShellAuthority('main',1);assert.ok(fresh);
   f.contexts.close();assert.equal(f.contexts.shellAuthorityCurrent(fresh),false);
 });
+
+// ---- FIX-3 (F5): in-frame binding verify + re-arm (the dead-session root fix) ----
+
+test('a missing in-frame __dsPick binding is verified after arming and re-armed on its OWN session (flush path)',async()=>{
+  const calls:Array<{method:string;params:Record<string,unknown>;session?:string}>=[];
+  let bound=false;
+  const trusted='http://127.0.0.1:32123/canvas/private-capability';
+  const frames=new Map<string,string[]>([['f-home',['id','ds-frame-home','data-ds-screen','home']]]);
+  const cdp={
+    on:(_method:string,_handler:(params:Record<string,unknown>,session?:string)=>void)=>()=>undefined,
+    send:async(method:string,params:Record<string,unknown>={},session?:string):Promise<Record<string,unknown>>=>{
+      calls.push({method,params,session});
+      if(method==='Page.getFrameTree')return {frameTree:{frame:{id:'root',url:trusted},childFrames:[{frame:{id:'f-home'}}]}};
+      if(method==='DOM.getFrameOwner')return {backendNodeId:`owner:${String(params.frameId)}`};
+      if(method==='DOM.describeNode'){
+        const frame=String(params.backendNodeId).replace('owner:','');
+        const attributes=frames.get(frame);
+        return attributes?{node:{nodeName:'IFRAME',attributes}}:{node:{nodeName:'DIV',attributes:[]}};
+      }
+      if(method==='Runtime.addBinding'){bound=true;return {};}
+      if(method==='Runtime.evaluate'){
+        const expression=String(params.expression??'');
+        if(expression==='typeof window.__dsPick')return {result:{value:bound?'function':'undefined'}};
+        return {result:{value:true}};
+      }
+      return {};
+    },
+  };
+  const contexts=new ArtifactContexts(cdp,'main','PAYLOAD_SCRIPTS',()=>undefined,trusted);
+  (contexts as unknown as { contexts: Map<string, unknown> }).contexts.set('main:10',{session:'main',frame:'f-home',id:10,unique:'world-home',origin:new URL(trusted).origin});
+  await contexts.discover();
+  await contexts.initializeArtifact();
+  // The arming evaluate ran, verification saw 'undefined' (the Windows
+  // addBinding-propagation race), re-issued BOTH artifact bindings on the
+  // frame's own session, and re-ran the payload scripts — the re-run is the
+  // in-frame flushPending() recovery for buffered clicks.
+  const arms=calls.filter((c)=>c.method==='Runtime.evaluate'&&String(c.params.expression).includes('PAYLOAD_SCRIPTS'));
+  assert.equal(arms.length,2,'the payload ran once to arm and once to re-arm (flush)');
+  const adds=calls.filter((c)=>c.method==='Runtime.addBinding');
+  assert.deepEqual(adds.map((a)=>String(a.params.name)).sort(),['__dsArtifactEvent','__dsPick'],'both artifact bindings re-issued');
+  assert.ok(adds.every((a)=>a.session==='main'),'re-issued on the frame context\'s own session');
+  // A later sweep pass over the now-bound context is a cheap silent no-op.
+  calls.length=0;
+  await contexts.verifyArtifactBindings();
+  assert.equal(calls.filter((c)=>c.method==='Runtime.addBinding').length,0,'a landed binding is never re-issued');
+  assert.equal(calls.filter((c)=>c.method==='Runtime.evaluate').length,1,'the sweep costs one typeof check per artifact');
+  // A dead world mid-check is swallowed (a later event/sweep re-arms).
+  bound=false;
+  (contexts as unknown as { contexts: Map<string, unknown> }).contexts.set('main:10',{session:'main',frame:'f-home',id:10,unique:'world-home',origin:new URL(trusted).origin});
+  assert.equal(await contexts.verifyArtifactBinding('home',{session:'main',frame:'gone',id:99} as never),false,'a revoked context verifies to false, never a throw');
+});

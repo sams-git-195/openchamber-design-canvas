@@ -386,19 +386,36 @@ test('V4-10 live: screen-menu send-to-chat rides /picks as kind:screen; reset-po
     assert.equal(page.picks[0]?.width, 1280);
     assert.equal(browser.getState().pickSeq, pickSeq0, 'lastPick/pickSeq stay element-only (back-compat kept)');
 
-    await shell(browser, "__dsCanvasSend(JSON.stringify({type:'screen-menu',screen:'home',action:'reset-position'}))");
-    const viewDeadline = Date.now() + 2500;
+    // FIX-3 (F15): reset-position DELETES the position key (no `"id": null`
+    // residue). Persist a real position first, then demand the key is gone.
+    await shell(browser, "__dsCanvasSend(JSON.stringify({type:'screen-move',screen:'home',x:120,y:80}))");
     let positions: Record<string, unknown> | undefined;
-    while (Date.now() < viewDeadline) {
+    const moveDeadline = Date.now() + 2500;
+    for (;;) {
       try {
         positions = (JSON.parse(await readFile(path.join(dir, '.design-studio', 'view.json'), 'utf8')) as { positions?: Record<string, unknown> }).positions;
       } catch {
         positions = undefined;
       }
       if (positions && 'home' in positions) break;
+      if (Date.now() >= moveDeadline) assert.fail(`screen-move never persisted a home position (last: ${JSON.stringify(positions)})`);
       await pause(60);
     }
-    assert.equal(positions?.home, null, 'reset-position stored null (back to auto)');
+    assert.deepEqual(positions?.home, { x: 120, y: 80 }, 'the drag persisted its position');
+
+    await shell(browser, "__dsCanvasSend(JSON.stringify({type:'screen-menu',screen:'home',action:'reset-position'}))");
+    const viewDeadline = Date.now() + 2500;
+    for (;;) {
+      try {
+        positions = (JSON.parse(await readFile(path.join(dir, '.design-studio', 'view.json'), 'utf8')) as { positions?: Record<string, unknown> }).positions;
+      } catch {
+        positions = undefined;
+      }
+      if (positions && !('home' in positions)) break;
+      if (Date.now() >= viewDeadline) assert.fail(`reset-position left position residue: ${JSON.stringify(positions)}`);
+      await pause(60);
+    }
+    assert.equal('home' in (positions ?? {}), false, 'F15: reset-position DELETED the key (was: stored null residue)');
   });
   await import('node:fs/promises').then(({ rm }) => rm(dir, { recursive: true, force: true }).catch(() => undefined));
 });
@@ -663,6 +680,26 @@ test('STRESS: 100 real CDP edit-mode clicks across 2 artboards deliver 100 picks
       cdp: { send: (m: string, p: object, s?: string) => Promise<unknown> };
       sessionId: string;
     };
+    // FIX-3 (N2): the stress used to map each click against the fit-all boot
+    // pose, but the FIRST edit click flips the camera fit-all→manual by design
+    // (controller pointerdown), which re-poses the grid vertically — clicks
+    // mapped before the flip landed off-target ('lost click 0') and later
+    // rects could sit outside the window (the x=1693 geometry failures). The
+    // fix PRIMEs the shell into the exact manual pose the first flip would
+    // produce (same visual framing, echo-suppressed via restoreCamera), so no
+    // click in the loop can move the camera anymore, and the per-click
+    // viewport assertion reads window.innerWidth/innerHeight from the SAME
+    // live evaluate snapshot as the frame rect — the same rect source the real
+    // pick path uses (SHELL_BRIDGE/framePoint map getBoundingClientRect +
+    // clientWidth scaling at event time). No pin weakened: 100 real
+    // compositor clicks, drain+ack, zero loss, exactly one pick each.
+    await shell(
+      browser,
+      `(()=>{const cam=__dsCanvas.getCamera();if(cam.mode!=='fit-all')return cam.mode;`
+      + `const c=document.getElementById('canvas').getBoundingClientRect();`
+      + `return __dsCanvas.restoreCamera({mode:'manual',scale:cam.scale,panX:cam.panX,panY:(c.height-cam.gridHeight*cam.scale)/2-48});})()`,
+    );
+    await pause(300);
     // The fixture's #b button spans (40,40)-(240,120) in frame CSS px on BOTH
     // boards (the phone board is 390 wide) — one point per board, recomputed
     // into shell viewport px on every click (the camera may micro-move).
@@ -678,11 +715,11 @@ test('STRESS: 100 real CDP edit-mode clicks across 2 artboards deliver 100 picks
       const board = BOARDS[i % 2]!;
       const point = (await shell(
         browser,
-        `(()=>{const f=document.getElementById('ds-frame-${board.id}');const r=f.getBoundingClientRect();return {x:r.x+${board.fx}*r.width/f.clientWidth,y:r.y+${board.fy}*r.height/f.clientHeight};})()`,
-      )) as { x: number; y: number };
+        `(()=>{const f=document.getElementById('ds-frame-${board.id}');const r=f.getBoundingClientRect();return {x:r.x+${board.fx}*r.width/f.clientWidth,y:r.y+${board.fy}*r.height/f.clientHeight,vw:window.innerWidth,vh:window.innerHeight};})()`,
+      )) as { x: number; y: number; vw: number; vh: number };
       assert.ok(
-        Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.y >= 0 && point.x <= 1400 && point.y <= 900,
-        `click ${i}: the ${board.id} button maps inside the window viewport (got ${JSON.stringify(point)})`,
+        Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.y >= 0 && point.x <= point.vw && point.y <= point.vh,
+        `click ${i}: the ${board.id} button maps inside the LIVE window viewport (same-snapshot rect+bounds; got ${JSON.stringify(point)})`,
       );
       const t0 = Date.now();
       for (const type of ['mousePressed', 'mouseReleased']) {

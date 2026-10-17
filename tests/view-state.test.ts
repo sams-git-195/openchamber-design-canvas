@@ -81,8 +81,12 @@ test('mergeView merges per key, is serialized per dir, and heals a corrupt file'
     assert.equal(onDisk.version, 1, 'the healed file is valid JSON');
 
     // Per-key merge: a second merge never clobbers keys the first one set.
+    // FIX-3 (F15): a null position DELETES its key (no `"id": null` residue);
+    // readers stay null-tolerant for files old builds wrote (sanitizeView pin
+    // above).
     const second = await mergeView(dir, { positions: { checkout: { x: 9, y: 9 }, home: null } });
-    assert.deepEqual(second.positions, { home: null, checkout: { x: 9, y: 9 } });
+    assert.deepEqual(second.positions, { checkout: { x: 9, y: 9 } }, 'F15: null deleted the home key');
+    assert.equal('home' in second.positions, false, 'no null residue on disk');
     assert.equal(second.mode, 'play', 'the camera-less merge leaves the persisted mode alone');
 
     // Serialization: 20 rapid merges to the same dir apply in call order.

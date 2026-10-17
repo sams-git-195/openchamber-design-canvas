@@ -24,8 +24,10 @@ test('renderer bakes one artboard per screen with hardening attributes and never
   assert.doesNotMatch(rendered, /id="preview"/);
   assert.match(rendered, /class="ds-ab-title"/);
   assert.match(rendered, /class="ds-ab-size">1280×800</);
-  assert.match(rendered, /class="ds-ab-title">1 · Home<\/button>/);
-  assert.match(rendered, /class="ds-ab-title">2 · Checkout<\/button>/);
+  // N1 (FIX-3): the header text lives in an inner label span — the flex title
+  // button ignores text-overflow, so the ellipsis must ride the span.
+  assert.match(rendered, /class="ds-ab-title"><span class="ds-ab-label">1 · Home<\/span><\/button>/);
+  assert.match(rendered, /class="ds-ab-title"><span class="ds-ab-label">2 · Checkout<\/span><\/button>/);
   assert.equal((rendered.match(/class="ds-ab-menu"/g) ?? []).length, 2, 'V4-10: every baked artboard carries the hover ⋯ trigger');
   assert.doesNotMatch(rendered, /id="layout-reason"|class="fallback"/, 'the legacy fit/page layout machinery is retired (V4-1)');
   assert.doesNotMatch(rendered, /srcdoc|contentDocument|contentWindow\.document|fixtureDocument|Fieldnotes|DEMO/);
@@ -94,13 +96,21 @@ test('design-review pins (Sonnet F3/F6/F7/F9/F10 + rename overflow): reserved si
   assert.match(rendered, /\.ds-artboard\[data-new=true\]\{animation:ds-new-pulse \.8s ease-out\}/);
   assert.match(rendered, /100%\{box-shadow:0 0 0 calc\(8px \/ var\(--cam-scale,1\)\) rgb\(79 140 255\/0\)/, 'the new-board ring is 8 device px, not a 16px camera-space slab');
   assert.doesNotMatch(rendered, /0 0 0 16px rgb\(79 140 255\/0\)/, 'the heavy 16px pulse ring is retired');
-  assert.match(rendered, /\.canvas:focus:not\(:focus-visible\)\{outline:none\}/);
+  // F16b (FIX-3): NO ring for mouse-click focus at all — :focus is suppressed
+  // outright (programmatic focus can match :focus-visible), the keyboard keeps
+  // an explicit blue ring, and the controller-tagged pointer focus never shows
+  // even that. F11 header ring unchanged.
+  assert.match(rendered, /\.canvas:focus\{outline:none\}/);
+  assert.match(rendered, /\.canvas:focus-visible\{outline:2px solid #4f8cff;outline-offset:-2px\}/);
+  assert.match(rendered, /\.canvas\[data-pointer-focus=true\]:focus-visible\{outline:none\}/);
   assert.match(rendered, /\.ds-artboard>\.ds-ab-title:focus\{outline:none\}/);
   assert.match(rendered, /\.ds-artboard>\.ds-ab-title:focus-visible\{outline:2px solid #4f8cff;outline-offset:2px;border-radius:4px\}/);
+  // N1 (FIX-3): the ellipsis budget lives on the inner label span.
+  assert.match(rendered, /\.ds-artboard>\.ds-ab-title>\.ds-ab-label\{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\}/);
   // F10: separators + subtle per-action icons; Rename… keeps the last group.
   assert.match(rendered, /\.ds-menu-sep\{height:1px;margin:4px 2px;flex:none;background:var\(--border\)\}/);
   assert.match(rendered, /\.ds-menu-item\{display:flex;align-items:center;gap:8px/);
-  for (const [action, glyph] of [['send-to-chat', '↗'], ['zoom', '◎'], ['reload', '↻'], ['reset-position', '⌂'], ['export-png', '⇩'], ['export-pdf', '⇩'], ['copy-path', '⧉'], ['rename', '✎']] as const) {
+  for (const [action, glyph] of [['send-to-chat', '↗'], ['zoom', '◎'], ['reload', '↻'], ['reset-position', '⌂'], ['export-png', '⇩'], ['export-pdf', '⇩'], ['copy-path', '⧉'], ['stop-server', '⏹'], ['rename', '✎']] as const) {
     assert.ok(rendered.includes(`.ds-menu-item[data-action=${action}]::before{content:"${glyph}"}`), `icon for ${action}`);
   }
 });
@@ -179,8 +189,9 @@ test('rendered client exposes the CDP contract incl. the SPEC-V4 §3 surface and
   assert.doesNotMatch(rendered, /type:\s*'layout'|type:\s*'viewport'/);
   assert.equal((rendered.match(/type:\s*'fit-size'/g) ?? []).length, 1, 'exactly one legacy fit-size emit site');
   assert.match(rendered, /bootConfig\.workspace === false && view\.layoutMode === 'fit'|bootConfig\.workspace===false&&view\.layoutMode==='fit'/, 'the fit-size emit is welded to the legacy launch gate');
-  // The context menu action union is the frozen §3 set.
-  for (const action of ['send-to-chat', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path']) assert.ok(rendered.includes(`'${action}'`), action);
+  // The context menu action union is the frozen §3 set plus FIX-3's F17
+  // stop-server (the in-canvas dev-server escape hatch).
+  for (const action of ['send-to-chat', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path', 'stop-server']) assert.ok(rendered.includes(`'${action}'`), action);
 });
 
 function clientFunction(name: string): string {

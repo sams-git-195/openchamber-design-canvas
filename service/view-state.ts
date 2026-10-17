@@ -6,11 +6,14 @@
 //
 //   { "version": 1,
 //     "camera": { "mode": "fit"|"manual", "scale": 0.1–3, "panX": -120, "panY": -40 },
-//     "positions": { "home": { "x": 0, "y": 0 }, "checkout": null },
+//     "positions": { "home": { "x": 0, "y": 0 } },
 //     "mode": "edit" | "play" }
 //
-// Never-positions (null) mean "back to the auto-grid". Positions are CAMERA-
-// space natural px (spec §7: scale is never baked in), clamped to ±32768.
+// Never-positions mean "back to the auto-grid": a merge carrying `null` for an
+// id DELETES that key (FIX-3/F15 — no `"id": null` residue is written), and the
+// read path stays null-tolerant for files older builds left behind. Positions
+// are CAMERA-space natural px (spec §7: scale is never baked in), clamped to
+// ±32768.
 // `camera` is null while the user has never touched the camera (then /open
 // restores nothing and the shell keeps its own default).
 //
@@ -239,7 +242,14 @@ async function applyMerge(root: string, patch: ViewPatch): Promise<ViewState> {
   if (patch.camera) current.camera = patch.camera;
   if (patch.mode) current.mode = patch.mode;
   if (patch.positions) {
-    for (const [id, position] of Object.entries(patch.positions)) current.positions[id] = position;
+    for (const [id, position] of Object.entries(patch.positions)) {
+      // FIX-3 (F15): a null position DELETES the key — "back to auto" is the
+      // ABSENCE of an entry, and reset-position no longer leaves `"id": null`
+      // residue in the file. The read path (sanitizeView) stays null-tolerant
+      // so view.json files written by older builds keep working verbatim.
+      if (position === null) delete current.positions[id];
+      else current.positions[id] = position;
+    }
   }
   await writeView(root, current);
   return current;

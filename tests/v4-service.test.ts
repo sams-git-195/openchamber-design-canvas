@@ -487,7 +487,7 @@ test('V4-10: menu send-to-chat rides the queue as kind:screen; copy-path toasts 
   assert.equal(exportAsked, 'home:pdf');
 });
 
-test('V4-10: reset-position merges view.json to null and pushes the auto pair', async () => {
+test('V4-10 + F15: reset-position DELETES the view.json position key and pushes the auto pair', async () => {
   const { browser, internal, shellCalls } = stubbedBrowser();
   const dir = await mkdtemp(path.join(tmpdir(), 'v4-reset-'));
   openFakeWorkspace(internal, dir);
@@ -495,11 +495,106 @@ test('V4-10: reset-position merges view.json to null and pushes the auto pair', 
   const canvasCommand = (browser as unknown as { canvasCommand: (c: unknown, a: unknown) => Promise<void> }).canvasCommand.bind(browser);
   await canvasCommand({ type: 'screen-menu', screen: 'home', action: 'reset-position' }, {});
   const view = await readView(dir);
-  assert.equal(view.positions.home, null, 'stored as null (auto), key kept');
+  // FIX-3 (F15): null residue is gone — "back to auto" is the ABSENCE of the
+  // key; readers stay null-tolerant for files old builds wrote.
+  assert.equal('home' in view.positions, false, 'F15: the position key was deleted, not nulled');
   const push = shellCalls.find((expr) => expr.includes('__dsCanvas.setScreens('));
   assert.ok(push);
   const list = JSON.parse(push!.slice('__dsCanvas.setScreens('.length, -1)) as Array<{ id: string; x?: number | null }>;
   assert.deepEqual(list.find((s) => s.id === 'home'), { ...list.find((s) => s.id === 'home'), x: null }, 'the push carries the null pair');
+});
+
+test('F15: mergeView stays null-tolerant on READ for files old builds wrote', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'v4-nullread-'));
+  const fs = await import('node:fs/promises');
+  await fs.mkdir(path.join(dir, '.design-studio'), { recursive: true });
+  await fs.writeFile(path.join(dir, '.design-studio', 'view.json'), JSON.stringify({ version: 1, camera: null, positions: { tall: null, home: { x: 3, y: 4 } }, mode: 'edit' }), 'utf8');
+  const view = await readView(dir);
+  assert.equal(view.positions.tall, null, 'a legacy null entry still reads as auto-grid');
+  assert.deepEqual(view.positions.home, { x: 3, y: 4 });
+  // The next merge heals the residue away.
+  const merged = await mergeView(dir, { mode: 'edit' });
+  assert.equal('tall' in merged.positions, true, 'read-tolerant: the legacy key survives until a positions patch touches it');
+  const cleaned = await mergeView(dir, { positions: { tall: null } });
+  assert.equal('tall' in cleaned.positions, false, 'an explicit null patch deletes it');
+});
+
+// ---- FIX-3 (F13): play-mode in-frame navigation moves the active artboard -------
+
+test('F13: a play-mode `changed` from artboard B setActive(B) with NO window raise; edit mode never follows', async () => {
+  const { browser, internal, shellCalls } = stubbedBrowser();
+  openFakeWorkspace(internal);
+  const raised: string[] = [];
+  internal.bringToFront = async () => { raised.push('raise'); };
+  internal.mode = 'play';
+  // Both boards are 'ready' (the guard that keeps a boot load storm from
+  // flapping the active screen).
+  const screens = internal.screens as Map<string, { state: string }>;
+  screens.get('home')!.state = 'ready';
+  screens.get('phone')!.state = 'ready';
+  const artifact = { session: 'oopif-phone', frame: 'f-phone', id: 7, unique: 'u7', origin: 'http://localhost:9' };
+  const contexts = {
+    screenForContext: (session: string | undefined) => (session === 'oopif-phone' ? 'phone' : null),
+    matches: (_c: unknown, session: string | undefined, id: unknown) => session === 'oopif-phone' && id === 7,
+    artifact: (id?: string) => (id === 'phone' || id === undefined ? artifact : null),
+    shellAuthorityCurrent: () => true,
+    shell: () => null,
+  };
+  internal.contexts = contexts;
+  const dispatch = (browser as unknown as {
+    dispatchBinding: (c: unknown, name: string, value: unknown, session: string | undefined, id: unknown) => boolean;
+  }).dispatchBinding.bind(browser);
+  assert.equal(internal.activeScreenId, 'home');
+  assert.equal(dispatch(contexts, '__dsArtifactEvent', { type: 'changed' }, 'oopif-phone', 7), true);
+  await pause(30);
+  assert.equal(internal.activeScreenId, 'phone', 'F13: play-mode in-frame navigation moved the active screen');
+  assert.ok(shellCalls.includes('SETACTIVE'), 'the shell got the setActive push (outline follows)');
+  assert.equal(raised.length, 0, 'V4-8: activation never raises the window');
+
+  // Edit mode: the user's explicit activation is untouched by frame events.
+  internal.mode = 'edit';
+  internal.activeScreenId = 'home';
+  shellCalls.length = 0;
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed' }, 'oopif-phone', 7);
+  await pause(30);
+  assert.equal(internal.activeScreenId, 'home', 'edit mode does NOT follow in-frame navigation');
+
+  // A board still loading cannot steal the active slot even in play mode.
+  internal.mode = 'play';
+  screens.get('phone')!.state = 'loading';
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed' }, 'oopif-phone', 7);
+  await pause(30);
+  assert.equal(internal.activeScreenId, 'home', 'a non-ready board never steals activation');
+});
+
+// ---- FIX-3 (F17): stop-server context-menu action --------------------------------
+
+test('F17: screen-menu stop-server runs the injected stopper and confirms via showToast', async () => {
+  const { browser, internal, toasts } = stubbedBrowser();
+  const dir = await mkdtemp(path.join(tmpdir(), 'v4-stop-'));
+  openFakeWorkspace(internal, dir);
+  const canvasCommand = (browser as unknown as { canvasCommand: (c: unknown, a: unknown) => Promise<void> }).canvasCommand.bind(browser);
+
+  // No stopper wired (legacy/no-dir paths): a warn toast, never a silent no-op.
+  await canvasCommand({ type: 'screen-menu', screen: 'home', action: 'stop-server' }, {});
+  assert.ok(toasts.some((t) => t.kind === 'warn' && /No dev server is recorded/.test(t.text)), 'unwired stopper warns');
+
+  let stoppedDir: string | null = null;
+  browser.setDevServerStop(async (d: string) => { stoppedDir = d; return { stopped: true }; });
+  toasts.length = 0;
+  await canvasCommand({ type: 'screen-menu', screen: 'home', action: 'stop-server' }, {});
+  assert.equal(stoppedDir, dir, 'the WORKSPACE dir rides the existing /server/stop machinery');
+  assert.ok(toasts.some((t) => t.kind === 'ok' && t.text === 'Dev server stopped'), 'success is confirmed through the existing showToast');
+
+  browser.setDevServerStop(async () => ({ stopped: false }));
+  toasts.length = 0;
+  await canvasCommand({ type: 'screen-menu', screen: 'home', action: 'stop-server' }, {});
+  assert.ok(toasts.some((t) => t.kind === 'ok' && t.text === 'No dev server was running'), 'a recorded nothing stops as a clean no-op toast');
+
+  browser.setDevServerStop(async () => ({ stopped: false, error: 'process escaped the group' }));
+  toasts.length = 0;
+  await canvasCommand({ type: 'screen-menu', screen: 'home', action: 'stop-server' }, {});
+  assert.ok(toasts.some((t) => t.kind === 'warn' && /Stop failed: process escaped/.test(t.text)), 'a failed kill surfaces, never silent');
 });
 
 test('V4-5: an honoured in-frame pick lands in the queue; ack toasts through showToast', async () => {
@@ -1080,4 +1175,83 @@ test('F6: a menu export that JOINS a foreign running job toasts "Another export 
   assert.ok(result, `harness printed its report (stdout: ${stdout.slice(0, 400)})`);
   assert.equal(result!.occupiedJoined, false, 'the occupying job started fresh (not a join itself)');
   assert.deepEqual(result!.toasts, [{ kind: 'warn', text: 'Another export is running — try again' }], 'F6: the joined menu export says the truth instead of "Export failed: no result"');
+});
+
+// ---- FIX-3 (F12): human registry-error banner copy -------------------------------
+
+test('F12: the registry banner text is human prose, never the raw parser dump', { timeout: 60_000 }, async () => {
+  const port = await pickFreePort(43000, 900);
+  // Child harness (same pattern as F6): importing main.ts boots the service
+  // module in-process on a throwaway port; the exported notice-text composer
+  // is the exact function applyRegistryChange feeds setNotice.
+  const script = [
+    'const main = await import(process.env.HARNESS_MAIN);',
+    'const cases = [',
+    '  "screens.json: Unexpected token \'o\', \\"not json\\" is not valid JSON",',
+    '  "screens.json: Unexpected end of JSON input",',
+    '  "screens.json: ENOENT: no such file or directory, open \'C:\\\\ws\\\\screens.json\'",',
+    '  "screens.json: EACCES: permission denied, open \'screens.json\'",',
+    '  "screens.json: some exotic reader failure",',
+    '];',
+    'console.log(JSON.stringify(cases.map((c) => main.registryErrorNoticeText(c))));',
+    'process.exit(0);',
+  ].join('\n');
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    env: {
+      ...process.env,
+      OPENCHAMBER_SERVICE_PORT: String(port),
+      OPENCHAMBER_SERVICE_TOKEN: TOKEN,
+      HARNESS_MAIN: pathToFileURL(path.join(root, 'service', 'main.ts')).href,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (d) => { stdout += String(d); });
+  child.stderr.on('data', (d) => { stderr += String(d); });
+  const code = await new Promise<number | null>((resolve) => child.on('exit', resolve));
+  assert.equal(code, 0, `harness exited cleanly (stderr: ${stderr.slice(0, 800)})`);
+  const line = stdout.trim().split('\n').find((l) => l.startsWith('['));
+  const texts = JSON.parse(line ?? 'null') as string[] | null;
+  assert.ok(texts && texts.length === 5, `harness printed five notice texts (stdout: ${stdout.slice(0, 400)})`);
+  for (const text of texts!) {
+    assert.ok(text.startsWith('screens.json'), `"screens.json: <reason>" style prose: ${text}`);
+    assert.ok(text.length <= 300, 'the shell notice cap (300) is respected');
+    for (const raw of ['Unexpected token', 'Unexpected end', 'ENOENT', 'EACCES', 'is not valid JSON']) {
+      assert.equal(text.includes(raw), false, `no raw parser/OS dump in the banner: ${text}`);
+    }
+  }
+  assert.match(texts![0]!, /isn't valid JSON.*kept the last good screens/i, 'syntax errors say what happened and what the canvas did');
+  assert.match(texts![2]!, /could not be found/i, 'a vanished registry reads as missing, not ENOENT');
+  assert.match(texts![3]!, /locked or unreadable/i, 'a permission failure reads as locked/unreadable, not EACCES');
+  assert.match(texts![4]!, /could not be read \(some exotic reader failure\)/, 'exotic reasons survive as a short human clause');
+});
+
+test('F12 source pin: applyRegistryChange feeds setNotice the composed text, and /state keeps the raw string', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(path.join(root, 'service', 'main.ts'), 'utf8');
+  assert.ok(source.includes("browser.setNotice({ id: 'registry', kind: 'error', text: registryErrorNoticeText(change.error) })"), 'the banner is composed prose');
+  assert.ok(source.includes('browser.setRegistryError(change.error)'), '/state.registryError keeps the raw machine string (the route-live pin reads it)');
+});
+
+// ---- FIX-3 (F5): the periodic artifact binding sweep (browser side) ---------------
+
+test('F5: the artifact arming sweep polls the known contexts and dies with the window', async () => {
+  const { browser, internal } = stubbedBrowser();
+  let sweeps = 0;
+  internal.cdp = { send: async () => ({}), on: () => () => undefined };
+  internal.closedAt = null;
+  internal.quitting = false;
+  internal.artifactSweepIntervalMs = 30;
+  internal.contexts = { verifyArtifactBindings: async () => { sweeps += 1; } };
+  (browser as unknown as { startArtifactBindingSweep: () => void }).startArtifactBindingSweep();
+  await pause(140);
+  assert.ok(sweeps >= 2, `the sweep re-verifies the artifact bindings periodically (saw ${sweeps})`);
+  internal.cdp = null; // the window died
+  internal.closedAt = Date.now();
+  await pause(120);
+  assert.equal(internal.artifactSweepTimer, null, 'the sweep disarmed at window close');
+  const atStop = sweeps;
+  await pause(120);
+  assert.equal(sweeps, atStop, 'a closed window schedules no further verification');
 });

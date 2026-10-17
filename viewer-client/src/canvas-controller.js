@@ -20,8 +20,10 @@ export function initCanvas(initialConfig) {
   const EMBED_HINT='If it is running, check CSP / X-Frame-Options embedding permissions.';
   // F10: grouped menu — dividers between the groups, subtle CSS icons keyed by
   // data-action (viewer-ui geometry), Rename… alone in the LAST group. The
-  // action strings are the frozen §3 screen-menu union, verbatim.
-  const SCREEN_MENU=[[['send-to-chat','Send to chat']],[['zoom','Zoom to screen'],['reload','Reload screen']],[['reset-position','Reset position'],['export-png','Export PNG'],['export-pdf','Export PDF'],['copy-path','Copy file path']],[['rename','Rename…']]];
+  // action strings are the frozen §3 screen-menu union, verbatim, plus FIX-3's
+  // F17 'stop-server' (the in-canvas escape hatch for the documented
+  // dev-servers-outlive-the-window policy), alone in its own group before Rename.
+  const SCREEN_MENU=[[['send-to-chat','Send to chat']],[['zoom','Zoom to screen'],['reload','Reload screen']],[['reset-position','Reset position'],['export-png','Export PNG'],['export-pdf','Export PDF'],['copy-path','Copy file path']],[['stop-server','Stop dev server']],[['rename','Rename…']]];
   const bootConfig=initialConfig||{};
   let pages = [], currentUrl = '', currentTitle = 'Preview';
   let screens = [], active = '', shellMode = 'edit', cellCenters = new Map();
@@ -145,6 +147,16 @@ export function initCanvas(initialConfig) {
     section.appendChild(menu);
     return menu;
   }
+  // N1 (FIX-3): the header text lives in an inner label span — the title
+  // button is display:inline-flex, which ignores text-overflow, so the
+  // ellipsis has to be applied to a block-level child. Bakes (or hand-rolled
+  // test DOMs) without the span get one at adoption; the button keeps the
+  // reserved size-label budget and the compact tier.
+  function titleLabel(title){
+    let label=title.querySelector('.ds-ab-label');
+    if(!label){label=document.createElement('span');label.className='ds-ab-label';title.appendChild(label);}
+    return label;
+  }
   function wireBoard(id,b){
     b.title.onclick=()=>{if(boardDragSquelch){boardDragSquelch=false;return;}transaction(()=>applyActive(id,true));};
     b.title.addEventListener('pointerdown',e=>{
@@ -200,13 +212,14 @@ export function initCanvas(initialConfig) {
     // F7 detail line is optional: pre-fix bakes (and hand-rolled test DOMs)
     // carry only copy + retry; renderBoardState tolerates its absence.
     const detail=overlay.querySelector('.ds-ab-card-detail');
-    const board={section,title,size,frame,overlay,copy,detail,action,menu:menuButtonFor(section)};
+    const board={section,title,label:titleLabel(title),size,frame,overlay,copy,detail,action,menu:menuButtonFor(section)};
     wireBoard(id,board);return board;
   }
   function createBoard(id){
     const section=document.createElement('section');
     section.className='ds-artboard';section.dataset.screen=id;section.dataset.active='false';
     const title=document.createElement('button');title.type='button';title.className='ds-ab-title';
+    const label=document.createElement('span');label.className='ds-ab-label';title.appendChild(label); // N1 (FIX-3)
     const size=document.createElement('span');size.className='ds-ab-size';
     const frame=document.createElement('iframe');
     frame.id='ds-frame-'+id;frame.dataset.dsScreen=id;
@@ -219,7 +232,7 @@ export function initCanvas(initialConfig) {
     const action=document.createElement('button');action.type='button';action.className='ds-ab-retry';action.textContent='Retry';
     overlay.appendChild(copy);overlay.appendChild(detail);overlay.appendChild(action);
     section.appendChild(title);section.appendChild(size);section.appendChild(frame);section.appendChild(overlay);
-    const board={section,title,size,frame,overlay,copy,detail,action};
+    const board={section,title,label,size,frame,overlay,copy,detail,action};
     board.menu=menuButtonFor(section);
     wireBoard(id,board);
     return board;
@@ -251,7 +264,10 @@ export function initCanvas(initialConfig) {
       // width (V4-9): max-width calc(var(--w) * var(--cam-scale)).
       if(b.section.style.setProperty)b.section.style.setProperty('--w',s.width+'px');
       b.section.dataset.active=s.id===active?'true':'false';
-      b.title.textContent=(i+1)+' · '+s.title;b.size.textContent=s.width+'×'+s.height;
+      // N1 (FIX-3): header text goes to the inner label span (the flex button
+      // itself cannot ellipsis); fall back for boards adopted without one.
+      if(b.label)b.label.textContent=(i+1)+' · '+s.title;else b.title.textContent=(i+1)+' · '+s.title;
+      b.size.textContent=s.width+'×'+s.height;
       if(s.url&&s.src!==s.url){
         // If the frame already shows s.url (in-frame navigation synced through
         // the load hook) only the bookkeeping needs to move -- never rewrite
@@ -793,6 +809,9 @@ export function initCanvas(initialConfig) {
   }
   for(const type of ['pointerdown','pointermove','pointerup','click','wheel','keydown','keyup'])document.addEventListener(type,e=>{if(captureState){e.preventDefault();e.stopImmediatePropagation();}},{capture:true,passive:false});
   document.addEventListener('keydown',e=>{
+    // F16b (FIX-3): a key press ends any pointer-focus suppression, so the
+    // keyboard :focus-visible ring is back for keyboard users.
+    if(canvas.dataset&&canvas.dataset.pointerFocus)delete canvas.dataset.pointerFocus;
     // The context menu owns the keyboard while it is open; typing into the
     // inline rename input never reaches canvas shortcuts. While the agent owns
     // input (V4-7) every user key path is inert.
@@ -812,6 +831,11 @@ export function initCanvas(initialConfig) {
   window.addEventListener('resize',()=>{if(contextMenu)positionMenu(contextMenu.menu,contextMenu.x,contextMenu.y);});
   canvas.addEventListener('pointerdown',e=>{
     if(!view.ready||view.layoutMode==='fit'||view.agentInput||e.button!==0||e.target.closest('.state')||e.target.closest('.ds-ab-title')||e.target.closest('.ds-ab-menu')||e.target.closest('.ds-ab-rename')||e.target.closest('.ds-ab-state'))return;
+    // F16b (FIX-3): tag the pointer-originated focus BEFORE focusing so the
+    // CSS never draws the keyboard :focus-visible ring for it (programmatic
+    // focus can match :focus-visible — the white post-click ring finding).
+    // Any keydown clears the tag, so keyboard focus keeps its ring.
+    canvas.dataset.pointerFocus='true';
     canvas.focus();view.mode='manual';emitHoverEnd();
     drag={x:e.clientX,y:e.clientY,panX:view.panX,panY:view.panY,moved:false,section:e.target.closest('.ds-artboard')};canvas.setPointerCapture(e.pointerId);canvas.classList.add('dragging');e.preventDefault();
   });

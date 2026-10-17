@@ -242,7 +242,7 @@ function initCanvas(initialConfig) {
   const SCREEN_ID3 = /^[a-z0-9][a-z0-9-]{0,30}$/;
   const BOARD_COPY = { loading: "Loading this screen.", ready: "", error: "Dev server unreachable \u2014 Reload to restart it." };
   const EMBED_HINT = "If it is running, check CSP / X-Frame-Options embedding permissions.";
-  const SCREEN_MENU = [[["send-to-chat", "Send to chat"]], [["zoom", "Zoom to screen"], ["reload", "Reload screen"]], [["reset-position", "Reset position"], ["export-png", "Export PNG"], ["export-pdf", "Export PDF"], ["copy-path", "Copy file path"]], [["rename", "Rename\u2026"]]];
+  const SCREEN_MENU = [[["send-to-chat", "Send to chat"]], [["zoom", "Zoom to screen"], ["reload", "Reload screen"]], [["reset-position", "Reset position"], ["export-png", "Export PNG"], ["export-pdf", "Export PDF"], ["copy-path", "Copy file path"]], [["stop-server", "Stop dev server"]], [["rename", "Rename\u2026"]]];
   const bootConfig = initialConfig || {};
   let pages = [], currentUrl = "", currentTitle = "Preview";
   let screens = [], active = "", shellMode = "edit", cellCenters = /* @__PURE__ */ new Map();
@@ -379,6 +379,15 @@ function initCanvas(initialConfig) {
     section.appendChild(menu);
     return menu;
   }
+  function titleLabel(title) {
+    let label = title.querySelector(".ds-ab-label");
+    if (!label) {
+      label = document.createElement("span");
+      label.className = "ds-ab-label";
+      title.appendChild(label);
+    }
+    return label;
+  }
   function wireBoard(id, b) {
     b.title.onclick = () => {
       if (boardDragSquelch) {
@@ -443,7 +452,7 @@ function initCanvas(initialConfig) {
     const copy = overlay.querySelector(".ds-ab-card-copy"), action = overlay.querySelector(".ds-ab-retry");
     if (!copy || !action) return null;
     const detail = overlay.querySelector(".ds-ab-card-detail");
-    const board = { section, title, size, frame, overlay, copy, detail, action, menu: menuButtonFor(section) };
+    const board = { section, title, label: titleLabel(title), size, frame, overlay, copy, detail, action, menu: menuButtonFor(section) };
     wireBoard(id, board);
     return board;
   }
@@ -455,6 +464,9 @@ function initCanvas(initialConfig) {
     const title = document.createElement("button");
     title.type = "button";
     title.className = "ds-ab-title";
+    const label = document.createElement("span");
+    label.className = "ds-ab-label";
+    title.appendChild(label);
     const size = document.createElement("span");
     size.className = "ds-ab-size";
     const frame = document.createElement("iframe");
@@ -483,7 +495,7 @@ function initCanvas(initialConfig) {
     section.appendChild(size);
     section.appendChild(frame);
     section.appendChild(overlay);
-    const board = { section, title, size, frame, overlay, copy, detail, action };
+    const board = { section, title, label, size, frame, overlay, copy, detail, action };
     board.menu = menuButtonFor(section);
     wireBoard(id, board);
     return board;
@@ -527,7 +539,8 @@ function initCanvas(initialConfig) {
       b.section.style.height = s.height + "px";
       if (b.section.style.setProperty) b.section.style.setProperty("--w", s.width + "px");
       b.section.dataset.active = s.id === active ? "true" : "false";
-      b.title.textContent = i + 1 + " \xB7 " + s.title;
+      if (b.label) b.label.textContent = i + 1 + " \xB7 " + s.title;
+      else b.title.textContent = i + 1 + " \xB7 " + s.title;
       b.size.textContent = s.width + "\xD7" + s.height;
       if (s.url && s.src !== s.url) {
         const current = typeof b.frame.src === "string" ? b.frame.src : "";
@@ -1343,6 +1356,7 @@ function initCanvas(initialConfig) {
     }
   }, { capture: true, passive: false });
   document.addEventListener("keydown", (e) => {
+    if (canvas.dataset && canvas.dataset.pointerFocus) delete canvas.dataset.pointerFocus;
     if (contextMenu) {
       handleMenuKey(e);
       return;
@@ -1412,6 +1426,7 @@ function initCanvas(initialConfig) {
   });
   canvas.addEventListener("pointerdown", (e) => {
     if (!view.ready || view.layoutMode === "fit" || view.agentInput || e.button !== 0 || e.target.closest(".state") || e.target.closest(".ds-ab-title") || e.target.closest(".ds-ab-menu") || e.target.closest(".ds-ab-rename") || e.target.closest(".ds-ab-state")) return;
+    canvas.dataset.pointerFocus = "true";
     canvas.focus();
     view.mode = "manual";
     emitHoverEnd();
@@ -1759,7 +1774,7 @@ function flowLayout(screens) {
 function renderArtboard(screen, cell, index, active) {
   const id = escapeAttribute(screen.id);
   const header = `${index + 1} \xB7 ${escapeText(screen.title)}`;
-  return `<section class="ds-artboard" data-screen="${id}" data-active="${active ? "true" : "false"}" style="left:${cell.x}px;top:${cell.y}px;width:${screen.width}px;height:${screen.height}px;--w:${screen.width}px"><button type="button" class="ds-ab-title">${header}</button><span class="ds-ab-size">${screen.width}\xD7${screen.height}</span><iframe id="ds-frame-${id}" data-ds-screen="${id}" name="__dsArtifact:${id}" referrerpolicy="no-referrer" sandbox="${FRAME_SANDBOX}" src="${escapeAttribute(screen.url)}"></iframe><div class="ds-ab-state" data-state="loading"><p class="ds-ab-card-copy" role="status">Loading this screen.</p><p class="ds-ab-card-detail" hidden></p><button type="button" class="ds-ab-retry" hidden>Retry</button></div><button type="button" class="ds-ab-menu" aria-label="Screen options">\u22EF</button></section>`;
+  return `<section class="ds-artboard" data-screen="${id}" data-active="${active ? "true" : "false"}" style="left:${cell.x}px;top:${cell.y}px;width:${screen.width}px;height:${screen.height}px;--w:${screen.width}px"><button type="button" class="ds-ab-title"><span class="ds-ab-label">${header}</span></button><span class="ds-ab-size">${screen.width}\xD7${screen.height}</span><iframe id="ds-frame-${id}" data-ds-screen="${id}" name="__dsArtifact:${id}" referrerpolicy="no-referrer" sandbox="${FRAME_SANDBOX}" src="${escapeAttribute(screen.url)}"></iframe><div class="ds-ab-state" data-state="loading"><p class="ds-ab-card-copy" role="status">Loading this screen.</p><p class="ds-ab-card-detail" hidden></p><button type="button" class="ds-ab-retry" hidden>Retry</button></div><button type="button" class="ds-ab-menu" aria-label="Screen options">\u22EF</button></section>`;
 }
 function renderViewerHtml(config) {
   const { width, height } = config.viewport;
@@ -1811,9 +1826,15 @@ body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 #toolbar-root{flex:none;min-width:0}
 .canvas{position:relative;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden;touch-action:none;background:oklch(0.17 0 0) radial-gradient(circle,oklch(1 0 0 / .11) 1.25px,transparent 1.5px);background-size:24px 24px;background-position:0 0}
 .canvas[data-layout=fit]{touch-action:auto}
-/* F16: a mouse click on the canvas must not leave the UA focus ring around
-   the whole art wall; keyboard focus keeps its visible ring. */
-.canvas:focus:not(:focus-visible){outline:none}
+/* F16b (FIX-3): a mouse click on the canvas must not leave ANY focus ring
+   around the whole art wall — the controller focuses the canvas from its
+   pointerdown handler, and programmatic focus can match :focus-visible, so
+   the ring is suppressed for :focus outright and only keyboard focus keeps
+   an explicit blue ring. A pointer-originated focus is additionally tagged
+   data-pointer-focus by the controller so it never shows the keyboard ring. */
+.canvas:focus{outline:none}
+.canvas:focus-visible{outline:2px solid #4f8cff;outline-offset:-2px}
+.canvas[data-pointer-focus=true]:focus-visible{outline:none}
 .camera{position:absolute;top:0;left:0;transform-origin:0 0}
 iframe{display:block;border:0;width:100%;height:100%}
 .camera[hidden],.pan-layer[hidden],.state[hidden],[hidden]{display:none}
@@ -1826,6 +1847,10 @@ iframe{display:block;border:0;width:100%;height:100%}
 .ds-artboard>.ds-ab-title,.ds-artboard>.ds-ab-size{position:absolute;bottom:100%;margin:0 0 8px;padding:0;display:inline-flex;align-items:center;line-height:1;transform:scale(calc(1 / var(--cam-scale,1)))}
 .ds-artboard>.ds-ab-title{left:0;transform-origin:bottom left;max-width:calc(var(--w,100%) * var(--cam-scale,1) - var(--ab-size-w,84px));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;font-size:13px;font-weight:500;color:var(--foreground);opacity:.85;cursor:pointer}
 .ds-artboard>.ds-ab-title:hover{opacity:1}
+/* N1 (FIX-3): the title button is inline-flex (which ignores text-overflow),
+   so the ellipsis is applied to the inner label span; the button keeps the
+   reserved size-label budget (max-width above) and the compact tier. */
+.ds-artboard>.ds-ab-title>.ds-ab-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* F11: no rectangular white UA ring left on the header after Esc/rename —
    keyboard users get a blue ring that matches the artboard radius instead. */
 .ds-artboard>.ds-ab-title:focus{outline:none}
@@ -1890,6 +1915,7 @@ iframe{display:block;border:0;width:100%;height:100%}
 .ds-menu-item[data-action=export-png]::before{content:"⇩"}
 .ds-menu-item[data-action=export-pdf]::before{content:"⇩"}
 .ds-menu-item[data-action=copy-path]::before{content:"⧉"}
+.ds-menu-item[data-action=stop-server]::before{content:"⏹"}
 .ds-menu-item[data-action=rename]::before{content:"✎"}
 .state{position:absolute;inset:0;display:grid;place-items:center;text-align:center;background:var(--background)}
 .state-body{max-width:100%;overflow-wrap:anywhere}
@@ -2170,11 +2196,63 @@ var ArtifactContexts = class {
         if (this.artifact(screen) === context && !this.armed.has(key)) {
           await this.evaluate(context, "window.__dsTrustedArtifact=true;" + this.scripts);
           if (this.artifact(screen) === context) this.armed.add(key);
+          if (this.artifact(screen) === context) await this.verifyArtifactBinding(screen, context);
         }
       } catch {
       }
     }
     this.changed();
+  }
+  /**
+   * FIX-3 (F5 root fix): verify the artifact bindings reached one armed
+   * context and re-arm when they did not. `Runtime.addBinding` responses can
+   * land BEFORE the binding itself propagates into a pre-existing execution
+   * context (the same Windows lag this repo documents above SHELL_BRIDGE); the
+   * in-frame picker then buffers every click into `__dsPickPending` forever —
+   * the silent per-session pick-loss class (Sonnet re-verify F5: ~12% of fresh
+   * sessions had `typeof window.__dsPick === 'undefined'` with buffered picks).
+   * Recovery: re-issue the two artifact bindings on the context's OWN session
+   * (idempotent, and re-adding forces propagation into the existing context —
+   * FIX-1's proven shell-side mechanism) and re-run the payload scripts, whose
+   * idempotent guards make the re-run a pure `flushPending()`. Returns true
+   * when a re-arm was performed. Deliberately NOT a replay of dropped
+   * bindingCalled messages (FIX-1's rationale stands): re-arming the frame IS
+   * the replay — the buffer lives in the frame and flushes itself.
+   */
+  async verifyArtifactBinding(screen, context) {
+    if (!this.active || !this.matches(context, context.session, context.id)) return false;
+    let kind;
+    try {
+      kind = await this.evaluate(context, "typeof window.__dsPick");
+    } catch {
+      return false;
+    }
+    if (kind === "function") return false;
+    try {
+      for (const name of ["__dsPick", "__dsArtifactEvent"]) {
+        await this.cdp.send("Runtime.addBinding", { name }, context.session);
+      }
+      if (!this.active || !this.matches(context, context.session, context.id)) return false;
+      await this.evaluate(context, "window.__dsTrustedArtifact=true;" + this.scripts);
+      this.armed.add(context.session + ":" + context.id);
+      console.log(`[design-canvas] artifact binding re-armed for "${screen}" (in-frame __dsPick was ${typeof kind === "string" ? kind : "unreachable"}; buffered picks flushed)`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  /**
+   * FIX-3: one arming sweep over every known artifact context — the cheap
+   * periodic self-heal for late propagation races the per-arm verification
+   * could not see (a binding that lands, then a context created after it that
+   * missed the script re-run). Called by the Browser's unref'd sweep timer.
+   */
+  async verifyArtifactBindings() {
+    if (!this.active) return;
+    for (const [screen, context] of this.artifacts()) {
+      if (!this.active) break;
+      await this.verifyArtifactBinding(screen, context).catch(() => void 0);
+    }
   }
   /** A new OOPIF may commit before Page.enable can report frameNavigated. */
   async seedArtifactLoader(screen, context) {
@@ -2578,7 +2656,10 @@ async function applyMerge(root, patch) {
   if (patch.camera) current.camera = patch.camera;
   if (patch.mode) current.mode = patch.mode;
   if (patch.positions) {
-    for (const [id, position] of Object.entries(patch.positions)) current.positions[id] = position;
+    for (const [id, position] of Object.entries(patch.positions)) {
+      if (position === null) delete current.positions[id];
+      else current.positions[id] = position;
+    }
   }
   await writeView(root, current);
   return current;
@@ -3546,11 +3627,29 @@ var ARTIFACT_BRIDGE = `(() => {
     e.preventDefault();window.__dsArtifactEvent(JSON.stringify({type:'wheel',x:e.clientX,y:e.clientY,deltaX:e.deltaX,deltaY:e.deltaY}));
   },{passive:false});
 })();`;
-var ARTIFACT_SCRIPTS = `if(window!==top){
-  if(window.__dsTrustedArtifact || window.name.startsWith('__dsArtifact:')){${ARTIFACT_BRIDGE}}
+var SCROLLBAR_CHROME = `(() => {
+  if (window.__dsScrollbarHidden) return;
+  window.__dsScrollbarHidden = true;
+  const apply = () => {
+    if (document.getElementById('__ds-scrollbar-style')) return;
+    const style = document.createElement('style');
+    style.id = '__ds-scrollbar-style';
+    style.setAttribute('data-ds-overlay', 'chrome');
+    style.textContent = 'html{scrollbar-width:none}html::-webkit-scrollbar{display:none;width:0;height:0}';
+    (document.head || document.documentElement).appendChild(style);
+  };
+  if (document.head || document.documentElement) apply();
+  else document.addEventListener('DOMContentLoaded', apply, { once: true });
+})();`;
+function artifactScripts(scrollbarChrome) {
+  return `if(window!==top){
+  if(window.__dsTrustedArtifact || window.name.startsWith('__dsArtifact:')){${ARTIFACT_BRIDGE}${scrollbarChrome ? SCROLLBAR_CHROME : ""}}
   ${PICK_SCRIPT}
   if((window.__dsTrustedArtifact || window.name.startsWith('__dsArtifact:')) && !window.__dsProbe){${PROBE_SCRIPT}}
 }`;
+}
+var ARTIFACT_SCRIPTS = artifactScripts(false);
+var WORKSPACE_ARTIFACT_SCRIPTS = artifactScripts(true);
 var SHELL_BRIDGE = `(() => {
   // Install only once the session's bindings have actually reached this
   // context: the --app window's root document exists BEFORE we attach and
@@ -3790,6 +3889,15 @@ var Browser = class {
   handshakeAttempts = 0;
   /** Test seam: the recovery cadence (product default ~2 s per the QA fix). */
   handshakeRecoveryIntervalMs = 2e3;
+  // ---- FIX-3 (F5): periodic artifact binding-arming sweep -----------------------
+  /** Unref'd sweep over the known artifact contexts: verify each frame's
+   *  `__dsPick` binding actually landed and re-arm (addBinding + script re-run,
+   *  which flushes the in-frame pending buffer) when it did not. This is the
+   *  self-heal for late propagation races the per-arm check could not see; the
+   *  dead-session silent pick-loss class (Sonnet re-verify F5) is what it kills. */
+  artifactSweepTimer = null;
+  /** Test seam: the sweep cadence (product default 4 s). */
+  artifactSweepIntervalMs = 4e3;
   // ---- F1 (V4 QA): bounded replay of shell bindings dropped by the lease -------
   shellReplay = [];
   shellReplayPump = null;
@@ -3809,6 +3917,10 @@ var Browser = class {
   menuExportHandler = null;
   /** V4-15: main.ts wires the dev-server ensure for per-screen Retry (cycle-free). */
   devServerEnsure = null;
+  /** FIX-3 (F17): main.ts wires the dev-server STOP for the artboard context
+   *  menu's `stop-server` action — the same recorded-process-group kill the
+   *  `POST /server/stop` route runs (cycle-free, same injection pattern). */
+  devServerStop = null;
   constructor() {
     this.windowSpec = parseWindowSpec(process.env.DS_WINDOW) ?? DEFAULT_WINDOW;
   }
@@ -4226,7 +4338,7 @@ var Browser = class {
     }
     if (!await this.attachExistingPage(cdp)) await this.attachNewPage(cdp);
     const session = this.requireSession();
-    const contexts = new ArtifactContexts(cdp, session, ARTIFACT_SCRIPTS, () => {
+    const contexts = new ArtifactContexts(cdp, session, this.workspaceMode ? WORKSPACE_ARTIFACT_SCRIPTS : ARTIFACT_SCRIPTS, () => {
       this.frameEventsChanged();
     }, url);
     this.contexts = contexts;
@@ -4253,6 +4365,7 @@ var Browser = class {
     this.assertLaunchAlive(alive, "after shellHandshakeFlush");
     this.logHandshake(`initial flush ${flushed ? "reported sent" : "timed out"}${flushed ? "" : " \u2014 arming continuous recovery"}`);
     this.startShellHandshakeRecovery();
+    this.startArtifactBindingSweep();
   }
   /** F2: throw a diagnostic LaunchDiedError when the launch integrity check
    *  fails (the window being launched died during a boot await). */
@@ -4358,7 +4471,12 @@ var Browser = class {
       }
       if (name === "__dsArtifactEvent" && value && ["dismiss", "changed", "height-dirty", "wheel", "camera-zoom"].includes(value.type)) {
         if (value.type === "dismiss" && this.canvasFlags.menu) void this.shellEval("__dsCanvas.dismissMenu()").catch(() => void 0);
-        if (value.type === "changed") void this.refreshScreen(screen);
+        if (value.type === "changed") {
+          void this.refreshScreen(screen);
+          if (this.mode === "play" && screen !== this.activeScreenId && this.screens.get(screen)?.state === "ready") {
+            void this.setActive(screen).catch(() => void 0);
+          }
+        }
         if (value.type === "height-dirty" && screen === this.activeScreenId) this.queueLayout();
         if (value.type === "camera-zoom" && validCameraZoom(value) && !this.captureInFlight) {
           const artifact = context.artifact(screen);
@@ -4594,6 +4712,39 @@ var Browser = class {
   /** F1 diagnostics: every flush outcome is logged (QA acceptance). */
   logHandshake(message) {
     console.log(`[design-canvas] shell handshake: ${message}`);
+  }
+  // ---- FIX-3 (F5): periodic artifact arming sweep ------------------------------
+  /**
+   * The dead-session pick-loss root fix, self-heal half. `verifyArtifactBinding`
+   * (artifact-context.ts) checks `typeof window.__dsPick` in each armed frame
+   * and re-issues `Runtime.addBinding` + re-runs the payload scripts when the
+   * binding never landed (the Windows addBinding-propagation race); the in-frame
+   * `__dsPickPending` buffer then flushes any clicks queued while it was
+   * missing, so a late race heals WITHOUT dropping the user's pick. This sweep
+   * runs that verification over every known artifact context every few seconds
+   * (unref'd, so it never holds the process open) and stops with the window.
+   * Each re-arm is logged with its screen id (acceptance diagnostics).
+   */
+  startArtifactBindingSweep() {
+    this.stopArtifactBindingSweep();
+    const timer = setInterval(() => {
+      if (!this.cdp || this.closedAt !== null || this.quitting) {
+        this.stopArtifactBindingSweep();
+        return;
+      }
+      const contexts = this.contexts;
+      if (!contexts || typeof contexts.verifyArtifactBindings !== "function") return;
+      void contexts.verifyArtifactBindings().catch(() => void 0);
+    }, this.artifactSweepIntervalMs);
+    timer.unref?.();
+    this.artifactSweepTimer = timer;
+  }
+  /** Disarm the sweep (teardown, or a relaunch re-arms it). */
+  stopArtifactBindingSweep() {
+    if (this.artifactSweepTimer) {
+      clearInterval(this.artifactSweepTimer);
+      this.artifactSweepTimer = null;
+    }
   }
   /**
    * shellEval that waits for a shell lease instead of failing mid-load. The
@@ -4914,7 +5065,8 @@ var Browser = class {
     }
   }
   // ---- V4-10 artboard context-menu actions ------------------------------------
-  /** The frozen §3 action list; unknown strings are refused silently. */
+  /** The frozen §3 action list plus FIX-3's 'stop-server' (F17); unknown
+   *  strings are refused silently. */
   async screenMenuAction(screen, action) {
     const record = this.screens.get(screen);
     if (!record) return;
@@ -4953,7 +5105,25 @@ var Browser = class {
       } else {
         await this.pushToast("warn", "No file path is known for this screen");
       }
+      return;
     }
+    if (action === "stop-server") {
+      const dir = this.workspaceDir;
+      const handler = this.devServerStop;
+      if (!dir || !handler) {
+        await this.pushToast("warn", "No dev server is recorded for this canvas");
+        return;
+      }
+      const result = await handler(dir).catch(() => ({ stopped: false, error: "could not stop the dev server" }));
+      if (result.error) await this.pushToast("warn", `Stop failed: ${result.error}`.slice(0, 300));
+      else await this.pushToast("ok", result.stopped ? "Dev server stopped" : "No dev server was running");
+    }
+  }
+  /** FIX-3 (F17): main.ts injects the dev-server stopper (`stopDevServer`) so
+   *  browser.ts stays free of the project-server import cycle — the same
+   *  injection pattern as setDevServerEnsure. */
+  setDevServerStop(handler) {
+    this.devServerStop = handler;
   }
   /** Registry-file lookup fallback for copy-path when the push carried urls. */
   async lookupRegistryFile(dir, screen) {
@@ -5866,6 +6036,7 @@ var Browser = class {
     this.hoverPending = null;
     this.lastHoverScreen = null;
     this.stopShellHandshakeRecovery();
+    this.stopArtifactBindingSweep();
     this.shellReplay = [];
     if (this.shellReplayPump) {
       clearTimeout(this.shellReplayPump);
@@ -5959,6 +6130,7 @@ var Browser = class {
     await this.viewer?.close();
     this.viewer = null;
     this.stopShellHandshakeRecovery();
+    this.stopArtifactBindingSweep();
     this.shellReplay = [];
     if (this.shellReplayPump) {
       clearTimeout(this.shellReplayPump);
@@ -10715,12 +10887,26 @@ function droppedNoticeText(dropped) {
   const parts = dropped.map((d) => `screens.json entry ${d.index} dropped: ${d.reason}`);
   return parts.join(" \xB7 ").slice(0, 300);
 }
+function registryErrorNoticeText(error) {
+  const reason = error.startsWith(`${SCREENS_FILENAME}: `) ? error.slice(SCREENS_FILENAME.length + 2) : error;
+  if (/is not valid JSON|Unexpected token|Unexpected end of JSON|Expected [^ ]+ in JSON/i.test(reason)) {
+    return `screens.json isn't valid JSON, so the canvas kept the last good screens. Fix the file and the canvas picks it up automatically.`;
+  }
+  if (/ENOENT|no such file|does not exist/i.test(reason)) {
+    return `screens.json could not be found, so the canvas kept the last good screens. Restore the file and the canvas picks it up automatically.`;
+  }
+  if (/EACCES|EPERM|EBUSY|operation not permitted/i.test(reason)) {
+    return `screens.json could not be read (the file is locked or unreadable), so the canvas kept the last good screens. Close whatever holds the file and it reloads automatically.`;
+  }
+  const short = reason.length > 160 ? `${reason.slice(0, 157)}\u2026` : reason;
+  return `screens.json could not be read (${short}), so the canvas kept the last good screens.`;
+}
 async function applyRegistryChange(dir, change) {
   const browser2 = getBrowser();
   if (!browser2 || !(await browser2.state()).windowOpen) return { pushed: false };
   if (!change.ok) {
     browser2.setRegistryError(change.error);
-    await browser2.setNotice({ id: "registry", kind: "error", text: change.error });
+    await browser2.setNotice({ id: "registry", kind: "error", text: registryErrorNoticeText(change.error) });
     return { pushed: false };
   }
   browser2.setRegistryError(null);
@@ -10805,6 +10991,7 @@ function wireBrowserHooks(browser2) {
   browser2.setMenuExportHandler((screen, format) => {
     void runMenuExport(browser2, screen, format).catch(() => void 0);
   });
+  browser2.setDevServerStop(async (dir) => stopDevServer(dir));
 }
 async function runMenuExport(browser2, screen, format) {
   const dir = browser2.currentWorkspaceDir();
@@ -11913,5 +12100,6 @@ process.on("SIGTERM", () => {
   void shutdown();
 });
 export {
+  registryErrorNoticeText,
   runMenuExport
 };

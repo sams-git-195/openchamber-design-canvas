@@ -464,3 +464,251 @@ barrier/redirect/fit-page/live-canvas families staying green.
   before the replay was scoped to shell bindings, and did not recur across the 3
   acceptance runs. Left byte-identical (legacy v1 path, fence); flagged for the
   integrator as a possible future freshness re-check in `refreshScreen`.
+
+## FIX-3 — artifact-frame binding verify+re-arm + the slipped-between-lanes set (2026-10-18, qwen3.8-max#xhigh)
+
+Closes the LAST Trust blocker from the Sonnet re-verification
+(`docs/smoke/v4/reverify/REVERIFY.md`): **F5 silent pick loss** — dead sessions
+where the artboard `__dsPick` binding never reached the frame context and every
+click buffered into `__dsPickPending` forever (~12% of fresh sessions, 6/51;
+dead per-session, no recovery, hover/outline still worked so nothing looked
+wrong). Also closes F12, F13, F15, F16a, F16b, F17, N1 and the N2 stress-test
+flake. Fence §5 held: no CSP/sandbox/schema/dependency change, loopback only,
+no editor creep. Legacy v1 stays byte-identical where reachable — the artifact
+arming path is shared code, so identity is PROVEN where claimed and the rest is
+proved by the untouched legacy families (fit-page, live-canvas, R6/navigation,
+browser/service bundle tests) staying green.
+
+**F5 root cause (confirmed, named).** The race is the *addBinding → pre-existing
+execution context propagation* race, artifact-frame edition. Chrome launches
+straight at the baked viewer URL; the shell markup carries the artboard
+`<iframe>`s, so their documents/execution contexts can exist BEFORE (or while)
+the service attaches and issues `Runtime.addBinding('__dsPick')` on the shell
+session (and before an OOPIF child session's `enable()` addBinding reaches an
+already-committed child document). On Windows the addBinding response can land
+before — or, as the re-verify probe showed, effectively WITHOUT — the binding
+propagating into those pre-existing contexts (the same lag this file documents
+above `SHELL_BRIDGE`, which FIX-1 fixed for the SHELL bindings only). The
+document-start script also misses documents created before registration, but
+`initializeArtifact`'s post-attach evaluate re-runs it — which installs the
+picker and the trust flag (probe: `__dsPickerInstalled:true`,
+`__dsTrustedArtifact:true`) yet CANNOT create the binding; only `addBinding`
+can, and nothing ever re-issued it for artifact contexts. Result: `typeof
+window.__dsPick === 'undefined'` for the whole session, picks buffer (cap 10),
+never flush — and FIX-1's replay pump deliberately doesn't cover this path.
+
+**F5 fix (browser.ts + artifact-context.ts).**
+- `ArtifactContexts.verifyArtifactBinding(screen, context)`: after EVERY arm
+  (initializeArtifact — which covers launch, OOPIF child attach, the shell
+  `ready` command and waitScreen re-arms), evaluate `typeof window.__dsPick` in
+  that frame's own context; if not `'function'`, re-issue
+  `Runtime.addBinding('__dsPick')` + `'__dsArtifactEvent'` on that context's
+  session (idempotent; re-adding forces propagation into the pre-existing
+  context — FIX-1's proven mechanism) and re-run the payload scripts, whose
+  idempotent guards make the re-run a pure `flushPending()`: buffered clicks
+  are DELIVERED, not dropped. Every re-arm logs with its screen id.
+- `startArtifactBindingSweep()` (browser.ts): a cheap unref'd 4 s sweep
+  (`verifyArtifactBindings()`) over all known artifact contexts so late races
+  self-heal; stops with the window (doQuit/stop). The deliberate non-replay of
+  buffered bindingCalled events (FIX-1 rationale) is untouched — re-arming IS
+  the replay: the buffer lives in the frame and flushes itself.
+- FIX-3 (F16a) also rides the arming path: `WORKSPACE_ARTIFACT_SCRIPTS` adds a
+  tiny root-scrollbar hide (`html{scrollbar-width:none}` +
+  `html::-webkit-scrollbar{display:none}`, id `__ds-scrollbar-style`,
+  `data-ds-overlay="chrome"`) — canvas CHROME, not design content: only the
+  artboard ROOT scroller, only trusted artifact frames, only in workspace
+  canvas sessions. The legacy single-url launch keeps the byte-identical script
+  (`ARTIFACT_SCRIPTS = artifactScripts(false)` — string equality vs 81f6afb
+  verified mechanically). Exports unaffected: capture/print run on separate
+  throwaway targets that never receive the script (existing no-binding-world
+  pin stays green).
+
+**ACCEPTANCE (a) — dead-session rate, fresh service + fresh Chrome per run**
+(`node docs/smoke/v4/reverify/scripts/f5.mjs`, real CDP mouse, 30 clicks over 3
+artboards, ack after each; pre-fix ~12%, 6/51 sessions dead):
+
+| run | clicks | delivered(#b) | lost | dead session? | p50/min/max ms |
+|---|---|---|---|---|---|
+| 1–10 | 30 each | 20 each | **0 each** | **0/10** | 5 / 3–4 / 6–9 |
+
+All 10 runs: `lost:[]` — zero undelivered clicks in 300 clicks across 10 fresh
+sessions. (Each run also reports 10 `wrong` entries on `home`: the script's aim
+point lands on `main` instead of `#b` there — a documented aim-point artifact
+of the scratch harness itself, identical in the pre-fix healthy-session runs;
+those clicks still DELIVERED picks, which is what the dead-session metric
+counts.) **Dead-session rate 0/10.**
+
+**ACCEPTANCE (b) — repo 100-click stress ×10 consecutive**
+(`DS_REQUIRE_CHROME=1 node --test --test-name-pattern STRESS tests/v4-live.test.ts`):
+
+| run | delivered | misses | pickMs min/med/max | verdict |
+|---|---|---|---|---|
+| 1 | 100 | 0 | 2/3/9 | PASS |
+| 2 | 100 | 0 | 2/3/7 | PASS |
+| 3 | 100 | 0 | 2/3/8 | PASS |
+| 4 | 100 | 0 | 2/3/8 | PASS |
+| 5 | 100 | 0 | 2/3/9 | PASS |
+| 6 | 100 | 0 | 2/3/9 | PASS |
+| 7 | 100 | 0 | 2/3/7 | PASS |
+| 8 | 100 | 0 | 2/3/9 | PASS |
+| 9 | 100 | 0 | 2/3/7 | PASS |
+| 10 | 100 | 0 | 2/3/8 | PASS |
+
+**10/10 green, 1000/1000 picks, 0 loss** (plus 7/7 in the two verification
+batches immediately before, = 17 consecutive green runs of the fixed test).
+Honest note: the FIRST ×10 batch attempted right after the f5 ×10 batch (10
+back-to-back Chrome launch/teardown cycles still settling) went 5/10
+(4× mapping-assert, 1× a single mid-run loss at click 50); its grep-filtered
+logs were not kept, host contention is the suspected cause, and it has not
+reproduced in the 17 consecutive runs since (including the full-suite runs
+below, which execute STRESS under heavier load).
+
+**N2 (the stress flake) — fixed at the root, no pin weakened.** Two classes
+made the old test 25% flaky (REVERIFY §3): (1) `click 0` silent loss — the
+first edit click flips the camera fit-all→manual BY DESIGN (controller
+pointerdown), re-posing the grid ~45px vertically between the test's rect read
+and its press/release pair, so the pointerup-side `framePoint` mapping could
+slide off the button; and (2) the `maps inside the window viewport` assert
+compared a rect read against hardcoded 1400×900 DS_WINDOW constants that a
+mid-test camera pose could legitimately violate (x=1693). The fix: the test now
+PRIMES the shell into the exact manual pose the first flip would produce
+(`restoreCamera({mode:'manual',scale,panX,panY:(canvasH-gridH*scale)/2-48})` —
+echo-suppressed, same visual framing) so no click in the loop can move the
+camera anymore, and the per-click assertion reads `window.innerWidth/innerHeight`
+from the SAME live evaluate snapshot as the frame rect — the same rect source
+the real click path uses (`SHELL_BRIDGE` pan-layer / `framePoint`:
+`getBoundingClientRect` + `clientWidth` scaling at event time). The pins that
+matter are untouched: 100 real compositor clicks, drain+ack, exactly one
+`kind:'element'` `#b` pick per click from its own board, zero loss, empty tail.
+
+**Per-item dispositions (the slipped-between-lanes set).**
+- **F12 — human registry banner (main.ts).** `registryErrorNoticeText(error)`
+  composes designer prose at the single `applyRegistryChange` notice site:
+  syntax errors → "screens.json isn't valid JSON, so the canvas kept the last
+  good screens. Fix the file and the canvas picks it up automatically.";
+  ENOENT → "could not be found…"; EACCES/EPERM/EBUSY → "locked or unreadable…";
+  anything else → "screens.json could not be read (<short reason>)…". Never a
+  raw parser/OS dump; ≤300 chars. `/state.registryError` keeps the raw machine
+  string (the route-live pin reads it there; panel toast unchanged). Pins: +2
+  hermetic (spawned-harness mapping of all five classes incl. no-raw-substring
+  checks, source pin for the composed-notice/raw-state split).
+- **F13 — play-mode active follows in-frame navigation (browser.ts).** In
+  `dispatchBinding`, a trusted `__dsArtifactEvent {type:'changed'}` (already
+  tagged per screen by the executionContextId→screenId authority: pushState/
+  replaceState/hashchange/popstate/load/DOMContentLoaded) now also runs
+  `setActive(screen)` when `mode==='play'`, the screen isn't already active,
+  and its record is `ready` (the ready guard keeps a boot-time load storm from
+  flapping the active board). setActive is camera+focus+echo only — NO
+  `bringToFront` anywhere on the path (V4-8 compliant). Edit mode never
+  follows. Pin: +1 hermetic, both directions + the loading-board guard +
+  bringToFront spy at 0.
+- **F15 — reset-position deletes the key (view-state.ts).** `applyMerge` now
+  DELETES `positions[id]` on a null patch (no more `"id": null` residue after
+  Reset position); `sanitizeView` still reads legacy null entries as auto-grid
+  (old files keep working). Pins updated (they pinned the residue): view-state
+  merge, the PATCH /view route pair (null-on-fresh + null-deletes-existing),
+  v4-service reset-position, v4-live reset-position (now: persist a real
+  position → reset → key GONE); +1 new read-tolerance pin.
+- **F16a — artboard scrollbar chrome.** See the F5 section above (workspace
+  sessions only; legacy byte-identical; exports untouched).
+- **F16b — canvas focus ring (viewer-ui.ts + canvas-controller.js).**
+  `.canvas:focus{outline:none}` + an explicit keyboard ring
+  `.canvas:focus-visible{outline:2px solid #4f8cff;outline-offset:-2px}`;
+  because the controller focuses the canvas programmatically from pointerdown
+  (and programmatic focus CAN match :focus-visible), that focus is tagged
+  `data-pointer-focus=true` at the pointerdown site and the tag is CSS-suppressed
+  (`.canvas[data-pointer-focus=true]:focus-visible{outline:none}`); the first
+  keydown clears the tag, so keyboard users keep their ring. Pins: viewer-ui
+  CSS re-pinned (old `:not(:focus-visible)` rule replaced).
+- **F17 — Stop dev server (controller + service + main.ts + README).**
+  `SCREEN_MENU` gains `['stop-server','Stop dev server']` alone in a new group
+  before Rename (5 groups, 9 items, 4 separators; keyboard nav/wrap unchanged);
+  it rides the frozen `{type:'screen-menu',screen,action}` contract. Service:
+  `screenMenuAction` maps it through a new injected `setDevServerStop` hook
+  (same import-cycle-free pattern as `setDevServerEnsure`) to the EXISTING
+  `stopDevServer(dir)` machinery behind `POST /server/stop` for the workspace
+  dir — recorded-process-group kill only; outcomes confirmed through the
+  existing `showToast` ("Dev server stopped" / "No dev server was running" /
+  "Stop failed: …" warn / unwired-no-dir warn). Glyph `⏹`. README: one line —
+  servers outlive the window by design, stop via the artboard menu or the
+  panel's row control. Pins: stock-controller menu re-pinned (9 items incl.
+  stop-server wire mapping), viewer-ui glyph+union, +1 hermetic service pin
+  (all four toast paths + the dir that rides).
+- **N1 — header title ellipsis (viewer-ui.ts + canvas-controller.js).** The
+  title text moved into an inner `<span class="ds-ab-label">` (the button is
+  `display:inline-flex`, which ignores `text-overflow`); the span carries
+  `min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap`. The
+  reserved size-label budget (`--ab-size-w` max-width) and the compact tier
+  stay on the button, untouched; `adoptBoard` grants a span to bakes/hand-rolled
+  DOMs without one. Pins: viewer-ui markup+CSS, stock-controller text pins
+  re-pointed at `.ds-ab-label`.
+
+**Sweep maintenance (honest).** Two of the 23 mutant anchors had ALREADY
+drifted at HEAD 81f6afb (verified against the pristine tree before any FIX-3
+edit): `live-canvas-breaker`'s artifact-authorization still named the pre-FIX-1
+inline handler's `params.*` (the dispatchBinding extraction renamed them), and
+its capture-finally anchor matched TWICE after the V4-2 capture restructure
+added the overrideApplied/else branch. Both mutants therefore threw at their
+anchor assert instead of injecting the fault — the same ANCHOR-BROKEN class
+FIX-1 re-anchored for fit-page. Re-anchored with the ORIGINAL fault semantics
+(name-based authorization bypass; the `!overrideApplied` early-failure endCapture
+removal that C1 kills), documented in-file.
+
+**Tests added/changed.** +7 hermetic (artifact-context binding verify/re-arm +
+cheap-sweep no-op + revoked-context tolerance; browser arming-sweep lifecycle;
+F13 play/edit/loading guard; F15 read-tolerance; F12 ×2; F17 ×1) and the N2
+stress rewrite; pins updated ONLY where they pinned the changed contract
+(F15 residue ×4 sites, F16b CSS, N1 text site ×3, F17 menu shape ×3). No pin
+weakened: the N2 change aligns the test with the product's real coord source
+and primes a stable camera; everything it asserted (100/100, one pick per
+click, zero loss) still asserts.
+
+**Build + suite + mutants.** `npm run build && npm run build:viewer` run TWICE
+back-to-back: all three artifacts byte-identical across the two rounds, and the
+viewer build reported identical digests both times (inputDigest 194e83eb…,
+jsSha256 7b037c27…, cssSha256 2a836496…). `service/viewer-assets.generated.ts`
+and `panel/main.js` are byte-identical to HEAD by construction: the viewer
+bundle is toolbar-only (its hashed input set — viewer-client `*.tsx?/css/json`
+— did not change; `canvas-controller.js` ships through `viewer-ui.ts`'s
+`initCanvas.toString()` inside `service/main.js`), and no panel source moved.
+`service/main.js` is the fresh bundle and carries F5/F12/F13/F15/F16a/F17
+(verified by content probe). Full suite `DS_REQUIRE_CHROME=1 npm run test` ×2:
+**582 tests, 578 pass, 0 FAIL, 4 documented win32 skips** both runs (178.4 s /
+190.8 s; suite grew 575 → 582 with this round's +7 net-new pins). STRESS ran
+green inside both suite runs (19 consecutive green stress runs total this
+round). Honesty note: a THIRD, earlier suite run had exactly one failure —
+`window.test.ts` "windowOpen flips false after the Chrome child dies" (the
+5 s SIGKILL-detection budget under suite load; it passed isolated in 1.3 s and
+in both acceptance runs; not a path this round touched — the sweep/verify code
+never runs between the kill and the detection, and CdpClient rejects pendings
+on socket close). 23-mutant sweep (baseline+mutant double-run, anchor-mismatch
+grep-classified): **23/23 KILL, 5/5 baselines green** (FIT 4, LIVE_CANVAS 6,
+NOVA 5, REFERENCE 6, ROOT_WORKSPACE 2; every mutant a non-zero exit with a real
+functional failure, zero anchor mismatches). The two re-anchored live-canvas
+mutants were spot-verified to die on their intended assertions:
+artifact-authorization on A1 (`complete valid child payload cannot bypass exact
+artifact frame ownership`, forged pickSeq 2≠0) and capture-finally on C1
+(`early error cannot leave camera/frozen flags/styles or native interaction
+changed`). Digests: `service/main.js`
+0b5cacd5ef9d82d06a1a94b956f33a918d8ce452246d0ce67815d1b4b9271eb7,
+`panel/main.js` f5d5a93b09dd7d868c482a7f375b3ad6723673c17a7484953a163c4f7ae598cb,
+`service/viewer-assets.generated.ts`
+d6be804567ccd3629b430f1a125162f2a82b3f38787f5d723a46790a6bd58d49 — identical
+across two full `npm run build && npm run build:viewer` rounds.
+
+**Left honestly open.**
+- The first post-f5 STRESS batch's 5/10 (see acceptance (b) note) is not
+  root-caused to a product path; 19 consecutive greens since (incl. both
+  in-suite runs) is the evidence it was host contention, not a surviving loss
+  class.
+- REVERIFY's belt-and-braces suggestion (shell-side "Click didn't register"
+  hint when a screen-pick gets no ack) was NOT added: with the binding now
+  verified+re-armed+self-healing and buffered clicks flushing, the loss class
+  it would paper over is measured dead; adding a user-visible warning for a
+  condition that no longer occurs was judged worse than the honest silence.
+- F14 (new-artboard pulse) remains untested by the re-verify (unchanged code).
+- The scratch f5/v11 harnesses measure sessions, not the sweep's self-heal
+  latency; the sweep's worst-case heal time is its 4 s cadence (re-arms logged).
+- Smoke (docs/smoke/run-smoke.mjs) was NOT re-run here (it rewrites tracked
+  PNGs); REVERIFY's 20/20 stands on the unchanged smoke surface — the menu
+  gained one item, which the smoke's menu step selects by label, not count.

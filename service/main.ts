@@ -31,6 +31,7 @@ import {
   readScreensStrict,
   screenUrl,
   writeScreens,
+  SCREENS_FILENAME,
   type DroppedScreenEntry,
   type CanvasMode,
 } from './screens.ts';
@@ -181,6 +182,28 @@ function droppedNoticeText(dropped: DroppedScreenEntry[]): string {
 }
 
 /**
+ * FIX-3 (F12): the registry banner is read by designers, so its text is human
+ * prose — never the raw parser/JSON dump (`Unexpected token 'o', "not json"…
+ * is not valid JSON` was the finding). The machine-readable string stays
+ * untouched in `/state.registryError` (the route-live pin reads it there); the
+ * service composes the banner copy here, at the single notice site.
+ */
+export function registryErrorNoticeText(error: string): string {
+  const reason = error.startsWith(`${SCREENS_FILENAME}: `) ? error.slice(SCREENS_FILENAME.length + 2) : error;
+  if (/is not valid JSON|Unexpected token|Unexpected end of JSON|Expected [^ ]+ in JSON/i.test(reason)) {
+    return `screens.json isn't valid JSON, so the canvas kept the last good screens. Fix the file and the canvas picks it up automatically.`;
+  }
+  if (/ENOENT|no such file|does not exist/i.test(reason)) {
+    return `screens.json could not be found, so the canvas kept the last good screens. Restore the file and the canvas picks it up automatically.`;
+  }
+  if (/EACCES|EPERM|EBUSY|operation not permitted/i.test(reason)) {
+    return `screens.json could not be read (the file is locked or unreadable), so the canvas kept the last good screens. Close whatever holds the file and it reloads automatically.`;
+  }
+  const short = reason.length > 160 ? `${reason.slice(0, 157)}…` : reason;
+  return `screens.json could not be read (${short}), so the canvas kept the last good screens.`;
+}
+
+/**
  * One registry tick: errors surface as a shell notice + /state.registryError
  * while the last good registry STAYS pushed; a good parse clears the error,
  * reports drops as a warn notice, and warm-pushes only when the normalized
@@ -191,7 +214,9 @@ async function applyRegistryChange(dir: string, change: RegistryChange): Promise
   if (!browser || !(await browser.state()).windowOpen) return { pushed: false };
   if (!change.ok) {
     browser.setRegistryError(change.error);
-    await browser.setNotice({ id: 'registry', kind: 'error', text: change.error });
+    // FIX-3 (F12): the state field keeps the raw machine string; the BANNER is
+    // composed human prose (see registryErrorNoticeText).
+    await browser.setNotice({ id: 'registry', kind: 'error', text: registryErrorNoticeText(change.error) });
     return { pushed: false };
   }
   browser.setRegistryError(null);
@@ -304,6 +329,9 @@ function wireBrowserHooks(browser: Browser): void {
   browser.setMenuExportHandler((screen, format) => {
     void runMenuExport(browser, screen, format).catch(() => undefined);
   });
+  // FIX-3 (F17): the artboard context menu's 'Stop dev server' runs the same
+  // recorded-process-group kill as POST /server/stop for the workspace dir.
+  browser.setDevServerStop(async (dir) => stopDevServer(dir));
 }
 
 /**

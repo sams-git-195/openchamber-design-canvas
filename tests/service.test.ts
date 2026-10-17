@@ -1054,17 +1054,21 @@ test('GET/PATCH /view: default read, strict validation, per-key merge, no PUT', 
       mode: string;
     };
     assert.equal(got.camera.scale, 0.1, 'camera scale clamps to the 0.1–3 zoom range');
-    assert.deepEqual(got.positions, { home: { x: 32768, y: -32768 }, checkout: null }, 'positions clamp to ±32768');
+    // FIX-3 (F15): a null position DELETES its key — `checkout: null` against
+    // a fresh file never creates residue, and the read path stays null-tolerant
+    // for old files (view-state pins).
+    assert.deepEqual(got.positions, { home: { x: 32768, y: -32768 } }, 'positions clamp to ±32768; null deletes its key');
     assert.equal(got.mode, 'play');
 
-    // Per-key merge: a later patch leaves untouched keys alone.
+    // Per-key merge: a later patch leaves untouched keys alone — and a null
+    // on an EXISTING key removes it (F15 through the route).
     await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`, {
       method: 'PATCH',
       headers: bearer,
-      body: JSON.stringify({ positions: { pay: { x: 5, y: 5 } } }),
+      body: JSON.stringify({ positions: { pay: { x: 5, y: 5 }, home: null } }),
     });
     const merged = await (await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`, { headers: { authorization: `Bearer ${TOKEN}` } })).json() as { positions: Record<string, unknown>; mode: string };
-    assert.deepEqual(merged.positions, { home: { x: 32768, y: -32768 }, checkout: null, pay: { x: 5, y: 5 } });
+    assert.deepEqual(merged.positions, { pay: { x: 5, y: 5 } }, 'F15: home deleted by the null patch; pay merged in');
     assert.equal(merged.mode, 'play', 'the second merge leaves the persisted mode alone');
 
     // D6: nothing may full-overwrite view.json — PUT is refused.

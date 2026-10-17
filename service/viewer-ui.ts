@@ -83,7 +83,9 @@ function renderArtboard(screen: PlacedScreen, cell: { x: number; y: number }, in
   const id = escapeAttribute(screen.id);
   const header = `${index + 1} · ${escapeText(screen.title)}`;
   return `<section class="ds-artboard" data-screen="${id}" data-active="${active ? 'true' : 'false'}" style="left:${cell.x}px;top:${cell.y}px;width:${screen.width}px;height:${screen.height}px;--w:${screen.width}px">`
-    + `<button type="button" class="ds-ab-title">${header}</button>`
+    // N1 (FIX-3): .ds-ab-title is display:inline-flex, which ignores
+    // text-overflow — the ellipsis lives on an inner label span instead.
+    + `<button type="button" class="ds-ab-title"><span class="ds-ab-label">${header}</span></button>`
     + `<span class="ds-ab-size">${screen.width}×${screen.height}</span>`
     + `<iframe id="ds-frame-${id}" data-ds-screen="${id}" name="__dsArtifact:${id}" referrerpolicy="no-referrer" sandbox="${FRAME_SANDBOX}" src="${escapeAttribute(screen.url)}"></iframe>`
     + `<div class="ds-ab-state" data-state="loading"><p class="ds-ab-card-copy" role="status">Loading this screen.</p><p class="ds-ab-card-detail" hidden></p><button type="button" class="ds-ab-retry" hidden>Retry</button></div>`
@@ -146,9 +148,15 @@ body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}
 #toolbar-root{flex:none;min-width:0}
 .canvas{position:relative;flex:1 1 auto;min-height:0;min-width:0;overflow:hidden;touch-action:none;background:oklch(0.17 0 0) radial-gradient(circle,oklch(1 0 0 / .11) 1.25px,transparent 1.5px);background-size:24px 24px;background-position:0 0}
 .canvas[data-layout=fit]{touch-action:auto}
-/* F16: a mouse click on the canvas must not leave the UA focus ring around
-   the whole art wall; keyboard focus keeps its visible ring. */
-.canvas:focus:not(:focus-visible){outline:none}
+/* F16b (FIX-3): a mouse click on the canvas must not leave ANY focus ring
+   around the whole art wall — the controller focuses the canvas from its
+   pointerdown handler, and programmatic focus can match :focus-visible, so
+   the ring is suppressed for :focus outright and only keyboard focus keeps
+   an explicit blue ring. A pointer-originated focus is additionally tagged
+   data-pointer-focus by the controller so it never shows the keyboard ring. */
+.canvas:focus{outline:none}
+.canvas:focus-visible{outline:2px solid #4f8cff;outline-offset:-2px}
+.canvas[data-pointer-focus=true]:focus-visible{outline:none}
 .camera{position:absolute;top:0;left:0;transform-origin:0 0}
 iframe{display:block;border:0;width:100%;height:100%}
 .camera[hidden],.pan-layer[hidden],.state[hidden],[hidden]{display:none}
@@ -161,6 +169,10 @@ iframe{display:block;border:0;width:100%;height:100%}
 .ds-artboard>.ds-ab-title,.ds-artboard>.ds-ab-size{position:absolute;bottom:100%;margin:0 0 8px;padding:0;display:inline-flex;align-items:center;line-height:1;transform:scale(calc(1 / var(--cam-scale,1)))}
 .ds-artboard>.ds-ab-title{left:0;transform-origin:bottom left;max-width:calc(var(--w,100%) * var(--cam-scale,1) - var(--ab-size-w,84px));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:0;background:transparent;font-size:13px;font-weight:500;color:var(--foreground);opacity:.85;cursor:pointer}
 .ds-artboard>.ds-ab-title:hover{opacity:1}
+/* N1 (FIX-3): the title button is inline-flex (which ignores text-overflow),
+   so the ellipsis is applied to the inner label span; the button keeps the
+   reserved size-label budget (max-width above) and the compact tier. */
+.ds-artboard>.ds-ab-title>.ds-ab-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* F11: no rectangular white UA ring left on the header after Esc/rename —
    keyboard users get a blue ring that matches the artboard radius instead. */
 .ds-artboard>.ds-ab-title:focus{outline:none}
@@ -225,6 +237,7 @@ iframe{display:block;border:0;width:100%;height:100%}
 .ds-menu-item[data-action=export-png]::before{content:"⇩"}
 .ds-menu-item[data-action=export-pdf]::before{content:"⇩"}
 .ds-menu-item[data-action=copy-path]::before{content:"⧉"}
+.ds-menu-item[data-action=stop-server]::before{content:"⏹"}
 .ds-menu-item[data-action=rename]::before{content:"✎"}
 .state{position:absolute;inset:0;display:grid;place-items:center;text-align:center;background:var(--background)}
 .state-body{max-width:100%;overflow-wrap:anywhere}
