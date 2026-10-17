@@ -55,19 +55,48 @@ function serve(): Promise<{ server: ReturnType<typeof createServer>; url: string
 
 /** First direct child of `pid` (the Chrome main process), or null. */
 async function firstChildPid(pid: number): Promise<number | null> {
+  if (process.platform !== 'win32') {
+    try {
+      const { stdout } = await execFileP('pgrep', ['-P', String(pid)]);
+      const line = stdout.split('\n').map((s) => s.trim()).filter(Boolean)[0];
+      return line ? Number(line) : null;
+    } catch {
+      return null; // pgrep exits non-zero when nothing matched
+    }
+  }
+  // FORK-WIN: same Win32_Process table the service's reapOrphanChromeWin32
+  // uses; `pgrep`/`ps` under git-bash cannot see native child processes.
   try {
-    const { stdout } = await execFileP('pgrep', ['-P', String(pid)]);
-    const line = stdout.split('\n').map((s) => s.trim()).filter(Boolean)[0];
-    return line ? Number(line) : null;
+    const script =
+      '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
+      `(Get-CimInstance Win32_Process -Filter "ParentProcessId = ${pid}" -ErrorAction SilentlyContinue | Select-Object -First 1).ProcessId`;
+    const { stdout } = await execFileP('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+    const line = stdout.trim();
+    return /^\d+$/.test(line) ? Number(line) : null;
   } catch {
-    return null; // pgrep exits non-zero when nothing matched
+    return null;
   }
 }
 
 /** Every process whose command line mentions `needle` (the profile dir). */
 async function processesMentioning(needle: string): Promise<string[]> {
-  const { stdout } = await execFileP('ps', ['-ax', '-o', 'command=']);
-  return stdout.split('\n').filter((line) => line.includes(needle));
+  if (process.platform !== 'win32') {
+    const { stdout } = await execFileP('ps', ['-ax', '-o', 'command=']);
+    return stdout.split('\n').filter((line) => line.includes(needle));
+  }
+  // FORK-WIN: enumerate the Win32_Process table (the service's own win32
+  // reaper pattern); the `pid<TAB>commandline` layout is parsed from the tab.
+  const script =
+    '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ' +
+    'Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ' +
+    'ForEach-Object { $_.ProcessId.ToString() + "`t" + $_.CommandLine }';
+  const { stdout } = await execFileP('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout
+    .split(/\r?\n/)
+    .map((line) => line.slice(line.indexOf('\t') + 1))
+    .filter((command) => command.includes(needle));
 }
 
 /** Send one CDP command over a websocket and resolve its result. */

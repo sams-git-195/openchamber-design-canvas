@@ -15,6 +15,25 @@ async function fill(root: string, rel: string, text = 'x'): Promise<void> {
   await writeFile(abs, text, 'utf8');
 }
 
+/**
+ * True when this platform can create a plain FILE symlink. win32 needs
+ * developer mode (EPERM otherwise); junctions stand in for directory links
+ * (Node reports them as symlinks) but never for file links.
+ */
+async function fileSymlinkCapable(): Promise<boolean> {
+  if (process.platform !== 'win32') return true;
+  const dir = await mkdtemp(path.join(tmpdir(), 'ds-files-linkcap-'));
+  try {
+    await fill(dir, 'a');
+    await symlink(path.join(dir, 'a'), path.join(dir, 'b'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 test('lists nested files as sorted relative POSIX paths and keeps dotfiles', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'ds-files-'));
   try {
@@ -81,9 +100,14 @@ test('never follows a symlink that escapes the project root', async () => {
   try {
     await fill(outside, 'secret.txt');
     await fill(root, 'inside.txt');
-    // A symlinked directory pointing outside the project, and a symlinked file.
-    await symlink(outside, path.join(root, 'escape-dir'), 'dir');
-    await symlink(path.join(outside, 'secret.txt'), path.join(root, 'escape-file.txt'), 'file');
+    // A symlinked directory pointing outside the project — a junction on
+    // win32 (Node reports it as a symlink all the same, so the escape guard
+    // still fires without developer mode) — and a symlinked file, which only
+    // exists where plain file links are creatable.
+    await symlink(outside, path.join(root, 'escape-dir'), process.platform === 'win32' ? 'junction' : 'dir');
+    if (await fileSymlinkCapable()) {
+      await symlink(path.join(outside, 'secret.txt'), path.join(root, 'escape-file.txt'), 'file');
+    }
 
     const files = await listProjectFiles(root);
     assert.deepEqual(files, ['inside.txt']);

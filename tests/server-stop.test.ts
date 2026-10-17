@@ -29,6 +29,7 @@ const main = await import('../panel/main.ts');
 const { shouldStopDevServer, countOtherActiveDesignSessions } = api;
 const {
   setProjectDirectory,
+  setWorkspace,
   markServerStartedByUs,
   setSessionBusy,
   resetStopState,
@@ -349,7 +350,7 @@ test('a manual stop the service refuses announces the truthful no-op message', a
   const message = await manualStopRefusalMessage('/projects/site');
 
   assert.match(message, /did not record this server/, 'the truthful reason: the service keeps no record for this dir');
-  assert.match(message, /not started by Design Studio/);
+  assert.match(message, /not started by Design Canvas/);
   assert.ok(calls.some((call) => call.path === '/server/status'), 'the status is consulted for the truthful reason');
 });
 
@@ -395,6 +396,7 @@ const SITE_CONFIG = { version: 1, name: 'Site', type: 'hi-fi' as const, url: 'ht
 function readySite(): void {
   stubWorkspace({ projects: [{ id: 'p1', name: 'Site', directory: '/projects/site' }] });
   setProjectDirectory('/projects/site');
+  setWorkspace({ dir: '/projects/site', name: 'Site' });
   setStudioConfig(SITE_CONFIG);
   setSessionBusy(false);
 }
@@ -429,6 +431,7 @@ test('a stop the service answers ok:false keeps ownership and never fakes succes
   assert.ok(announcements.some((message) => message !== 'Preview dev server stopped.' && message.length > 0), 'the click announced the truth');
   assert.deepEqual(getStopState().startedServers, ['/projects/site'], 'still ours after the failed stop');
   assert.equal(getServerControlState().status, true, 'no fake flip to stopped');
+  setWorkspace(null);
 });
 
 test('a manual stop the service answers stopped:false reaches the refusal branch with its message', async () => {
@@ -458,6 +461,7 @@ test('a manual stop the service answers stopped:false reaches the refusal branch
   );
   assert.deepEqual(getStopState().startedServers, ['/projects/site'], 'ownership is only dropped on a CONFIRMED stop');
   assert.equal(getServerControlState().status, true, 'the icon was not flipped to stopped by the refusal');
+  setWorkspace(null);
 });
 
 test('after a poll error the icon click retries by STARTING, never stopping the healthy server', async () => {
@@ -475,6 +479,7 @@ test('after a poll error the icon click retries by STARTING, never stopping the 
   });
   stubWorkspace({});
   setProjectDirectory('/projects/site');
+  setWorkspace({ dir: '/projects/site', name: 'Site' });
   setStudioConfig(SITE_CONFIG);
   setSessionBusy(false);
 
@@ -489,6 +494,7 @@ test('after a poll error the icon click retries by STARTING, never stopping the 
 
   assert.equal(calls.some((call) => call.path === '/server/start'), true, 'the click matches the affordance: it retries by starting');
   assert.equal(calls.some((call) => call.path === '/server/stop'), false, 'the click never stops the healthy server behind the stale status');
+  setWorkspace(null);
 });
 
 test('a successful poll clears the error so a stopped server returns to is-stopped', async () => {
@@ -540,6 +546,7 @@ test('a directory switch during an in-flight start commits nothing to the new di
   });
   stubWorkspace({});
   setProjectDirectory('/projects/a');
+  setWorkspace({ dir: '/projects/a', name: 'A' });
   setStudioConfig(SITE_CONFIG);
 
   const click = clickServerControl();
@@ -553,6 +560,7 @@ test('a directory switch during an in-flight start commits nothing to the new di
   const control = getServerControlState();
   assert.equal(control.status, false, 'the new directory is not poisoned with the old start result');
   assert.equal(control.error, null, 'the new directory carries no old error');
+  setWorkspace(null);
 });
 
 test('a stale in-flight status read never commits over a newer read', async () => {
@@ -608,6 +616,7 @@ test('a stale status read does not commit while a manual action is in flight', a
   });
   stubWorkspace({});
   setProjectDirectory('/projects/site');
+  setWorkspace({ dir: '/projects/site', name: 'Site' });
   setStudioConfig(SITE_CONFIG);
   setSessionBusy(false);
 
@@ -622,6 +631,7 @@ test('a stale status read does not commit while a manual action is in flight', a
   resolveStart({ status: 200, body: JSON.stringify({ ok: true, started: true, up: true }) });
   await click;
   assert.equal(getServerControlState().status, true, 'the action still commits its own result');
+  setWorkspace(null);
 });
 
 test('a poll-driven running→stopped flip announces, and an unchanged state does not', async () => {
@@ -637,6 +647,7 @@ test('a poll-driven running→stopped flip announces, and an unchanged state doe
   );
   stubWorkspace({});
   setProjectDirectory('/projects/site');
+  setWorkspace({ dir: '/projects/site', name: 'Site' });
   setStudioConfig(SITE_CONFIG);
   setSessionBusy(false);
 
@@ -650,6 +661,7 @@ test('a poll-driven running→stopped flip announces, and an unchanged state doe
     ['Preview dev server is running.', 'Preview dev server stopped.'],
     'each rendered-state change is announced exactly once; the unchanged read is silent',
   );
+  setWorkspace(null);
 });
 
 test('an honoured queued stop announces the outcome (idle snapshot path)', async () => {
@@ -670,6 +682,7 @@ test('an honoured queued stop announces the outcome (idle snapshot path)', async
 
   assert.equal(getStopState().pendingStop, false, 'the queued stop ran');
   assert.ok(getServerAnnouncements().includes('Preview dev server stopped.'), '"queued" is followed by an outcome announcement');
+  setWorkspace(null);
 });
 
 test('an honoured queued stop announces the outcome (completed lifecycle path)', async () => {
@@ -689,6 +702,7 @@ test('an honoured queued stop announces the outcome (completed lifecycle path)',
 
   assert.equal(getStopState().pendingStop, false, 'the completed turn performed the stop');
   assert.ok(getServerAnnouncements().includes('Preview dev server stopped.'), 'the outcome is announced');
+  setWorkspace(null);
 });
 
 // ---- fail-closed safety verification ----
@@ -757,6 +771,7 @@ test('a manual stop with an unverifiable safety check announces the truthful ref
     throw new Error('host down');
   };
   setProjectDirectory('/projects/site');
+  setWorkspace({ dir: '/projects/site', name: 'Site' });
   setStudioConfig(SITE_CONFIG);
   setSessionBusy(false);
   await refreshServerStatus();
@@ -771,6 +786,7 @@ test('a manual stop with an unverifiable safety check announces the truthful ref
     ['Could not verify other design sessions — the preview server was left running.'],
     'the refusal is truthful about WHY: the check could not be verified',
   );
+  setWorkspace(null);
 });
 
 // ---- the recheck between the safety lookup and the destructive call ----
@@ -821,6 +837,7 @@ test('a start resolving after A→B→A commits no rendered state', async () => 
   });
   stubWorkspace({});
   setProjectDirectory('/projects/a');
+  setWorkspace({ dir: '/projects/a', name: 'A' });
   setStudioConfig(SITE_CONFIG);
   const click = clickServerControl();
   setProjectDirectory('/projects/b');
@@ -835,6 +852,7 @@ test('a start resolving after A→B→A commits no rendered state', async () => 
   assert.equal(getServerControlState().status, null, 'the round-trip result never committed a rendered state');
   assert.deepEqual(getServerAnnouncements(), [], 'no announcement for a result the user context left behind');
   assert.equal(getServerControlState().pending, false, 'the action still cleared its own in-flight marker');
+  setWorkspace(null);
 });
 
 test('an older action resolving across a switch never clears the newer action in flight', async () => {
@@ -855,10 +873,12 @@ test('an older action resolving across a switch never clears the newer action in
   });
   stubWorkspace({});
   setProjectDirectory('/projects/a');
+  setWorkspace({ dir: '/projects/a', name: 'A' });
   setStudioConfig(SITE_CONFIG);
 
   const clickA = clickServerControl();
   setProjectDirectory('/projects/b');
+  setWorkspace({ dir: '/projects/b', name: 'B' });
   setStudioConfig(SITE_CONFIG);
   const clickB = clickServerControl();
   assert.equal(getServerControlState().pending, true, 'the newer action is in flight');
@@ -875,6 +895,7 @@ test('an older action resolving across a switch never clears the newer action in
   resolvers.get('/projects/b')!({ status: 200, body: JSON.stringify({ ok: true, started: true, up: true }) });
   await clickB;
   assert.equal(getServerControlState().pending, false, 'the newest action clears its own marker');
+  setWorkspace(null);
 });
 
 // ---- status errors from the service ----
@@ -920,6 +941,7 @@ test('a start answer without an up confirmation leaves the state unknown', async
       : { status: 404, body: '{}' });
   stubWorkspace({});
   setProjectDirectory('/projects/site');
+  setWorkspace({ dir: '/projects/site', name: 'Site' });
   setStudioConfig(SITE_CONFIG);
   setSessionBusy(false);
 
@@ -931,6 +953,7 @@ test('a start answer without an up confirmation leaves the state unknown', async
     ['Preview dev server started.'],
     'a confirmed spawn is announced as started, never as a failure',
   );
+  setWorkspace(null);
 });
 
 // ---- the queued request keeps its mode and directory ----
@@ -1118,6 +1141,7 @@ test('a manual stop surfaces the service refusal reason verbatim', async () => {
         : { status: 404, body: '{}' });
   stubWorkspace({});
   setProjectDirectory('/projects/site');
+  setWorkspace({ dir: '/projects/site', name: 'Site' });
   setStudioConfig(SITE_CONFIG);
   setSessionBusy(false);
   await refreshServerStatus();
@@ -1130,6 +1154,7 @@ test('a manual stop surfaces the service refusal reason verbatim', async () => {
     [refusal],
     'the actionable service error is announced, not the generic not-recorded line',
   );
+  setWorkspace(null);
 });
 
 test('manualStopRefusalMessage passes a status error through', async () => {

@@ -12,7 +12,7 @@ const original=process.env.FIT_BREAKER_ORIGINAL;
 const sourceRoot=original||root;
 const scratch=await mkdtemp(path.join(tmpdir(),'fit-page-breaker-'));
 await mkdir(path.join(scratch,'service'));await mkdir(path.join(scratch,'viewer-client/src'),{recursive:true});
-for(const file of ['browser','artifact-context','viewer-server','viewer-ui'])await cp(path.join(sourceRoot,'service',file+'.ts'),path.join(scratch,'service',file+'.ts'));
+for(const file of ['browser','artifact-context','viewer-server','viewer-ui','view-state','screens'])await cp(path.join(sourceRoot,'service',file+'.ts'),path.join(scratch,'service',file+'.ts'));
 await cp(path.join(sourceRoot,'shared'),path.join(scratch,'shared'),{recursive:true});
 // The stock controller and the compiled asset module are real imports of
 // viewer-ui.ts; copy both so the scratch tree resolves (assets are inert

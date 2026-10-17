@@ -10,7 +10,7 @@ import {inflateSync} from 'node:zlib';
 
 const root=fileURLToPath(new URL('../',import.meta.url)),sourceRoot=process.env.NOVA_ORIGINAL||root;
 const scratch=await mkdtemp(path.join(tmpdir(),'nova-breaker-'));await mkdir(path.join(scratch,'service'));await mkdir(path.join(scratch,'viewer-client/src'),{recursive:true});
-for(const f of ['browser','artifact-context','viewer-server','viewer-ui'])await cp(path.join(sourceRoot,'service',f+'.ts'),path.join(scratch,'service',f+'.ts'));
+for(const f of ['browser','artifact-context','viewer-server','viewer-ui','view-state','screens'])await cp(path.join(sourceRoot,'service',f+'.ts'),path.join(scratch,'service',f+'.ts'));
 await cp(path.join(sourceRoot,'shared'),path.join(scratch,'shared'),{recursive:true});// FORK-WIN: directory junction on Windows (plain symlinks EPERM without
 // developer mode); POSIX unchanged.
 await symlink(path.join(root,'node_modules'),path.join(scratch,'node_modules'),process.platform==='win32'?'junction':undefined);

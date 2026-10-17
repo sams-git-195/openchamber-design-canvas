@@ -4,95 +4,9 @@
   var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
   var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
-  // node_modules/@openchamber/sdk/dist/ui/theme.js
-  var TOKEN_VARS = [
-    ["--oc-bg", "background"],
-    ["--oc-elevated", "elevated"],
-    ["--oc-fg", "foreground"],
-    ["--oc-muted", "muted"],
-    ["--oc-subtle", "subtle"],
-    ["--oc-border", "border"],
-    ["--oc-hover", "hover"],
-    ["--oc-selection", "selection"],
-    ["--oc-focus", "focus"],
-    ["--oc-primary", "primary"],
-    ["--oc-muted-surface", "mutedSurface"],
-    ["--oc-elevated-fg", "elevatedForeground"],
-    ["--oc-active", "active"],
-    ["--oc-selection-fg", "selectionForeground"],
-    ["--oc-primary-fg", "primaryForeground"],
-    ["--oc-primary-text", "primaryText"],
-    ["--oc-success-text", "successText"],
-    ["--oc-warning-text", "warningText"],
-    ["--oc-error-text", "errorText"],
-    ["--oc-info-text", "infoText"],
-    ["--oc-success", "success"],
-    ["--oc-warning", "warning"],
-    ["--oc-error", "error"],
-    ["--oc-info", "info"],
-    ["--oc-font", "font"],
-    ["--oc-mono", "mono"],
-    ["--oc-radius", "radius"],
-    ["--surface-background", "background"],
-    ["--surface-elevated", "elevated"],
-    ["--surface-foreground", "foreground"],
-    ["--surface-muted-foreground", "muted"],
-    ["--surface-subtle", "subtle"],
-    ["--interactive-border", "border"],
-    ["--interactive-hover", "hover"],
-    ["--interactive-selection", "selection"],
-    ["--interactive-focus-ring", "focus"],
-    ["--primary", "primary"],
-    ["--surface-muted", "mutedSurface"],
-    ["--surface-elevated-foreground", "elevatedForeground"],
-    ["--interactive-active", "active"],
-    ["--interactive-selection-foreground", "selectionForeground"],
-    ["--primary-foreground", "primaryForeground"],
-    ["--primary-text", "primaryText"],
-    ["--success-text", "successText"],
-    ["--warning-text", "warningText"],
-    ["--error-text", "errorText"],
-    ["--info-text", "infoText"],
-    ["--status-success", "success"],
-    ["--status-warning", "warning"],
-    ["--status-error", "error"],
-    ["--status-info", "info"],
-    ["--font-sans", "font"],
-    ["--font-mono", "mono"],
-    ["--radius", "radius"]
-  ];
-  var SYNTAX_TOKEN_VARS = [
-    ["--oc-syntax-keyword", "--syntax-keyword", "syntaxKeyword"],
-    ["--oc-syntax-string", "--syntax-string", "syntaxString"],
-    ["--oc-syntax-number", "--syntax-number", "syntaxNumber"],
-    ["--oc-syntax-function", "--syntax-function", "syntaxFunction"],
-    ["--oc-syntax-type", "--syntax-type", "syntaxType"],
-    ["--oc-syntax-comment", "--syntax-comment", "syntaxComment"],
-    ["--oc-syntax-variable", "--syntax-variable", "syntaxVariable"],
-    ["--oc-syntax-operator", "--syntax-operator", "syntaxOperator"]
-  ];
-  var applyHostTheme = (theme, root) => {
-    root.style.colorScheme = theme.mode;
-    for (const [name, key] of TOKEN_VARS) {
-      root.style.setProperty(name, theme.tokens[key]);
-    }
-    for (const [alias, hostName, key] of SYNTAX_TOKEN_VARS) {
-      const value = theme.tokens[key] ?? "";
-      root.style.setProperty(alias, value);
-      root.style.setProperty(hostName, value);
-    }
-    root.style.setProperty("font-family", theme.tokens.font);
-    root.style.setProperty("font-size", "0.875rem");
-    root.style.setProperty("line-height", "1.45");
-    root.style.setProperty("color", theme.tokens.foreground);
-  };
-  var applyHostReady = (ctx, root) => {
-    applyHostTheme(ctx.theme, root);
-    if (root.dataset) {
-      root.dataset.ocSurface = ctx.surface;
-      root.dataset.ocTheme = ctx.theme.mode;
-    }
-  };
+  // node_modules/@openchamber/sdk/dist/api-version.js
+  var OPENCHAMBER_SDK_CHANNEL = "openchamber.sdk";
+  var OPENCHAMBER_SDK_API_VERSION = 1;
 
   // node_modules/@openchamber/sdk/dist/scrollbar-style.js
   var GUEST_SCROLLING_ATTRIBUTE = "data-oc-scrolling";
@@ -152,212 +66,6 @@
     }, { capture: true, passive: true });
   }
   var GUEST_SCROLLBAR_SCRIPT = `(${installGuestScrollbarActivity.toString()})(document);`;
-
-  // node_modules/@openchamber/sdk/dist/ui/style.js
-  var OC_ALIAS = {
-    "surface-background": "bg",
-    "surface-elevated": "elevated",
-    "surface-elevated-foreground": "elevated-fg",
-    "surface-foreground": "fg",
-    "surface-muted-foreground": "muted",
-    "surface-muted": "muted-surface",
-    "surface-subtle": "subtle",
-    "interactive-border": "border",
-    "interactive-hover": "hover",
-    "interactive-active": "active",
-    "interactive-selection": "selection",
-    "interactive-selection-foreground": "selection-fg",
-    "interactive-focus-ring": "focus",
-    "primary": "primary",
-    "primary-foreground": "primary-fg",
-    "primary-text": "primary-text",
-    "success-text": "success-text",
-    "warning-text": "warning-text",
-    "error-text": "error-text",
-    "info-text": "info-text",
-    "status-success": "success",
-    "status-warning": "warning",
-    "status-error": "error",
-    "status-info": "info",
-    "font-sans": "font",
-    "font-mono": "mono",
-    "radius": "radius"
-  };
-  var v = (name, fallback) => `var(--${name}, var(--oc-${OC_ALIAS[name]}, ${fallback}))`;
-  var bg = v("surface-background", "transparent");
-  var elevated = v("surface-elevated", "transparent");
-  var elevatedFg = v("surface-elevated-foreground", "inherit");
-  var fg = v("surface-foreground", "inherit");
-  var muted = v("surface-muted-foreground", "gray");
-  var secondary = v("surface-muted", "transparent");
-  var border = v("interactive-border", "currentColor");
-  var hover = v("interactive-hover", "transparent");
-  var active = v("interactive-active", "transparent");
-  var selection = v("interactive-selection", "transparent");
-  var selectionFg = v("interactive-selection-foreground", "inherit");
-  var focus = v("interactive-focus-ring", "currentColor");
-  var primary = v("primary", "currentColor");
-  var primaryText = v("primary-text", "inherit");
-  var errorText = v("error-text", "inherit");
-  var font = v("font-sans", "inherit");
-  var mono = v("font-mono", "monospace");
-  var radius = v("radius", "9px");
-  var mix = (color, pct, base = "transparent") => `color-mix(in srgb, ${color} ${pct}%, ${base})`;
-  var focusRing = `box-shadow: 0 0 0 2px ${focus};`;
-  var tone = (name) => {
-    const color = v(`status-${name}`, "currentColor");
-    return `
-.oc-sdk[data-tone="${name}"], .oc-sdk [data-tone="${name}"] { --oc-sdk-tone: ${color}; --oc-sdk-tone-text: ${v(`${name}-text`, "inherit")}; }`;
-  };
-  var UI_CSS = `
-${GUEST_SCROLLBAR_CSS}
-.oc-sdk { box-sizing: border-box; color: ${fg}; font-family: ${font}; font-size: 0.875rem; line-height: 1.45; }
-.oc-sdk *, .oc-sdk *::before, .oc-sdk *::after { box-sizing: border-box; }
-/* :where() keeps the reset at zero specificity so every primitive class below overrides it. */
-:where(.oc-sdk) :where(button, input, textarea), :where(button.oc-sdk, input.oc-sdk, textarea.oc-sdk) { font: inherit; color: inherit; margin: 0; }
-:where(.oc-sdk) :where(button), :where(button.oc-sdk) { cursor: pointer; background: none; border: 0; padding: 0; }
-.oc-sdk button:disabled, button.oc-sdk:disabled, .oc-sdk[aria-disabled="true"], .oc-sdk [aria-disabled="true"] { opacity: .5; pointer-events: none; }
-.oc-sdk :focus-visible { outline: none; ${focusRing} }
-.oc-sdk-mono { font-family: ${mono}; }
-.oc-sdk-muted { color: ${muted}; }
-${tone("success")}${tone("warning")}${tone("error")}${tone("info")}
-.oc-sdk[data-tone="primary"], .oc-sdk [data-tone="primary"] { --oc-sdk-tone: ${primary}; --oc-sdk-tone-text: ${primaryText}; }
-
-.oc-sdk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px; border: 1px solid transparent; border-radius: ${radius}; font-size: 0.875rem; font-weight: 500; line-height: 1; white-space: nowrap; transition: background 150ms ease-out, color 150ms ease-out; }
-.oc-sdk-btn[data-size="sm"] { height: 32px; padding: 0 10px; font-size: 0.8125rem; }
-.oc-sdk-btn[data-size="xs"] { height: 24px; padding: 0 8px; font-size: 0.75rem; border-radius: 6px; }
-.oc-sdk-btn[data-variant="default"] { color: ${primaryText}; background: ${mix(primary, 10, bg)}; border-color: ${mix(primary, 12)}; }
-.oc-sdk-btn[data-variant="default"]:hover { background: ${mix(primary, 16, bg)}; }
-.oc-sdk-btn[data-variant="default"]:active { background: ${mix(primary, 22, bg)}; }
-.oc-sdk-btn[data-variant="secondary"] { background: ${secondary}; color: var(--oc-fg); }
-.oc-sdk-btn[data-variant="secondary"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-btn[data-variant="secondary"]:active { background-image: linear-gradient(${active}, ${active}); }
-.oc-sdk-btn[data-variant="outline"] { background: ${elevated}; color: ${elevatedFg}; border-color: ${border}; }
-.oc-sdk-btn[data-variant="outline"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-btn[data-variant="outline"]:active { background-image: linear-gradient(${active}, ${active}); }
-.oc-sdk-btn[data-variant="ghost"] { background: transparent; }
-.oc-sdk-btn[data-variant="ghost"]:hover { background: ${hover}; }
-.oc-sdk-btn[data-variant="ghost"]:active { background: ${active}; }
-.oc-sdk-btn[data-variant="destructive"] { --oc-sdk-tone: ${v("status-error", "red")}; color: ${errorText}; background: ${mix("var(--oc-sdk-tone)", 7, bg)}; border-color: ${mix("var(--oc-sdk-tone)", 12)}; }
-.oc-sdk-btn[data-variant="destructive"]:hover { background: ${mix("var(--oc-sdk-tone)", 9, bg)}; }
-.oc-sdk-btn[data-variant="destructive"]:active { background: ${mix("var(--oc-sdk-tone)", 11, bg)}; }
-.oc-sdk-btn[data-loading="true"] { opacity: .5; pointer-events: none; }
-.oc-sdk-btn > .oc-sdk-spinner-ring { width: 14px; height: 14px; }
-
-.oc-sdk-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.oc-sdk-field-label { font-size: 0.8125rem; font-weight: 500; }
-.oc-sdk-field-note { font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-field[data-invalid="true"] .oc-sdk-field-note { color: ${errorText}; }
-.oc-sdk-input { display: block; width: 100%; min-width: 0; height: 36px; padding: 0 12px; border: 0; border-radius: ${radius}; background: ${elevated}; color: ${elevatedFg}; font-size: 0.875rem; line-height: 1.45; appearance: none; box-shadow: inset 0 0 0 1px ${mix(border, 60)}; transition: background 150ms ease-out, box-shadow 150ms ease-out; }
-textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
-.oc-sdk-input::placeholder { color: ${muted}; }
-.oc-sdk-input:hover:not(:focus) { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-input:focus, .oc-sdk-input:focus-visible { box-shadow: inset 0 0 0 2px ${focus}; }
-.oc-sdk-field[data-invalid="true"] .oc-sdk-input { box-shadow: inset 0 0 0 1px ${v("status-error", "red")}; }
-.oc-sdk-field[data-invalid="true"] .oc-sdk-input:focus { box-shadow: inset 0 0 0 2px ${v("status-error", "red")}; }
-.oc-sdk-input[data-mono="true"] { font-family: ${mono}; }
-
-.oc-sdk-search { position: relative; min-width: 0; }
-.oc-sdk-search .oc-sdk-input { padding-left: 34px; padding-right: 34px; }
-.oc-sdk-search-icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: ${muted}; pointer-events: none; }
-.oc-sdk-search[data-active="true"] .oc-sdk-search-icon { color: ${primary}; }
-.oc-sdk-search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: none; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 6px; color: ${muted}; }
-.oc-sdk-search[data-active="true"] .oc-sdk-search-clear { display: inline-flex; }
-.oc-sdk-search-clear:hover { background: ${hover}; color: ${fg}; }
-
-.oc-sdk-select { position: relative; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.oc-sdk-trigger { display: inline-flex; align-items: center; gap: 6px; width: 100%; min-width: 0; height: 32px; padding: 0 8px 0 10px; border: 1px solid ${border}; border-radius: 6px; background: ${elevated}; color: ${elevatedFg}; font-size: 0.8125rem; text-align: left; transition: background 150ms ease-out; }
-.oc-sdk-trigger:hover { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-trigger[aria-expanded="true"] { background-image: linear-gradient(${active}, ${active}); }
-.oc-sdk-trigger-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-sdk-trigger-value[data-empty="true"] { color: ${muted}; }
-.oc-sdk-trigger-chevron { flex: 0 0 auto; color: ${muted}; }
-.oc-sdk-popup { --surface-foreground: ${elevatedFg}; position: fixed; z-index: 50; display: flex; flex-direction: column; gap: 2px; min-width: 160px; max-width: calc(100vw - 16px); max-height: min(320px, calc(100vh - 16px)); overflow: auto; padding: 4px; border: 1px solid ${mix(border, 60)}; border-radius: 12px; background: ${elevated}; color: ${elevatedFg}; box-shadow: 0 8px 24px ${mix(fg, 12)}; }
-.oc-sdk-popup-search { flex: 0 0 auto; padding: 2px 2px 4px; }
-.oc-sdk-popup-search .oc-sdk-input { height: 32px; font-size: 0.8125rem; }
-.oc-sdk-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 8px; font-size: 0.8125rem; text-align: left; }
-.oc-sdk-option[data-active="true"] { background: ${hover}; }
-.oc-sdk-option[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
-.oc-sdk-option[data-destructive="true"] { color: ${errorText}; }
-.oc-sdk-option[data-destructive="true"][data-active="true"] { background: ${mix(v("status-error", "red"), 10)}; }
-.oc-sdk-option-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-sdk-option-hint { flex: 0 0 auto; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-option-check { flex: 0 0 auto; width: 12px; }
-.oc-sdk-popup-empty { padding: 8px; font-size: 0.8125rem; color: ${muted}; }
-
-.oc-sdk-check { display: inline-flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; }
-.oc-sdk-check-box { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-top: 3px; border: 1px solid ${border}; border-radius: 4px; color: ${primary}; transition: border-color 150ms ease-out; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box { border-color: ${mix(primary, 65, border)}; }
-.oc-sdk-check-box > svg { display: none; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box > svg { display: block; }
-.oc-sdk-check-thumb { flex: 0 0 auto; position: relative; width: 36px; height: 20px; border-radius: 9999px; background: ${border}; transition: background 150ms ease-out; }
-.oc-sdk-check-thumb::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 9999px; background: ${bg}; transition: transform 150ms ease-out; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb { background: ${primary}; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb::after { transform: translateX(16px); }
-.oc-sdk-check:focus-visible { box-shadow: none; }
-.oc-sdk-check:focus-visible .oc-sdk-check-box, .oc-sdk-check:focus-visible .oc-sdk-check-thumb { ${focusRing} }
-.oc-sdk-check-text { display: flex; flex-direction: column; min-width: 0; }
-.oc-sdk-check-label { font-size: 0.875rem; }
-.oc-sdk-check-desc { font-size: 0.75rem; color: ${muted}; }
-
-.oc-sdk-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; max-width: 100%; overflow: auto; }
-.oc-sdk-tabs[data-track="true"] { background: ${mix(fg, 4)}; }
-.oc-sdk-tab { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; font-size: 0.8125rem; font-weight: 500; color: ${muted}; white-space: nowrap; transition: color 150ms ease-out, background 150ms ease-out; }
-.oc-sdk-tab:hover { color: ${fg}; }
-.oc-sdk-tab[aria-selected="true"] { color: ${selectionFg}; background: ${selection}; border-color: ${border}; }
-.oc-sdk-tab-count { font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
-
-.oc-sdk-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 9999px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; background: ${hover}; color: ${muted}; }
-.oc-sdk-badge[data-tone] { color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); background: ${mix("var(--oc-sdk-tone)", 15)}; }
-
-.oc-sdk-list { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.oc-sdk-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 6px; text-align: left; transition: background 120ms ease-out; }
-.oc-sdk-row:hover, .oc-sdk-row[data-active="true"] { background: ${hover}; }
-.oc-sdk-row[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
-.oc-sdk-row-lead { flex: 0 0 auto; width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ${mono}; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
-.oc-sdk-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-sdk-row-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-row-meta { flex: 0 0 auto; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
-.oc-sdk-row[aria-selected="true"] .oc-sdk-row-lead, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-sub, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-meta { color: inherit; opacity: .75; }
-.oc-sdk-list-empty { padding: 16px 8px; text-align: center; font-size: 0.8125rem; color: ${muted}; }
-
-.oc-sdk-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 40px 16px; text-align: center; }
-.oc-sdk-empty-title { margin: 0; font-size: 0.8125rem; font-weight: 600; }
-.oc-sdk-empty-body { margin: 0; max-width: 32rem; font-size: 0.8125rem; color: ${muted}; }
-.oc-sdk-empty-action { margin-top: 12px; }
-
-@keyframes oc-sdk-spin { to { transform: rotate(360deg); } }
-.oc-sdk-spinner { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8125rem; color: ${muted}; }
-.oc-sdk-spinner-ring { width: 16px; height: 16px; border: 2px solid ${border}; border-top-color: ${primary}; border-radius: 9999px; animation: oc-sdk-spin .8s linear infinite; }
-.oc-sdk-spinner[data-size="sm"] .oc-sdk-spinner-ring { width: 12px; height: 12px; }
-
-.oc-sdk-banner { display: flex; align-items: flex-start; gap: 12px; padding: 8px 12px; border: 1px solid ${mix("var(--oc-sdk-tone)", 40)}; border-radius: 8px; background: ${mix("var(--oc-sdk-tone)", 10)}; }
-.oc-sdk-banner-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.oc-sdk-banner-title { font-size: 0.8125rem; font-weight: 500; color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); }
-.oc-sdk-banner-body { font-size: 0.8125rem; color: ${muted}; }
-.oc-sdk-banner-action { flex: 0 0 auto; }
-
-.oc-sdk-separator { display: flex; align-items: center; gap: 8px; width: 100%; margin: 8px 0; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-separator::before, .oc-sdk-separator::after { content: ""; flex: 1 1 auto; height: 1px; background: ${mix(border, 40)}; }
-.oc-sdk-separator[data-labeled="false"]::after { display: none; }
-.oc-sdk-popup > .oc-sdk-separator { margin: 4px 0; }
-
-.oc-sdk-progress { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.oc-sdk-progress-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: ${muted}; font-variant-numeric: tabular-nums; }
-.oc-sdk-progress-track { height: 6px; border-radius: 9999px; background: ${border}; overflow: hidden; }
-.oc-sdk-progress-fill { height: 100%; border-radius: 9999px; background: var(--oc-sdk-tone, ${primary}); transform-origin: left; transition: transform 200ms ease-out; }
-
-.oc-sdk-menu { position: relative; display: inline-flex; }
-
-.oc-sdk-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.oc-sdk-text a { color: ${primaryText}; text-decoration: underline; text-underline-offset: 2px; }
-.oc-sdk-text img { display: block; max-width: 100%; margin: 8px 0; border-radius: 8px; border: 1px solid ${mix(border, 60)}; }
-`;
-
-  // node_modules/@openchamber/sdk/dist/api-version.js
-  var OPENCHAMBER_SDK_CHANNEL = "openchamber.sdk";
-  var OPENCHAMBER_SDK_API_VERSION = 1;
 
   // node_modules/@openchamber/sdk/dist/workspace.js
   var GUEST_STORAGE_KEY_MAX = 128;
@@ -1638,6 +1346,298 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   var SURFACE_CONTROLLERS = ["none", "agent", "user"];
   var CONTROLLERS = new Set(SURFACE_CONTROLLERS);
 
+  // node_modules/@openchamber/sdk/dist/ui/theme.js
+  var TOKEN_VARS = [
+    ["--oc-bg", "background"],
+    ["--oc-elevated", "elevated"],
+    ["--oc-fg", "foreground"],
+    ["--oc-muted", "muted"],
+    ["--oc-subtle", "subtle"],
+    ["--oc-border", "border"],
+    ["--oc-hover", "hover"],
+    ["--oc-selection", "selection"],
+    ["--oc-focus", "focus"],
+    ["--oc-primary", "primary"],
+    ["--oc-muted-surface", "mutedSurface"],
+    ["--oc-elevated-fg", "elevatedForeground"],
+    ["--oc-active", "active"],
+    ["--oc-selection-fg", "selectionForeground"],
+    ["--oc-primary-fg", "primaryForeground"],
+    ["--oc-primary-text", "primaryText"],
+    ["--oc-success-text", "successText"],
+    ["--oc-warning-text", "warningText"],
+    ["--oc-error-text", "errorText"],
+    ["--oc-info-text", "infoText"],
+    ["--oc-success", "success"],
+    ["--oc-warning", "warning"],
+    ["--oc-error", "error"],
+    ["--oc-info", "info"],
+    ["--oc-font", "font"],
+    ["--oc-mono", "mono"],
+    ["--oc-radius", "radius"],
+    ["--surface-background", "background"],
+    ["--surface-elevated", "elevated"],
+    ["--surface-foreground", "foreground"],
+    ["--surface-muted-foreground", "muted"],
+    ["--surface-subtle", "subtle"],
+    ["--interactive-border", "border"],
+    ["--interactive-hover", "hover"],
+    ["--interactive-selection", "selection"],
+    ["--interactive-focus-ring", "focus"],
+    ["--primary", "primary"],
+    ["--surface-muted", "mutedSurface"],
+    ["--surface-elevated-foreground", "elevatedForeground"],
+    ["--interactive-active", "active"],
+    ["--interactive-selection-foreground", "selectionForeground"],
+    ["--primary-foreground", "primaryForeground"],
+    ["--primary-text", "primaryText"],
+    ["--success-text", "successText"],
+    ["--warning-text", "warningText"],
+    ["--error-text", "errorText"],
+    ["--info-text", "infoText"],
+    ["--status-success", "success"],
+    ["--status-warning", "warning"],
+    ["--status-error", "error"],
+    ["--status-info", "info"],
+    ["--font-sans", "font"],
+    ["--font-mono", "mono"],
+    ["--radius", "radius"]
+  ];
+  var SYNTAX_TOKEN_VARS = [
+    ["--oc-syntax-keyword", "--syntax-keyword", "syntaxKeyword"],
+    ["--oc-syntax-string", "--syntax-string", "syntaxString"],
+    ["--oc-syntax-number", "--syntax-number", "syntaxNumber"],
+    ["--oc-syntax-function", "--syntax-function", "syntaxFunction"],
+    ["--oc-syntax-type", "--syntax-type", "syntaxType"],
+    ["--oc-syntax-comment", "--syntax-comment", "syntaxComment"],
+    ["--oc-syntax-variable", "--syntax-variable", "syntaxVariable"],
+    ["--oc-syntax-operator", "--syntax-operator", "syntaxOperator"]
+  ];
+  var applyHostTheme = (theme, root) => {
+    root.style.colorScheme = theme.mode;
+    for (const [name, key] of TOKEN_VARS) {
+      root.style.setProperty(name, theme.tokens[key]);
+    }
+    for (const [alias, hostName, key] of SYNTAX_TOKEN_VARS) {
+      const value = theme.tokens[key] ?? "";
+      root.style.setProperty(alias, value);
+      root.style.setProperty(hostName, value);
+    }
+    root.style.setProperty("font-family", theme.tokens.font);
+    root.style.setProperty("font-size", "0.875rem");
+    root.style.setProperty("line-height", "1.45");
+    root.style.setProperty("color", theme.tokens.foreground);
+  };
+  var applyHostReady = (ctx, root) => {
+    applyHostTheme(ctx.theme, root);
+    if (root.dataset) {
+      root.dataset.ocSurface = ctx.surface;
+      root.dataset.ocTheme = ctx.theme.mode;
+    }
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/style.js
+  var OC_ALIAS = {
+    "surface-background": "bg",
+    "surface-elevated": "elevated",
+    "surface-elevated-foreground": "elevated-fg",
+    "surface-foreground": "fg",
+    "surface-muted-foreground": "muted",
+    "surface-muted": "muted-surface",
+    "surface-subtle": "subtle",
+    "interactive-border": "border",
+    "interactive-hover": "hover",
+    "interactive-active": "active",
+    "interactive-selection": "selection",
+    "interactive-selection-foreground": "selection-fg",
+    "interactive-focus-ring": "focus",
+    "primary": "primary",
+    "primary-foreground": "primary-fg",
+    "primary-text": "primary-text",
+    "success-text": "success-text",
+    "warning-text": "warning-text",
+    "error-text": "error-text",
+    "info-text": "info-text",
+    "status-success": "success",
+    "status-warning": "warning",
+    "status-error": "error",
+    "status-info": "info",
+    "font-sans": "font",
+    "font-mono": "mono",
+    "radius": "radius"
+  };
+  var v = (name, fallback) => `var(--${name}, var(--oc-${OC_ALIAS[name]}, ${fallback}))`;
+  var bg = v("surface-background", "transparent");
+  var elevated = v("surface-elevated", "transparent");
+  var elevatedFg = v("surface-elevated-foreground", "inherit");
+  var fg = v("surface-foreground", "inherit");
+  var muted = v("surface-muted-foreground", "gray");
+  var secondary = v("surface-muted", "transparent");
+  var border = v("interactive-border", "currentColor");
+  var hover = v("interactive-hover", "transparent");
+  var active = v("interactive-active", "transparent");
+  var selection = v("interactive-selection", "transparent");
+  var selectionFg = v("interactive-selection-foreground", "inherit");
+  var focus = v("interactive-focus-ring", "currentColor");
+  var primary = v("primary", "currentColor");
+  var primaryText = v("primary-text", "inherit");
+  var errorText = v("error-text", "inherit");
+  var font = v("font-sans", "inherit");
+  var mono = v("font-mono", "monospace");
+  var radius = v("radius", "9px");
+  var mix = (color, pct, base = "transparent") => `color-mix(in srgb, ${color} ${pct}%, ${base})`;
+  var focusRing = `box-shadow: 0 0 0 2px ${focus};`;
+  var tone = (name) => {
+    const color = v(`status-${name}`, "currentColor");
+    return `
+.oc-sdk[data-tone="${name}"], .oc-sdk [data-tone="${name}"] { --oc-sdk-tone: ${color}; --oc-sdk-tone-text: ${v(`${name}-text`, "inherit")}; }`;
+  };
+  var UI_CSS = `
+${GUEST_SCROLLBAR_CSS}
+.oc-sdk { box-sizing: border-box; color: ${fg}; font-family: ${font}; font-size: 0.875rem; line-height: 1.45; }
+.oc-sdk *, .oc-sdk *::before, .oc-sdk *::after { box-sizing: border-box; }
+/* :where() keeps the reset at zero specificity so every primitive class below overrides it. */
+:where(.oc-sdk) :where(button, input, textarea), :where(button.oc-sdk, input.oc-sdk, textarea.oc-sdk) { font: inherit; color: inherit; margin: 0; }
+:where(.oc-sdk) :where(button), :where(button.oc-sdk) { cursor: pointer; background: none; border: 0; padding: 0; }
+.oc-sdk button:disabled, button.oc-sdk:disabled, .oc-sdk[aria-disabled="true"], .oc-sdk [aria-disabled="true"] { opacity: .5; pointer-events: none; }
+.oc-sdk :focus-visible { outline: none; ${focusRing} }
+.oc-sdk-mono { font-family: ${mono}; }
+.oc-sdk-muted { color: ${muted}; }
+${tone("success")}${tone("warning")}${tone("error")}${tone("info")}
+.oc-sdk[data-tone="primary"], .oc-sdk [data-tone="primary"] { --oc-sdk-tone: ${primary}; --oc-sdk-tone-text: ${primaryText}; }
+
+.oc-sdk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px; border: 1px solid transparent; border-radius: ${radius}; font-size: 0.875rem; font-weight: 500; line-height: 1; white-space: nowrap; transition: background 150ms ease-out, color 150ms ease-out; }
+.oc-sdk-btn[data-size="sm"] { height: 32px; padding: 0 10px; font-size: 0.8125rem; }
+.oc-sdk-btn[data-size="xs"] { height: 24px; padding: 0 8px; font-size: 0.75rem; border-radius: 6px; }
+.oc-sdk-btn[data-variant="default"] { color: ${primaryText}; background: ${mix(primary, 10, bg)}; border-color: ${mix(primary, 12)}; }
+.oc-sdk-btn[data-variant="default"]:hover { background: ${mix(primary, 16, bg)}; }
+.oc-sdk-btn[data-variant="default"]:active { background: ${mix(primary, 22, bg)}; }
+.oc-sdk-btn[data-variant="secondary"] { background: ${secondary}; color: var(--oc-fg); }
+.oc-sdk-btn[data-variant="secondary"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-btn[data-variant="secondary"]:active { background-image: linear-gradient(${active}, ${active}); }
+.oc-sdk-btn[data-variant="outline"] { background: ${elevated}; color: ${elevatedFg}; border-color: ${border}; }
+.oc-sdk-btn[data-variant="outline"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-btn[data-variant="outline"]:active { background-image: linear-gradient(${active}, ${active}); }
+.oc-sdk-btn[data-variant="ghost"] { background: transparent; }
+.oc-sdk-btn[data-variant="ghost"]:hover { background: ${hover}; }
+.oc-sdk-btn[data-variant="ghost"]:active { background: ${active}; }
+.oc-sdk-btn[data-variant="destructive"] { --oc-sdk-tone: ${v("status-error", "red")}; color: ${errorText}; background: ${mix("var(--oc-sdk-tone)", 7, bg)}; border-color: ${mix("var(--oc-sdk-tone)", 12)}; }
+.oc-sdk-btn[data-variant="destructive"]:hover { background: ${mix("var(--oc-sdk-tone)", 9, bg)}; }
+.oc-sdk-btn[data-variant="destructive"]:active { background: ${mix("var(--oc-sdk-tone)", 11, bg)}; }
+.oc-sdk-btn[data-loading="true"] { opacity: .5; pointer-events: none; }
+.oc-sdk-btn > .oc-sdk-spinner-ring { width: 14px; height: 14px; }
+
+.oc-sdk-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-sdk-field-label { font-size: 0.8125rem; font-weight: 500; }
+.oc-sdk-field-note { font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-field[data-invalid="true"] .oc-sdk-field-note { color: ${errorText}; }
+.oc-sdk-input { display: block; width: 100%; min-width: 0; height: 36px; padding: 0 12px; border: 0; border-radius: ${radius}; background: ${elevated}; color: ${elevatedFg}; font-size: 0.875rem; line-height: 1.45; appearance: none; box-shadow: inset 0 0 0 1px ${mix(border, 60)}; transition: background 150ms ease-out, box-shadow 150ms ease-out; }
+textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
+.oc-sdk-input::placeholder { color: ${muted}; }
+.oc-sdk-input:hover:not(:focus) { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-input:focus, .oc-sdk-input:focus-visible { box-shadow: inset 0 0 0 2px ${focus}; }
+.oc-sdk-field[data-invalid="true"] .oc-sdk-input { box-shadow: inset 0 0 0 1px ${v("status-error", "red")}; }
+.oc-sdk-field[data-invalid="true"] .oc-sdk-input:focus { box-shadow: inset 0 0 0 2px ${v("status-error", "red")}; }
+.oc-sdk-input[data-mono="true"] { font-family: ${mono}; }
+
+.oc-sdk-search { position: relative; min-width: 0; }
+.oc-sdk-search .oc-sdk-input { padding-left: 34px; padding-right: 34px; }
+.oc-sdk-search-icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: ${muted}; pointer-events: none; }
+.oc-sdk-search[data-active="true"] .oc-sdk-search-icon { color: ${primary}; }
+.oc-sdk-search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: none; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 6px; color: ${muted}; }
+.oc-sdk-search[data-active="true"] .oc-sdk-search-clear { display: inline-flex; }
+.oc-sdk-search-clear:hover { background: ${hover}; color: ${fg}; }
+
+.oc-sdk-select { position: relative; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-sdk-trigger { display: inline-flex; align-items: center; gap: 6px; width: 100%; min-width: 0; height: 32px; padding: 0 8px 0 10px; border: 1px solid ${border}; border-radius: 6px; background: ${elevated}; color: ${elevatedFg}; font-size: 0.8125rem; text-align: left; transition: background 150ms ease-out; }
+.oc-sdk-trigger:hover { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-trigger[aria-expanded="true"] { background-image: linear-gradient(${active}, ${active}); }
+.oc-sdk-trigger-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-sdk-trigger-value[data-empty="true"] { color: ${muted}; }
+.oc-sdk-trigger-chevron { flex: 0 0 auto; color: ${muted}; }
+.oc-sdk-popup { --surface-foreground: ${elevatedFg}; position: fixed; z-index: 50; display: flex; flex-direction: column; gap: 2px; min-width: 160px; max-width: calc(100vw - 16px); max-height: min(320px, calc(100vh - 16px)); overflow: auto; padding: 4px; border: 1px solid ${mix(border, 60)}; border-radius: 12px; background: ${elevated}; color: ${elevatedFg}; box-shadow: 0 8px 24px ${mix(fg, 12)}; }
+.oc-sdk-popup-search { flex: 0 0 auto; padding: 2px 2px 4px; }
+.oc-sdk-popup-search .oc-sdk-input { height: 32px; font-size: 0.8125rem; }
+.oc-sdk-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 8px; font-size: 0.8125rem; text-align: left; }
+.oc-sdk-option[data-active="true"] { background: ${hover}; }
+.oc-sdk-option[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
+.oc-sdk-option[data-destructive="true"] { color: ${errorText}; }
+.oc-sdk-option[data-destructive="true"][data-active="true"] { background: ${mix(v("status-error", "red"), 10)}; }
+.oc-sdk-option-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-sdk-option-hint { flex: 0 0 auto; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-option-check { flex: 0 0 auto; width: 12px; }
+.oc-sdk-popup-empty { padding: 8px; font-size: 0.8125rem; color: ${muted}; }
+
+.oc-sdk-check { display: inline-flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; }
+.oc-sdk-check-box { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-top: 3px; border: 1px solid ${border}; border-radius: 4px; color: ${primary}; transition: border-color 150ms ease-out; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box { border-color: ${mix(primary, 65, border)}; }
+.oc-sdk-check-box > svg { display: none; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box > svg { display: block; }
+.oc-sdk-check-thumb { flex: 0 0 auto; position: relative; width: 36px; height: 20px; border-radius: 9999px; background: ${border}; transition: background 150ms ease-out; }
+.oc-sdk-check-thumb::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 9999px; background: ${bg}; transition: transform 150ms ease-out; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb { background: ${primary}; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb::after { transform: translateX(16px); }
+.oc-sdk-check:focus-visible { box-shadow: none; }
+.oc-sdk-check:focus-visible .oc-sdk-check-box, .oc-sdk-check:focus-visible .oc-sdk-check-thumb { ${focusRing} }
+.oc-sdk-check-text { display: flex; flex-direction: column; min-width: 0; }
+.oc-sdk-check-label { font-size: 0.875rem; }
+.oc-sdk-check-desc { font-size: 0.75rem; color: ${muted}; }
+
+.oc-sdk-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; max-width: 100%; overflow: auto; }
+.oc-sdk-tabs[data-track="true"] { background: ${mix(fg, 4)}; }
+.oc-sdk-tab { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; font-size: 0.8125rem; font-weight: 500; color: ${muted}; white-space: nowrap; transition: color 150ms ease-out, background 150ms ease-out; }
+.oc-sdk-tab:hover { color: ${fg}; }
+.oc-sdk-tab[aria-selected="true"] { color: ${selectionFg}; background: ${selection}; border-color: ${border}; }
+.oc-sdk-tab-count { font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
+
+.oc-sdk-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 9999px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; background: ${hover}; color: ${muted}; }
+.oc-sdk-badge[data-tone] { color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); background: ${mix("var(--oc-sdk-tone)", 15)}; }
+
+.oc-sdk-list { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.oc-sdk-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 6px; text-align: left; transition: background 120ms ease-out; }
+.oc-sdk-row:hover, .oc-sdk-row[data-active="true"] { background: ${hover}; }
+.oc-sdk-row[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
+.oc-sdk-row-lead { flex: 0 0 auto; width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ${mono}; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.oc-sdk-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-sdk-row-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-row-meta { flex: 0 0 auto; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
+.oc-sdk-row[aria-selected="true"] .oc-sdk-row-lead, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-sub, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-meta { color: inherit; opacity: .75; }
+.oc-sdk-list-empty { padding: 16px 8px; text-align: center; font-size: 0.8125rem; color: ${muted}; }
+
+.oc-sdk-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 40px 16px; text-align: center; }
+.oc-sdk-empty-title { margin: 0; font-size: 0.8125rem; font-weight: 600; }
+.oc-sdk-empty-body { margin: 0; max-width: 32rem; font-size: 0.8125rem; color: ${muted}; }
+.oc-sdk-empty-action { margin-top: 12px; }
+
+@keyframes oc-sdk-spin { to { transform: rotate(360deg); } }
+.oc-sdk-spinner { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8125rem; color: ${muted}; }
+.oc-sdk-spinner-ring { width: 16px; height: 16px; border: 2px solid ${border}; border-top-color: ${primary}; border-radius: 9999px; animation: oc-sdk-spin .8s linear infinite; }
+.oc-sdk-spinner[data-size="sm"] .oc-sdk-spinner-ring { width: 12px; height: 12px; }
+
+.oc-sdk-banner { display: flex; align-items: flex-start; gap: 12px; padding: 8px 12px; border: 1px solid ${mix("var(--oc-sdk-tone)", 40)}; border-radius: 8px; background: ${mix("var(--oc-sdk-tone)", 10)}; }
+.oc-sdk-banner-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.oc-sdk-banner-title { font-size: 0.8125rem; font-weight: 500; color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); }
+.oc-sdk-banner-body { font-size: 0.8125rem; color: ${muted}; }
+.oc-sdk-banner-action { flex: 0 0 auto; }
+
+.oc-sdk-separator { display: flex; align-items: center; gap: 8px; width: 100%; margin: 8px 0; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-separator::before, .oc-sdk-separator::after { content: ""; flex: 1 1 auto; height: 1px; background: ${mix(border, 40)}; }
+.oc-sdk-separator[data-labeled="false"]::after { display: none; }
+.oc-sdk-popup > .oc-sdk-separator { margin: 4px 0; }
+
+.oc-sdk-progress { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-sdk-progress-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: ${muted}; font-variant-numeric: tabular-nums; }
+.oc-sdk-progress-track { height: 6px; border-radius: 9999px; background: ${border}; overflow: hidden; }
+.oc-sdk-progress-fill { height: 100%; border-radius: 9999px; background: var(--oc-sdk-tone, ${primary}); transform-origin: left; transition: transform 200ms ease-out; }
+
+.oc-sdk-menu { position: relative; display: inline-flex; }
+
+.oc-sdk-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.oc-sdk-text a { color: ${primaryText}; text-decoration: underline; text-underline-offset: 2px; }
+.oc-sdk-text img { display: block; max-width: 100%; margin: 8px 0; border-radius: 8px; border: 1px solid ${mix(border, 60)}; }
+`;
+
   // panel/api.ts
   var host = connectHost();
   var ServiceUnavailable = class extends Error {
@@ -1670,8 +1670,9 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return JSON.parse(result.body);
   }
   var OPENING_STATUS = "Starting dev server\u2026";
-  function openLive(url, dir) {
-    return callService("/open", void 0, "POST", JSON.stringify(dir ? { url, dir } : { url }));
+  function openWorkspace(input) {
+    const payload = input.screen !== void 0 ? { dir: input.dir, screen: input.screen } : { dir: input.dir };
+    return callService("/open", void 0, "POST", JSON.stringify(payload));
   }
   function closeLive() {
     return callService("/close", void 0, "POST");
@@ -1688,6 +1689,9 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function getState() {
     return callService("/state");
   }
+  function setMode(mode) {
+    return callService("/mode", void 0, "POST", JSON.stringify({ mode }));
+  }
   function focusLive() {
     return callService("/focus", void 0, "POST");
   }
@@ -1697,92 +1701,89 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function validateReferencePath(dir, path) {
     return callService("/reference", void 0, "POST", JSON.stringify({ dir, path }));
   }
-  function ensureHarness(dir) {
-    return callService("/harness", void 0, "POST", JSON.stringify({ dir }));
+  function getWorkspaces() {
+    return callService("/workspaces");
   }
-  function isDesignWorkspaceDir(dir) {
-    return /(^|[\\/])designs([\\/]|$)/.test(String(dir ?? ""));
+  function exportJob(dir, formats) {
+    const body = formats && formats.length > 0 ? { dir, formats } : { dir };
+    return callService("/export", void 0, "POST", JSON.stringify(body));
+  }
+  function exportStatus(dir, job) {
+    return callService("/export/status", { dir, job });
+  }
+  function critiqueWorkspace(dir) {
+    return callService("/critique", void 0, "POST", JSON.stringify({ dir }));
   }
   function scaffoldProject(dir, spec) {
     return callService("/scaffold", void 0, "POST", JSON.stringify({ dir, ...spec }));
   }
-  function projectRows(snapshot, configs = {}) {
-    if (snapshot.state === "loading") return { kind: "loading" };
-    if (snapshot.state === "error") return { kind: "error", message: "Could not load projects." };
-    const rows = [];
-    for (const project of snapshot.projects) {
-      const read = configs[project.directory];
-      if (read && read.config === null && !read.error) continue;
-      rows.push({
-        id: project.id,
-        name: project.name,
-        directory: project.directory,
-        config: read?.config ?? null,
-        configError: read?.error ?? null
-      });
-    }
-    if (rows.length === 0) return { kind: "empty" };
-    return { kind: "list", rows };
+  function normalizeDirPath(dir) {
+    const text = String(dir).trim().replace(/\\/g, "/");
+    const drive = /^([a-zA-Z]):\/(.)/.exec(text);
+    const base = drive ? `${drive[1].toLowerCase()}:${text.slice(2)}` : text;
+    let end = base.length;
+    while (end > 1 && base[end - 1] === "/") end -= 1;
+    return base.slice(0, end).replace(/\/+$/, () => base.slice(0, end) === "/" ? "/" : "");
   }
-  var DESIGN_READY_BADGE = "Design ready";
-  var NO_CONFIG_BADGE = "No config yet";
-  var NO_DESIGN_WORK_MESSAGE = "No design work yet. Create one above.";
-  var PANEL_SIDEBAR_HINT = "Design Studio opens from the sidebar.";
-  function modeSessionIdFromKey(key) {
-    const prefix = "mode/";
+  function sameDirPath(a, b) {
+    return normalizeDirPath(a) === normalizeDirPath(b);
+  }
+  function pathContains(root, dir) {
+    const rb = normalizeDirPath(root);
+    const rd = normalizeDirPath(dir);
+    return rd === rb || rd.startsWith(`${rb}/`);
+  }
+  function wsSessionIdFromKey(key) {
+    const prefix = "ws/";
     return key.startsWith(prefix) && key.length > prefix.length ? key.slice(prefix.length) : null;
   }
-  function designChatLabel(session) {
-    const title = session.title?.trim();
-    return title ? title : session.id.slice(0, 8);
-  }
-  function projectMeta(row) {
-    if (!row.config) return row.directory;
-    const type = row.config.type?.trim() || "custom";
-    const url = row.config.url?.trim();
-    return url ? `${type} \xB7 ${url}` : type;
-  }
-  function designChatMeta(row) {
-    if (!row.config) return row.directory || row.projectName;
-    const type = row.config.type?.trim() || "custom";
-    const url = row.config.url?.trim();
-    return url ? `${type} \xB7 ${url}` : type;
+  function isWorkspaceRecord(value) {
+    return Boolean(
+      value && typeof value === "object" && typeof value.dir === "string" && value.dir.trim() !== ""
+    );
   }
   function allProjectsFromSnapshot(snapshot) {
     if (snapshot.state !== "ready") return [];
     return snapshot.projects.map((project) => ({ id: project.id, name: project.name, directory: project.directory }));
   }
-  var NEEDS_PROJECT_MESSAGE = "Add this folder to OpenChamber as a project first \u2014 design sessions live in registered projects.";
-  function pathContains(root, dir) {
-    return dir === root || dir.startsWith(`${root}/`);
-  }
-  function resolveDesignTarget(input) {
-    const picked = input.selectedProjectId ? input.projects.find((project) => project.id === input.selectedProjectId) : void 0;
-    if (picked) return projectTarget(picked, input.rows);
-    if (input.directory) {
-      const exact = input.projects.find((project) => project.directory === input.directory);
-      if (exact) return projectTarget(exact, input.rows);
-      let containing;
-      for (const project of input.projects) {
-        if (pathContains(project.directory, input.directory) && (!containing || project.directory.length > containing.directory.length)) {
-          containing = project;
-        }
-      }
-      if (containing) {
-        if (isDesignWorkspaceDir(input.directory)) {
-          return { kind: "project", dir: input.directory, projectId: containing.id, config: configForDir(input.rows, input.directory) };
-        }
-        return projectTarget(containing, input.rows);
-      }
+  function resolveCanvasTarget(input) {
+    const ws = input.workspace;
+    if (ws && ws.dir.trim() !== "") {
+      const registered = input.projects.find((candidate) => sameDirPath(candidate.directory, ws.dir) || pathContains(candidate.directory, ws.dir));
+      const base = { kind: "workspace", dir: ws.dir, name: ws.name || ws.dir };
+      return registered ? { ...base, projectId: registered.id } : base;
     }
-    return { kind: "needs-project", dir: input.directory };
+    return { kind: "new", brief: input.brief.trim() };
   }
-  function projectTarget(project, rows) {
-    const row = rows.find((candidate) => candidate.directory === project.directory);
-    return { kind: "project", dir: project.directory, projectId: project.id, config: row?.config ?? null };
+  var WORKSPACE_SLUG_LIMIT = 40;
+  function canvasSlug(brief, seed) {
+    const words = brief.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).slice(0, 4).join("-");
+    const segments = seed.toLowerCase().replace(/[^a-z0-9-]+/g, "-").split("-").filter(Boolean);
+    const tail = (segments[segments.length - 1] ?? seed.toLowerCase().replace(/[^a-z0-9]+/g, "")).slice(0, 8);
+    const base = words ? `${words}-${tail}` : `canvas-${tail}`;
+    const cleaned = base.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+    return (cleaned || "canvas").slice(0, WORKSPACE_SLUG_LIMIT);
   }
-  function configForDir(rows, dir) {
-    return rows.find((row) => row.directory === dir)?.config ?? null;
+  function uniqueCanvasSlug(brief, seed, existingDirs) {
+    const taken = new Set(existingDirs.map((dir) => normalizeDirPath(dir).split("/").pop() ?? ""));
+    const first = canvasSlug(brief, seed);
+    if (!taken.has(first)) return first;
+    for (let i = 2; ; i += 1) {
+      const candidate = `${first.slice(0, Math.max(1, WORKSPACE_SLUG_LIMIT - String(i).length - 1))}-${i}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+  }
+  function joinWorkspaceDir(root, slug) {
+    const trimmed = root.replace(/[\\/]+$/, "");
+    const sep = trimmed.includes("\\") && !trimmed.startsWith("/") ? "\\" : "/";
+    return `${trimmed}${sep}${slug}`;
+  }
+  function joinWorkspaceSessions(rows, wsSessionMap2) {
+    return rows.map((row) => ({ ...row, sessionId: wsSessionMap2.get(normalizeDirPath(row.dir)) ?? null }));
+  }
+  function workspaceMeta(row) {
+    const url = row.url?.trim();
+    return url ? url : row.dir;
   }
   function isModeChipData(data) {
     if (!data || typeof data !== "object") return false;
@@ -1791,64 +1792,6 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   }
   function sessionShowsDesignMode(session) {
     return Array.isArray(session.items) && session.items.some((item) => isModeChipData(item.data));
-  }
-  function isDesignSession(session, onSessionIds, markerSessionIds, modeKeySessionIds) {
-    return sessionShowsDesignMode(session) || onSessionIds.has(session.id) || Boolean(markerSessionIds?.has(session.id)) || Boolean(modeKeySessionIds?.has(session.id));
-  }
-  function designChatRows(listings, onSessionIds, markerSessionIds, modeKeySessionIds) {
-    if (listings.length === 0) return { kind: "empty" };
-    const failed = [];
-    const rows = [];
-    let loading = false;
-    for (const listing of listings) {
-      if (listing.snapshot.state === "error") {
-        failed.push(listing.projectName);
-        continue;
-      }
-      if (listing.snapshot.state === "loading") {
-        loading = true;
-        continue;
-      }
-      for (const session of listing.snapshot.sessions) {
-        if (session.archivedAt) continue;
-        if (!isDesignSession(session, onSessionIds, markerSessionIds, modeKeySessionIds)) continue;
-        rows.push({
-          sessionId: session.id,
-          projectId: listing.projectId,
-          projectName: listing.projectName,
-          title: designChatLabel(session),
-          // The chat resolves its config from its OWN directory, so an isolated
-          // `designs/<slug>` chat still reads as a design chat with its config.
-          directory: session.directory ?? "",
-          config: null,
-          configError: null,
-          updatedAt: session.updatedAt
-        });
-      }
-    }
-    if (loading) return { kind: "loading" };
-    if (rows.length === 0 && failed.length > 0) {
-      return { kind: "error", message: `Could not load design chats for ${failed.join(", ")}.` };
-    }
-    if (rows.length === 0) return { kind: "empty" };
-    return { kind: "list", rows };
-  }
-  function designWorkRows(projects, chats, options = {}) {
-    if (projects.kind === "loading" || chats.kind === "loading") return { kind: "loading" };
-    if (projects.kind === "error") return { kind: "error", message: projects.message };
-    if (chats.kind === "error") return { kind: "error", message: chats.message };
-    const omit = options.omitChatProjectIds ?? null;
-    const rows = [];
-    if (projects.kind === "list") for (const project of projects.rows) rows.push({ kind: "project", project });
-    if (chats.kind === "list") {
-      const ordered = [...chats.rows].sort((a, b) => b.updatedAt - a.updatedAt);
-      for (const chat of ordered) {
-        if (omit?.has(chat.projectId)) continue;
-        rows.push({ kind: "chat", chat });
-      }
-    }
-    if (rows.length === 0) return { kind: "empty" };
-    return { kind: "list", rows };
   }
   var PICK_HINT = "\u2318-click an element to add a reference";
   function pickHintActive(state2) {
@@ -1870,29 +1813,28 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     }
     return count;
   }
-  function designSessionStatus(state2) {
-    if (!state2.modeOn) return "Design mode is off \u2014 start a design session to pick elements";
-    const url = state2.configUrl?.trim();
-    return url ? `Design session \xB7 .design-studio.json found \xB7 ${url}` : "Design session \xB7 no .design-studio.json url yet";
+  var DESIGN_READY_BADGE = "Canvas ready";
+  var NO_CONFIG_BADGE = "No dev server yet";
+  var NO_DESIGN_WORK_MESSAGE = "No canvas workspaces yet \u2014 /canvas creates one.";
+  var PANEL_SIDEBAR_HINT = "Design Canvas opens from the sidebar.";
+  var NO_WORKSPACE_MESSAGE = "No canvas workspace yet \u2014 Start creates one.";
+  function canvasSessionStatus(state2) {
+    if (!state2.modeOn) return "Design Mode is off \u2014 turn it on to open the canvas";
+    if (!state2.workspaceDir) return "Design session \xB7 workspace being created\u2026";
+    return state2.wsReady ? `Design session \xB7 workspace ${state2.workspaceDir}` : `Design session \xB7 ${state2.workspaceDir} (no .design-studio.json url yet)`;
   }
-  var NO_PROJECT_URL_MESSAGE = "No .design-studio.json url for this project \u2014 add one, or turn the dev server on first";
+  var NO_PROJECT_URL_MESSAGE = "No .design-studio.json url for this workspace \u2014 add one, or turn the dev server on first";
   var ATTACH_NEEDS_URL = "References need an http(s) url from .design-studio.json.";
-  var NO_PROJECT_CONFIG_MESSAGE = "No .design-studio.json here \u2014 Design Studio isn't set up in this project.";
   function projectReady(config) {
     return Boolean(config?.url?.trim());
   }
   function isLoopbackUrl(raw) {
     try {
-      const host2 = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, "");
-      return host2 === "localhost" || host2 === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host2);
+      const hostname = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+      return hostname === "localhost" || hostname === "::1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
     } catch {
       return false;
     }
-  }
-  function decideProjectOpen(config, projectDir) {
-    const url = config?.url?.trim();
-    if (!url) return { kind: "message", message: NO_PROJECT_URL_MESSAGE };
-    return projectDir && isLoopbackUrl(url) ? { kind: "open", url, dir: projectDir } : { kind: "open", url };
   }
   var PICK_STYLE_KEYS = [
     "fontFamily",
@@ -1918,11 +1860,12 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     const pad = (value) => String(value).padStart(2, "0");
     return `${pad(day.getHours())}:${pad(day.getMinutes())}:${pad(day.getSeconds())}`;
   }
-  function referenceText(pick, url, pickedAt) {
+  function referenceText(pick, url, pickedAt, screen) {
     const styles = PICK_STYLE_KEYS.filter((key) => pick.styles[key] && pick.styles[key] !== "normal" && pick.styles[key] !== "none").map((key) => `  ${key}: ${pick.styles[key]};`).join("\n");
     return [
-      "Reference from Design Studio",
+      "Reference from Design Canvas",
       ...pickedAt ? [`Picked at ${localTimeOf(pickedAt)}`] : [],
+      ...screen ? [`Screen: ${screen.id}`, `Screen URL: ${screen.url}`] : [],
       `URL: ${url}`,
       `Selector: ${pick.selector}`,
       `Tag: ${pick.tag}${pick.classes ? `  Classes: ${pick.classes}` : ""}`,
@@ -2021,6 +1964,22 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       "- Done means the gates pass at every breakpoint \u2014 not that it looks right at one width."
     ].join("\n")
   };
+  var ALL_CRAFT_RULE_IDS = [
+    "typography",
+    "color",
+    "anti-slop",
+    "states",
+    "motion",
+    "accessibility",
+    "laws-of-ux",
+    "responsive",
+    "verification"
+  ];
+  function defaultCraft(ids) {
+    const chosen = ids && ids.length > 0 ? ids : ALL_CRAFT_RULE_IDS;
+    return chosen.map((id) => `### ${id}
+${CRAFT_RULES[id]}`).join("\n\n");
+  }
   var VERIFY_PROTOCOL = [
     "Before editing, state the change's acceptance criteria in one line.",
     "After each edit verify in this order (cheap/deterministic first): overflow \u2192 design tokens \u2192 accessibility \u2192 semantics \u2192 layout. Use the browser tool: `browser.capture` / `browser.open` returns a `verification` block covering every viewport (mobile, tablet, desktop, wide) with each gate's status.",
@@ -2030,17 +1989,33 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     "Oscillation: if a finding you already fixed reappears, or a gate flips across two iterations, STOP and hand back with both states. Do not keep looping.",
     "The 0\u201310 critique is advisory only; never treat it as pass/fail and never optimise for it."
   ].join("\n");
+  var IDENTITY = "You are an expert designer. HTML is your tool, not your medium: the medium is the intent, the system and the craft of the page.";
   var DESIGN_AUTHORITY = [
     "DESIGN.md and tokens.css (when present) are the project design system and are",
     "authoritative: follow them over any conflicting instinct, and do not invent colours,",
     "spacing or type values outside them. A hardcoded value that a token already covers is a defect."
   ].join(" ");
   var DESIGN_WORKSPACE_NOTE = [
-    "The selected registered design project itself is the workspace for new design sessions.",
-    "Keep the current session directory: do not create a per-chat child workspace or move the session automatically.",
-    "Inspect and reuse the existing app, design system and .design-studio.json; do not assume the workspace is empty or scaffold over existing work.",
-    "Existing sessions already in legacy child directories stay there unless the user explicitly requests a move."
+    "The canvas workspace is a Vite multi-page app: every screen is a real HTML page (root-level *.html files) and screens.json lists them.",
+    'To add a screen: write `<id>.html` at the workspace root, then add { "id": "<id>", "file": "<id>.html", "title": "...", "width": 1280, "height": 800 } to the screens array in screens.json (ids are [a-z0-9-], unique; width/height 200\u20138192).',
+    "Keep index.html as a meta-refresh redirect to home.html so `vite build` keeps a valid default entry.",
+    'Link between screens with plain <a href="other.html"> links; never create screens outside the workspace root.',
+    "The chat session does NOT run inside the workspace: use the workspace absolute path in every file write, edit and bash call.",
+    "Inspect and reuse the existing app, design system and .design-studio.json; do not scaffold over existing work."
   ].join(" ");
+  var CANVAS_PROTOCOL = [
+    'Screens are artboards on one shared canvas. The workspace-root screens.json registry maps each screen to its own .html file and its natural size: { "version": 1, "screens": [ { "id", "file", "title", "width", "height" } ] }.',
+    "Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200\u20138192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.",
+    "Positions are not design content: never write x/y into screens.json; the canvas stores them in .design-studio/view.json and the user arranges artboards by hand.",
+    'Variants = side-by-side artboards. "Two directions", "options", "alternatives" mean 2\u20133 complete sibling screens (ids like home-a, home-b), each its own file + entry, each at the same size unless the brief says otherwise. Never stack variants inside one file, never hide alternates behind toggles.',
+    'Responsive = one artboard per real size. Presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1280\xD7800 desktop (default) \xB7 1440\xD7900 large desktop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop). Other sizes are allowed within 200\u20138192.'
+  ].join("\n");
+  var CANVAS_PROTOCOL_CHIP = [
+    'Screens are artboards on one shared canvas. The workspace-root screens.json registry maps each screen to its own .html file and its natural size: { "version": 1, "screens": [ { "id", "file", "title", "width", "height" } ] }.',
+    "Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200\u20138192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.",
+    '"Two directions", "options", "alternatives" mean 2\u20133 complete sibling screens, each its own file + entry \u2014 never stacked in one file, never hidden behind toggles.',
+    'Size presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1280\xD7800 desktop (default) \xB7 1440\xD7900 large desktop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop).'
+  ].join("\n");
   var VERIFY_MANDATE = [
     "Verify at every stage, not only at the end: after each edit, before showing work, and before calling",
     "anything done. Run the cheap deterministic gates first and never claim success without having seen the",
@@ -3574,6 +3549,8 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   ];
 
   // panel/mode.ts
+  var GUEST_ATTACH_TEXT_MAX2 = 16e3;
+  var MODE_CHIP_SCREEN_CAP = 40;
   var DESIGN_TYPES = ["wireframe", "hi-fi", "prototype", "deck", "custom"];
   var TYPE_HINT = {
     wireframe: "structure and navigation only \u2014 no final colour, type or copy",
@@ -3647,19 +3624,25 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     );
     return [...preferred, ...extras].slice(0, max).map((name) => ({ name, value: preset.tokens[name] }));
   }
-  var DEFAULT_MODE = { on: false, type: "hi-fi", direction: "auto", fidelity: "hi-fi", brief: "" };
+  var DEFAULT_MODE = { on: false, type: "hi-fi", direction: "auto", fidelity: "hi-fi", canvMode: "edit", brief: "" };
   function parseDesignArgs(raw) {
     const text = raw.trim();
     const [first = "", ...rest] = text.split(/\s+/);
     const brief = rest.join(" ");
-    if (/^off$/i.test(first)) return { on: false, type: null, brief };
-    if (first === "" || /^on$/i.test(first)) return { on: true, type: null, brief };
+    if (/^off$/i.test(first)) return { on: false, mode: null, type: null, brief };
+    if (/^on$/i.test(first)) return { on: true, mode: null, type: null, brief };
+    if (/^play$/i.test(first)) return { on: true, mode: "play", type: null, brief };
+    if (/^edit$/i.test(first)) return { on: true, mode: "edit", type: null, brief };
+    if (first === "") return { on: true, mode: null, type: null, brief };
     const type = DESIGN_TYPES.find((candidate) => candidate === first.toLowerCase());
-    if (type) return { on: true, type, brief };
-    return { on: true, type: null, brief: text };
+    if (type) return { on: true, mode: null, type, brief };
+    return { on: true, mode: null, type: null, brief: text };
   }
   function modeStorageKey(sessionId) {
     return sessionId ? `mode/${sessionId}` : null;
+  }
+  function workspaceStorageKey(sessionId) {
+    return sessionId ? `ws/${sessionId}` : null;
   }
   function designMarkerKey(sessionId) {
     return sessionId ? `design/${sessionId}` : null;
@@ -3695,21 +3678,21 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function projectReferenceChip(input) {
     const handle = input.projectId?.trim() || fileBaseName(input.dir);
     return {
-      providerId: "design-studio",
+      providerId: "design-canvas",
       id: `project-${handle}`.slice(0, 110),
       title: input.name,
       url: input.url,
-      text: `Project reference: ${input.dir}`
+      text: `Workspace reference: ${input.dir}`
     };
   }
   function fileReferenceChip(input) {
     const base = fileBaseName(input.path);
     return {
-      providerId: "design-studio",
+      providerId: "design-canvas",
       id: `file-${base}`.slice(0, 128),
       title: base,
       url: input.url,
-      text: input.dropped ? `File reference: ${base} (dropped into Design Studio)` : `File reference: ${input.path}`
+      text: input.dropped ? `File reference: ${base} (dropped into Design Canvas)` : `File reference: ${input.path}`
     };
   }
   function popoverStep(current, count, delta) {
@@ -3717,16 +3700,23 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     if (current < 0) return delta > 0 ? 0 : count - 1;
     return (current + delta + count) % count;
   }
-  function seedModeValue(type, brief) {
-    return { on: true, type, brief: brief.slice(0, 2e3) };
+  function seedModeValue(type, brief, canvMode = "edit") {
+    return { on: true, type, brief: brief.slice(0, 2e3), canvMode };
   }
-  function seedSessionData(type, brief) {
-    return { mode: seedModeValue(type, brief) };
+  function seedSessionData(type, brief, workspace = null, canvMode = "edit") {
+    return { mode: seedModeValue(type, brief, canvMode), workspace };
   }
   function directionLabel(value) {
     return value === "auto" ? "Auto (infer from the brief)" : DIRECTIONS[value].name;
   }
-  function designSessionPrompt(spec, config) {
+  function workspacePathRule(dir) {
+    return [
+      `The workspace's absolute path is ${JSON.stringify(dir)} \u2014 it is the ONLY place design files are written.`,
+      `Use that absolute path in EVERY file write, edit and bash call you make, because the chat session does NOT run inside the workspace directory.`,
+      `Never write design files relative to the chat's own directory, and never create another workspace folder.`
+    ].join(" ");
+  }
+  function designSessionPrompt(spec, workspace) {
     const brief = spec.brief.trim();
     const preset = findDesignSystem(spec.designSystemId);
     const lines = [
@@ -3741,50 +3731,191 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       );
     }
     lines.push("");
-    if (config) {
+    if (workspace) {
       lines.push(
-        `Project: ${config.name ?? "(unnamed)"}${config.url ? ` at ${config.url}` : ""}.`,
-        config.url ? "Open it in the Design Studio browser before anything else." : "Open the project in the Design Studio browser before anything else.",
-        "Design system: the project's DESIGN.md / tokens.css are authoritative; keep every screen inside them."
+        `Design Canvas workspace: ${workspace.dir}`,
+        workspacePathRule(workspace.dir),
+        "",
+        DESIGN_WORKSPACE_NOTE,
+        "",
+        CANVAS_PROTOCOL
       );
     } else {
       lines.push(
-        "No .design-studio.json yet \u2014 create the project and its design system as part of this first build:",
-        "1. Scaffold the project for this type: create the files and scripts it needs (for prototype/interactive, a real app with a dev server; for a deck, HTML slides).",
-        '2. Write `.design-studio.json` at the project root: { "version": 1, "name": "...", "type": "...", "url": "<the URL it will be served on>", "command": "<dev command>", "harness": { "direction": "...", "fidelity": "..." } }.',
-        '3. Install dependencies and start it BOUND TO ALL INTERFACES (for Vite: `vite --host`), then report the URL. The in-app headless browser resolves localhost to IPv4, so an IPv6-only server shows "This site can\'t be reached".',
-        "Keep every screen inside DESIGN.md / tokens.css once created."
+        "Design Canvas workspace: created by the Design Canvas service before this prompt (ask if the path is missing).",
+        "",
+        CANVAS_PROTOCOL
       );
     }
     lines.push(
-      "Workflow: the user points at elements in the live browser; each click arrives as a reference chip. Apply what it asks for and keep the system consistent.",
+      "",
+      "Design system authority: DESIGN.md and tokens.css (when present) are the workspace design system \u2014 follow them over any conflicting instinct.",
+      "",
+      defaultCraft()
+    );
+    lines.push(
+      "",
+      "Workflow: in the live canvas the user picks elements; each pick arrives as a reference chip with its screen id. Apply what it asks for and keep the system consistent.",
       "",
       VERIFY_PROTOCOL
     );
     return lines.join("\n");
   }
-  function buildModeChip(sessionId, mode, config) {
+  function workspaceOpenPrompt(workspace) {
+    return [
+      `Design Canvas workspace: ${workspace.dir}`,
+      workspacePathRule(workspace.dir),
+      "",
+      DESIGN_WORKSPACE_NOTE,
+      "",
+      "Open the Design Canvas browser and reuse what is already there; the user will point at elements to change.",
+      "",
+      IDENTITY,
+      "",
+      DESIGN_AUTHORITY,
+      "",
+      VERIFY_PROTOCOL
+    ].join("\n");
+  }
+  function buildModeChip(sessionId, mode, workspace, screens = [], workspaceUrl) {
     const id = `design-mode-${(sessionId || "adhoc").slice(0, 110)}`;
     const lines = [
       "Design Mode: ON",
+      `Canvas mode: ${mode.canvMode}${mode.canvMode === "edit" ? " \u2014 clicking an element sends a pick chip" : " \u2014 clicks and links drive the screens"}`,
       `Artifact type: ${mode.type} \u2014 ${TYPE_HINT[mode.type]}`,
       `Visual direction: ${directionLabel(mode.direction)} \xB7 Fidelity: ${mode.fidelity}`,
-      mode.brief ? `Brief: ${mode.brief}` : "Brief: the user will say or type it next.",
-      config ? `Project: ${config.name ?? "(unnamed)"}${config.url ? ` \xB7 ${config.url}` : ""} \xB7 configured type: ${config.type ?? mode.type}` : "Project: no .design-studio.json yet \u2014 scaffold the project and write one.",
-      "Design system: DESIGN.md and tokens.css are authoritative when present; keep every screen inside them.",
-      "Workflow: the user clicks elements in the live browser; each click arrives as a reference chip. Apply the change they ask for and keep the system consistent.",
-      VERIFY_PROTOCOL
+      mode.brief ? `Brief: ${mode.brief}` : "Brief: the user will say or type it next."
     ];
+    if (workspace) {
+      lines.push(
+        `Workspace: ${workspace.dir}`,
+        workspacePathRule(workspace.dir),
+        "",
+        DESIGN_WORKSPACE_NOTE,
+        "",
+        CANVAS_PROTOCOL_CHIP
+      );
+    } else {
+      lines.push("Workspace: the Design Canvas service creates it on /canvas \u2014 do not write design files anywhere else.");
+    }
+    if (screens.length > 0) {
+      const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);
+      lines.push(`Screens (${screens.length}):`);
+      for (const screen of shown) lines.push(`- ${screen.id} \xB7 ${screen.title || screen.file} \xB7 ${screen.file}`);
+      if (screens.length > MODE_CHIP_SCREEN_CAP) {
+        lines.push(`\u2026 ${screens.length - MODE_CHIP_SCREEN_CAP} more \u2014 every screen is reachable through the canvas; the full registry is screens.json at the workspace root.`);
+      }
+    } else {
+      lines.push("Screens: none yet \u2014 add a screen by writing `<file>.html` and adding `{id, file, title, width, height}` to screens.json at the workspace root.");
+    }
+    lines.push("", IDENTITY, "", DESIGN_AUTHORITY, "", VERIFY_PROTOCOL);
     return {
-      providerId: "design-studio",
+      providerId: "design-canvas",
       id,
       title: `Design Mode \xB7 ${mode.type}`,
-      url: attachUrl(config?.url),
-      text: lines.join("\n").slice(0, 16e3),
+      url: attachUrl(workspaceUrl ?? void 0),
+      text: lines.join("\n").slice(0, GUEST_ATTACH_TEXT_MAX2),
       data: {
-        mode: { on: true, type: mode.type, direction: mode.direction, fidelity: mode.fidelity, brief: mode.brief.slice(0, 2e3) },
-        project: config ? { name: config.name ?? null, type: config.type ?? null, url: config.url ?? null } : null
+        mode: {
+          on: true,
+          type: mode.type,
+          direction: mode.direction,
+          fidelity: mode.fidelity,
+          canvMode: mode.canvMode,
+          brief: mode.brief.slice(0, 2e3)
+        },
+        workspace: workspace ? { dir: workspace.dir, name: workspace.name } : null,
+        screens: screens.slice(0, MODE_CHIP_SCREEN_CAP).map((screen) => ({
+          id: screen.id,
+          file: screen.file,
+          title: screen.title
+        }))
       }
+    };
+  }
+  var EXPORT_SUMMARY_FILE_CAP = 4;
+  var EXPORT_SUMMARY_FAILURE_CAP = 3;
+  function parseCanvasExportArgs(raw) {
+    const tokens = raw.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return {};
+    const formats = [];
+    for (const token of tokens) {
+      const lower = token.toLowerCase();
+      if (lower !== "png" && lower !== "pdf") {
+        return { error: `Unknown export format "${token}" \u2014 use png, pdf, or both.` };
+      }
+      if (!formats.includes(lower)) formats.push(lower);
+    }
+    return { formats };
+  }
+  function exportJobSummary(status) {
+    const pngOk = [];
+    let pdfCount = 0;
+    const failedScreens = [];
+    for (const row of status.results ?? []) {
+      if (row.png) {
+        if (row.png.ok) pngOk.push(row.png.file);
+        else if (!failedScreens.includes(row.screen)) failedScreens.push(row.screen);
+      }
+      if (row.pdf) {
+        if (row.pdf.ok) pdfCount += 1;
+        else if (!failedScreens.includes(row.screen)) failedScreens.push(row.screen);
+      }
+    }
+    const parts = [];
+    const total = (status.results ?? []).length;
+    parts.push(`Export done: ${total} screen${total === 1 ? "" : "s"}`);
+    const kinds = [];
+    if (pngOk.length > 0) kinds.push(`${pngOk.length} PNG`);
+    if (pdfCount > 0) kinds.push(`${pdfCount} PDF`);
+    parts.push(kinds.length > 0 ? kinds.join(" + ") : "0 files");
+    if (failedScreens.length > 0) {
+      const shown = failedScreens.slice(0, EXPORT_SUMMARY_FAILURE_CAP).join(", ");
+      parts.push(`${failedScreens.length} failed (${shown}${failedScreens.length > EXPORT_SUMMARY_FAILURE_CAP ? ", \u2026" : ""})`);
+    }
+    const lines = [parts.join(" \xB7 ")];
+    if (pngOk.length > 0) {
+      const shown = pngOk.slice(0, EXPORT_SUMMARY_FILE_CAP);
+      const more = pngOk.length - shown.length;
+      lines.push(`PNG: ${shown.join(", ")}${more > 0 ? `, \u2026 +${more} more` : ""}`);
+    }
+    return lines;
+  }
+  function exportFailureSummary(status) {
+    const failed = (status.results ?? []).filter((row) => row.png?.ok === false || row.pdf?.ok === false);
+    if (failed.length === 0) return "Export failed.";
+    const shown = failed.slice(0, EXPORT_SUMMARY_FAILURE_CAP).map((row) => {
+      const error = row.png?.ok === false ? row.png.error : row.pdf?.ok === false ? row.pdf.error : void 0;
+      return error ? `${row.screen} (${error})` : row.screen;
+    }).join(", ");
+    return `Export failed: ${failed.length} screen${failed.length === 1 ? "" : "s"} \u2014 ${shown}${failed.length > EXPORT_SUMMARY_FAILURE_CAP ? ", \u2026" : ""}`;
+  }
+  var CRITIQUE_ADVISORY = "The 0\u201310 critique is advisory only; never treat it as pass/fail and never optimise for it.";
+  function critiqueReviewText(digest) {
+    const lines = ["Canvas critique \u2014 deterministic gate digest (advisory):"];
+    for (const screen of digest.screens) {
+      lines.push(`- ${screen.screen} \xB7 ${screen.width}\xD7${screen.height} \xB7 ${screen.state === "ready" ? "ready" : screen.state} \xB7 ${screen.url}`);
+      if (screen.gates && screen.gates.length > 0) {
+        for (const gate of screen.gates) {
+          const findings = (gate.findings ?? []).slice(0, 3).join("; ");
+          lines.push(`    ${gate.id}: ${gate.status}${findings ? ` \u2014 ${findings}` : ""}`);
+        }
+      } else {
+        lines.push("    no gate findings");
+      }
+    }
+    if (digest.truncated) lines.push("\u2026 more screens exist; the digest covers the first 12 (service-bound).");
+    lines.push("", CRITIQUE_ADVISORY);
+    return lines.join("\n");
+  }
+  function critiqueReviewChip(sessionId, workspaceUrl, digest) {
+    const id = `canvas-critique-${(sessionId || "adhoc").slice(0, 110)}`;
+    return {
+      providerId: "design-canvas",
+      id,
+      title: "Canvas critique \u2014 gate digest",
+      url: attachUrl(workspaceUrl ?? void 0),
+      text: critiqueReviewText(digest).slice(0, GUEST_COMPOSE_TEXT_MAX)
     };
   }
 
@@ -3823,21 +3954,26 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   }
 
   // panel/attach-dialog.ts
-  function buildAttachPayload(pick, seq, url, pickedAt) {
+  function buildAttachPayload(pick, seq, url, pickedAt, screen) {
+    const data = {
+      selector: pick.selector,
+      tag: pick.tag,
+      classes: pick.classes,
+      snippet: pick.outerHTML,
+      styles: pick.styles,
+      url
+    };
+    if (screen) {
+      data.screen = screen.id;
+      data.screenUrl = screen.url;
+    }
     return {
-      providerId: "design-studio",
+      providerId: "design-canvas",
       id: `element-${seq}`,
       title: pick.selector,
       url,
-      text: referenceText(pick, url, pickedAt),
-      data: {
-        selector: pick.selector,
-        tag: pick.tag,
-        classes: pick.classes,
-        snippet: pick.outerHTML,
-        styles: pick.styles,
-        url
-      }
+      text: referenceText(pick, url, pickedAt, screen),
+      data
     };
   }
 
@@ -3877,57 +4013,54 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       { title: "Data Tool", description: "A dashboard or console", prompt: "A data tool: a dashboard or console for the team to read at a glance." }
     ]
   };
+  var PERMISSION_TOAST_KEY = "ws-permission-notified";
+  var PERMISSION_HEADS_UP = "The agent edits the Design Canvas workspace, which lives outside the chat folder \u2014 approve its file-edit permission prompts so it can write the design files.";
   var state = {
     surface: "panel",
+    /** The chat's own directory. The CANVAS session deliberately runs OUTSIDE the workspace (decision 4). */
     directory: null,
     sessionId: null,
     mode: { ...DEFAULT_MODE },
     resolveAllowed: false,
+    /** This session's canvas workspace (`ws/<sessionId>`), or null before the first use. */
+    workspace: null,
+    /** The workspace's `.design-studio.json`, read by the service for the workspace dir. */
     config: null,
     configPath: null,
     /**
-     * The directory `config` was read for. `onDirectory` keeps the last config
+     * The workspace dir `config` was read for. `onDirectory` keeps the last config
      * until the fresh read resolves, so a stale cached config is only ever used
-     * when it belongs to the CURRENT directory (`currentConfig()`).
+     * when it belongs to the CURRENT workspace (`currentConfig()`).
      */
     configDir: null,
     url: "about:blank",
     title: "",
     windowOpen: false,
-    /**
-     * True while OUR side is bringing the window up: an open in flight, or the
-     * whole Design Mode ON transition (which awaits the persist and the marker
-     * writes before it opens). The close-detection below flips Design Mode OFF
-     * when `/state` reports `windowOpen:false` while the mode is ON — but not
-     * while we are the ones opening the window, so this gates it. Nothing else
-     * consults it: it never suppresses an explicit user open.
-     */
+    /** True while OUR side is bringing the window up (see openCanvasWindow). */
     pendingOpen: false,
     lastSeq: 0,
+    /** The live canvas controls from `GET /state` (spec §B). */
+    liveMode: "edit",
+    liveScreens: [],
+    activeScreen: null,
     /** The current session's live `SessionSnapshot.busy`, from `host.onSession`. */
     sessionBusy: false,
-    /** Project dirs whose dev server THIS panel started (`/open` reported `started`). */
+    /** Workspace dirs whose dev server THIS panel started (`/open` reported `started`). */
     startedServers: /* @__PURE__ */ new Set(),
     /**
      * A stop waiting for the session to go idle (Design Mode OFF happened while
-     * busy). The queued REQUEST — its directory and manual mode — is preserved,
-     * so honouring it later neither loses the manual flag (an empty ownership
-     * set would then refuse it forever) nor targets the wrong directory.
+     * busy). The queued REQUEST — its directory and manual mode — is preserved.
      */
     pendingStop: null,
-    /**
-     * Current preview-dev-server reachability for the row's Start/Stop control.
-     * `null` = unknown: nothing has been read yet (or a start answer carried no
-     * `up`), and the icon must render as checking — never masquerade as stopped.
-     */
+    /** Current preview-dev-server reachability for the row's Start/Stop control. */
     serverStatus: null,
     /** True while a manual start/stop is in flight. */
     serverPending: false,
     /** Last error from a server start/status action (for screen-reader announcement). */
     serverError: null,
     // ---- full-page creation surface ----
-    /** The registered projects, as the working-directory selector renders them. */
-    projects: null,
+    /** The workspaces list (GET /workspaces joined with the cached ws/ scan). */
+    workspaces: null,
     /** The selected creation type; drives the headline, chip and the idea cards. */
     pageType: "hi-fi",
     pageDirection: "auto",
@@ -3937,25 +4070,13 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     /** An actionable error from a failed scaffold (the session still starts). */
     pageError: "",
     pageBusy: false,
-    /** The chosen registered project; `null` means the current project. */
-    selectedProjectId: null,
     typeMenuOpen: false,
-    dirMenuOpen: false,
     /** The `+` attach overlay: its open state. */
     attachMenuOpen: false,
     /** The design-system picker panel open in the composer. */
     dsMenuOpen: false,
     /** The chosen design-system preset id, or null for "No design system". */
-    pageDesignSystemId: null,
-    // ---- design projects & chats (the lists below the composer) ----
-    /** The design-chats list: sessions across the projects whose Design Mode is ON. */
-    designChats: null,
-    /**
-     * The id of the project whose chats the merged list is filtered to, or null
-     * for the full list. Set by clicking a project row (which also makes it the
-     * working target); cleared by `Show all`. It NEVER starts a session.
-     */
-    projectFilter: null
+    pageDesignSystemId: null
   };
   var hintEl;
   var sessionLineEl = null;
@@ -3964,6 +4085,9 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   var modeToggleBtn = null;
   var barEl = null;
   var serverBtn = null;
+  var playToggleBtn = null;
+  var screenSelectEl = null;
+  var focusLiveBtn = null;
   var serverAnnounceEl = null;
   var promptEl = null;
   var sendEl = null;
@@ -3979,6 +4103,8 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   var referenceLiveEl = null;
   var referenceFocusId = null;
   var DROP_PATH_MESSAGE = "Paste an accessible file path using + \u2192 File path. Dropped filenames do not include their filesystem path.";
+  var wsSessionMap = /* @__PURE__ */ new Map();
+  var allProjects = [];
   function announceReference(message) {
     if (!referenceLiveEl) return;
     referenceLiveEl.textContent = "";
@@ -3992,13 +4118,6 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     referenceSlow = false;
   }
   var configReadInFlight = false;
-  var chatProjects = [];
-  var allProjects = [];
-  var chatSnapshots = /* @__PURE__ */ new Map();
-  var chatOnIds = /* @__PURE__ */ new Set();
-  var chatMarkerIds = /* @__PURE__ */ new Set();
-  var chatModeKeyIds = /* @__PURE__ */ new Set();
-  var chatUnsubscribes = [];
   function q(tag, cls, text) {
     const node = document.createElement(tag);
     if (cls) node.className = cls;
@@ -4039,12 +4158,117 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     } catch {
     }
   }
+  async function readStoredWorkspace(sessionId) {
+    const key = workspaceStorageKey(sessionId);
+    if (!key) return null;
+    try {
+      const value = await host.storage.get(key);
+      if (isWorkspaceRecord(value)) {
+        const name = typeof value.name === "string" && value.name.trim() !== "" ? value.name.trim().slice(0, 80) : value.dir;
+        return { dir: value.dir, name };
+      }
+    } catch {
+    }
+    return null;
+  }
+  async function loadWorkspace() {
+    const record = await readStoredWorkspace(state.sessionId);
+    if (record) {
+      state.workspace = record;
+      state.configDir = null;
+      state.config = null;
+      renderRow();
+      rerender();
+      void loadStudioConfig();
+    }
+  }
+  async function saveWorkspaceRecord(sessionId, record) {
+    const key = workspaceStorageKey(sessionId);
+    if (!key) return;
+    try {
+      await host.storage.set(key, record);
+    } catch {
+    }
+  }
+  function workspaceDisplayName(brief, slug) {
+    const words = brief.trim().replace(/\s+/g, " ").slice(0, 60);
+    if (words) return words;
+    return slug.replace(/-+/g, " ").replace(/^\w/, (c) => c.toUpperCase()) || "Canvas";
+  }
+  async function maybeShowPermissionToast(dir) {
+    if (state.directory && sameDirPath(dir, state.directory)) return;
+    try {
+      const seen = await host.storage.get(PERMISSION_TOAST_KEY);
+      if (seen === true) return;
+      await host.storage.set(PERMISSION_TOAST_KEY, true);
+    } catch {
+      return;
+    }
+    await host.toast({ kind: "info", message: PERMISSION_HEADS_UP });
+  }
+  async function scaffoldCanvasWorkspace(brief, seed, designSystemId) {
+    let result;
+    try {
+      result = await getWorkspaces();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await host.toast({ kind: "error", message: `Could not list canvas workspaces: ${message}` });
+      return { ok: false, error: `Could not list canvas workspaces: ${message}` };
+    }
+    const slug = uniqueCanvasSlug(brief || "canvas", seed, result.workspaces.map((row) => row.dir));
+    const dir = joinWorkspaceDir(result.root, slug);
+    const name = workspaceDisplayName(brief, slug);
+    let scaffold;
+    try {
+      scaffold = await scaffoldProject(dir, {
+        type: state.mode.type,
+        direction: state.mode.direction,
+        fidelity: state.mode.fidelity,
+        brief: brief || void 0,
+        // Omitted for "No design system" so the request stays as before.
+        designSystemId: designSystemId ?? void 0
+      });
+    } catch (error) {
+      scaffold = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (!scaffold.ok) {
+      await host.toast({ kind: "error", message: scaffold.error });
+      return { ok: false, error: scaffold.error };
+    }
+    await host.toast({ kind: "success", message: `Canvas workspace created at ${dir} \u2014 served at ${scaffold.url}` });
+    await maybeShowPermissionToast(dir);
+    return { ok: true, record: { dir, name }, url: scaffold.url };
+  }
+  async function ensureCanvasWorkspace(brief, forSessionId = null) {
+    const sessionId = forSessionId ?? state.sessionId;
+    if (state.workspace && state.workspace.dir.trim() !== "") return state.workspace;
+    const stored = await readStoredWorkspace(sessionId);
+    if (stored) {
+      if (!state.workspace) {
+        state.workspace = stored;
+        renderRow();
+        rerender();
+      }
+      return stored;
+    }
+    if (!sessionId) {
+      return null;
+    }
+    const outcome = await scaffoldCanvasWorkspace(brief, sessionId, state.pageDesignSystemId);
+    if (!outcome.ok) return null;
+    await saveWorkspaceRecord(sessionId, outcome.record);
+    state.workspace = outcome.record;
+    renderRow();
+    rerender();
+    return outcome.record;
+  }
   function modeStoragePayload() {
     return {
       on: state.mode.on,
       type: state.mode.type,
       direction: state.mode.direction,
       fidelity: state.mode.fidelity,
+      canvMode: state.mode.canvMode,
       brief: state.mode.brief.slice(0, 2e3)
     };
   }
@@ -4074,6 +4298,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
         if (DESIGN_TYPES.includes(stored.type)) state.mode.type = stored.type;
         if (stored.direction !== void 0 && (stored.direction === "auto" || stored.direction in DIRECTIONS)) state.mode.direction = stored.direction;
         if (FIDELITIES.includes(stored.fidelity)) state.mode.fidelity = stored.fidelity;
+        if (stored.canvMode === "play" || stored.canvMode === "edit") state.mode.canvMode = stored.canvMode;
         state.mode.brief = typeof stored.brief === "string" ? stored.brief : "";
       }
     } catch {
@@ -4093,6 +4318,8 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       if (next && !wasOn) await writeDesignMarker();
       renderModeUi();
       if (next) {
+        const ws = await ensureCanvasWorkspace("");
+        if (!ws) return;
         if (state.windowOpen) {
           try {
             await focusLive();
@@ -4100,7 +4327,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
             setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, "error");
           }
         } else {
-          await openCurrentProjectWindow(false);
+          await openCanvasWindow(false);
         }
       } else {
         try {
@@ -4116,50 +4343,143 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       if (hold && hold === pendingOpenHoldSeq) state.pendingOpen = false;
     }
   }
-  async function resolveDesignCommand(args) {
+  function currentScreens() {
+    return state.liveScreens.map((screen) => ({
+      id: screen.id,
+      title: screen.title,
+      file: screen.url.replace(/[?#].*$/, "").split("/").pop() || `${screen.id}.html`
+    }));
+  }
+  async function resolveCanvasCommand(args) {
     if (!state.resolveAllowed) return null;
+    const [head = "", ...rest] = args.trim().split(/\s+/);
+    if (/^export$/i.test(head)) {
+      await canvasExportCommand(rest.join(" "));
+      return null;
+    }
+    if (/^critique$/i.test(head)) {
+      return await canvasCritiqueCommand();
+    }
     const parsed = parseDesignArgs(args);
     if (!parsed.on) {
       await toggleMode(false);
       await host.toast({ kind: "info", message: "Design Mode is off." });
       return null;
     }
+    if (parsed.mode) {
+      try {
+        const result = await setMode(parsed.mode);
+        if (result.ok === false && result.error) setStatus(result.error, "error");
+        else state.liveMode = parsed.mode;
+      } catch (error) {
+        setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+      state.mode.canvMode = parsed.mode;
+      await saveMode();
+    }
     if (parsed.brief.trim() !== "") {
-      if (pageTarget().kind === "needs-project") {
-        state.pageError = NEEDS_PROJECT_MESSAGE;
-        rerender();
-        await host.toast({ kind: "error", message: NEEDS_PROJECT_MESSAGE });
-        return null;
-      }
-      if (state.directory && !projectReady(state.config)) {
-        const spec = {
-          type: parsed.type ?? state.mode.type,
-          direction: state.mode.direction,
-          fidelity: state.mode.fidelity,
-          brief: parsed.brief,
-          designSystemId: state.pageDesignSystemId
-        };
-        if (await scaffoldCurrentProject(spec)) return null;
-      }
+      const ws = await ensureCanvasWorkspace(parsed.brief);
+      if (!ws) return null;
+      if (parsed.type) state.mode.type = parsed.type;
+      await toggleMode(true, parsed.type, parsed.brief);
+      return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), state.config?.url);
     }
     await toggleMode(true, parsed.type, parsed.brief || void 0);
-    return buildModeChip(state.sessionId, state.mode, state.config);
+    return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), state.config?.url);
+  }
+  var EXPORT_POLL_MS = 700;
+  var EXPORT_POLL_MAX_MS = 6e4;
+  var EXPORT_STILL_RUNNING_MESSAGE = "Export is still running \u2014 files land in the workspace exports folder as each screen finishes.";
+  var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  async function runCanvasExport(dir, formats, timing = { pollMs: EXPORT_POLL_MS, maxMs: EXPORT_POLL_MAX_MS }) {
+    let start;
+    try {
+      start = await exportJob(dir, formats);
+    } catch (error) {
+      await host.toast({ kind: "error", message: `Export failed: ${error instanceof Error ? error.message : String(error)}` });
+      return;
+    }
+    if (!start.ok) {
+      await host.toast({ kind: "error", message: start.error || "Export failed." });
+      return;
+    }
+    const job = start.jobId;
+    const deadline = Date.now() + timing.maxMs;
+    for (; ; ) {
+      let status;
+      try {
+        status = await exportStatus(dir, job);
+      } catch (error) {
+        await host.toast({ kind: "error", message: `Could not read the export status: ${error instanceof Error ? error.message : String(error)}` });
+        return;
+      }
+      if (status.state === "done") {
+        const lines = exportJobSummary(status);
+        const text = lines.join("\n");
+        await host.toast({ kind: "success", message: text.length > 480 ? `${text.slice(0, 480)}\u2026` : text });
+        return;
+      }
+      if (status.state === "failed") {
+        const text = exportFailureSummary(status);
+        await host.toast({ kind: "error", message: text.length > 480 ? `${text.slice(0, 480)}\u2026` : text });
+        return;
+      }
+      if (Date.now() >= deadline) {
+        await host.toast({ kind: "info", message: EXPORT_STILL_RUNNING_MESSAGE });
+        return;
+      }
+      await sleep(timing.pollMs);
+    }
+  }
+  async function canvasExportCommand(raw) {
+    const parsed = parseCanvasExportArgs(raw);
+    if ("error" in parsed) {
+      await host.toast({ kind: "error", message: parsed.error });
+      return;
+    }
+    const ws = state.workspace;
+    if (!ws || ws.dir.trim() === "") {
+      await host.toast({ kind: "error", message: "No canvas workspace yet \u2014 /canvas <brief> creates one, then export again." });
+      return;
+    }
+    await runCanvasExport(ws.dir, "formats" in parsed ? parsed.formats : void 0);
+  }
+  async function canvasCritiqueCommand() {
+    const ws = state.workspace;
+    if (!ws || ws.dir.trim() === "") {
+      await host.toast({ kind: "error", message: "No canvas workspace yet \u2014 /canvas <brief> creates one, then critique again." });
+      return null;
+    }
+    let digest;
+    try {
+      digest = await critiqueWorkspace(ws.dir);
+    } catch (error) {
+      await host.toast({ kind: "error", message: `Critique failed: ${error instanceof Error ? error.message : String(error)}` });
+      return null;
+    }
+    if (!digest.ok) {
+      await host.toast({ kind: "error", message: digest.error || "Critique failed." });
+      return null;
+    }
+    return critiqueReviewChip(state.sessionId, state.config?.url, digest);
   }
   async function startDesignSession(spec) {
     state.pageBusy = true;
     rerender();
     try {
-      const data = seedSessionData(spec.type, spec.brief);
+      const data = seedSessionData(spec.type, spec.brief, spec.workspace ?? null);
       const submission = spec.references !== void 0 ? buildReferenceSubmission(spec.text, data, spec.references) : { text: spec.text, data };
       const result = await host.startSession({
-        providerId: "design-studio",
+        providerId: "design-canvas",
         id: spec.id,
         title: spec.title,
         url: attachUrl(spec.url),
         text: submission.text,
-        projectId: spec.projectId,
         navigation: "preserve",
-        data: submission.data
+        data: submission.data,
+        // Decision 4c only: when a registered project CONTAINS the workspace dir,
+        // the session may land in it. Omitted everywhere else (decision 2).
+        ...spec.projectId ? { projectId: spec.projectId } : {}
       });
       if (!result.sessionId || result.sent !== "sent") {
         const failure = "failure" in result ? result.failure : void 0;
@@ -4178,10 +4498,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       try {
         await host.storage.set(modeStorageKey(result.sessionId), seedModeValue(spec.type, spec.brief));
         await host.storage.set(designMarkerKey(result.sessionId), designMarkerValue());
-      } catch {
-      }
-      try {
-        await ensureHarness(spec.dir);
+        if (spec.workspace) await saveWorkspaceRecord(result.sessionId, spec.workspace);
       } catch {
       }
       try {
@@ -4205,84 +4522,25 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       rerender();
     }
   }
-  function pageTarget() {
-    return resolveDesignTarget({
-      directory: state.directory,
-      selectedProjectId: state.selectedProjectId,
-      projects: allProjects,
-      rows: state.projects?.kind === "list" ? state.projects.rows : []
-    });
-  }
-  async function prepareProject(spec, target) {
-    if (projectReady(target.config)) {
-      return { config: target.config, url: target.config?.url ?? "", scaffolded: false, failed: false, error: "" };
-    }
-    let result;
-    try {
-      result = await scaffoldProject(target.dir, {
-        type: spec.type,
-        direction: spec.direction,
-        fidelity: spec.fidelity,
-        brief: spec.brief,
-        // Omitted for "No design system" so the request stays as before.
-        designSystemId: spec.designSystemId ?? void 0
-      });
-    } catch (error) {
-      result = { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-    if (!result.ok) {
-      await host.toast({ kind: "error", message: result.error });
-      return { config: target.config, url: target.config?.url ?? "", scaffolded: false, failed: true, error: result.error };
-    }
-    await host.toast({ kind: "success", message: `Project scaffolded at ${result.url}` });
-    let config = target.config;
-    try {
-      config = (await getConfig(target.dir)).config;
-      if (target.dir === state.directory) {
-        state.config = config;
-        state.configDir = target.dir;
-      }
-    } catch {
-    }
-    return { config, url: result.url || config?.url || "", scaffolded: true, failed: false, error: "" };
-  }
-  async function pageTargetFresh() {
-    const first = pageTarget();
-    const pickedUnknown = state.selectedProjectId !== null && (first.kind === "needs-project" || first.kind === "project" && first.projectId !== state.selectedProjectId);
-    if (!state.projects || state.projects.kind === "loading" || first.kind === "needs-project" || pickedUnknown) {
-      await loadProjects();
-      return pageTarget();
-    }
-    return first;
-  }
   async function scaffoldCurrentProject(spec) {
-    const target = await pageTargetFresh();
-    if (target.kind === "needs-project") {
-      state.pageError = NEEDS_PROJECT_MESSAGE;
-      rerender();
-      await host.toast({ kind: "error", message: NEEDS_PROJECT_MESSAGE });
-      return false;
+    if (state.workspace && state.workspace.dir.trim() !== "") {
+      let url = state.config?.url ?? "";
+      try {
+        const read = await getConfig(state.workspace.dir);
+        url = read.config?.url ?? url;
+        if (state.workspace.dir === state.configDir) state.config = read.config;
+      } catch {
+      }
+      const target = resolveCanvasTarget({ workspace: state.workspace, brief: "", projects: allProjects });
+      const projectId = target.kind === "workspace" ? target.projectId : void 0;
+      return { kind: "workspace", workspace: state.workspace, url, projectId };
     }
-    state.pageError = "";
-    state.pageBusy = true;
-    rerender();
-    const prep = await prepareProject(spec, target);
-    state.pageBusy = false;
-    if (prep.failed) {
-      state.pageError = prep.error;
-      rerender();
-      return false;
+    const outcome = await scaffoldCanvasWorkspace(spec.brief, `new-design:${Date.now()}`, spec.designSystemId ?? null);
+    if (!outcome.ok) {
+      await host.toast({ kind: "error", message: outcome.error });
+      return { kind: "failed", error: outcome.error };
     }
-    return startDesignSession({
-      id: `new-design:${Date.now()}`,
-      title: `New design \xB7 ${spec.type}`,
-      url: prep.url,
-      type: spec.type,
-      brief: spec.brief,
-      projectId: target.projectId,
-      dir: target.dir,
-      text: designSessionPrompt(spec, prep.config)
-    });
+    return { kind: "new", workspace: outcome.record, url: outcome.url };
   }
   async function startNewDesign() {
     if (state.pageBusy || referencePending) return;
@@ -4298,17 +4556,27 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     const references = state.surface === "page" ? [...state.references] : void 0;
     rerender();
     try {
-      const target = await pageTargetFresh();
-      if (target.kind === "needs-project") {
-        state.pageError = NEEDS_PROJECT_MESSAGE;
+      if (spec.brief.length > GUEST_COMPOSE_TEXT_MAX) {
+        state.pageError = `The design brief is too long (${spec.brief.length} of ${GUEST_COMPOSE_TEXT_MAX} characters). Shorten it, then send again.`;
         rerender();
-        await host.toast({ kind: "error", message: NEEDS_PROJECT_MESSAGE });
+        await host.toast({ kind: "error", message: state.pageError });
         return;
       }
-      const prep = await prepareProject(spec, target);
-      if (prep.failed) {
+      const prep = await scaffoldCurrentProject(spec);
+      if (prep.kind === "failed") {
         state.pageError = prep.error;
         rerender();
+        await startDesignSession({
+          id: `new-design:${Date.now()}`,
+          title: `New design \xB7 ${spec.type}`,
+          url: "",
+          type: spec.type,
+          brief: spec.brief,
+          dir: state.workspace?.dir ?? "",
+          text: designSessionPrompt(spec, state.workspace),
+          references
+        });
+        return;
       }
       await startDesignSession({
         id: `new-design:${Date.now()}`,
@@ -4316,9 +4584,10 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
         url: prep.url,
         type: spec.type,
         brief: spec.brief,
-        projectId: target.projectId,
-        dir: target.dir,
-        text: designSessionPrompt(spec, prep.config),
+        projectId: prep.kind === "workspace" ? prep.projectId : void 0,
+        dir: prep.workspace.dir,
+        workspace: prep.workspace,
+        text: designSessionPrompt(spec, prep.workspace),
         references
       });
     } catch (error) {
@@ -4331,7 +4600,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   }
   async function addToChat(pick) {
     try {
-      await host.attach(buildAttachPayload(pick, pick.seq, pick.url, pick.pickedAt));
+      await host.attach(buildAttachPayload(pick, pick.seq, pick.url, pick.pickedAt, pick.screen));
       await host.toast({ kind: "success", message: "Reference added to the chat composer." });
     } catch (error) {
       await host.toast({ kind: "error", message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
@@ -4340,74 +4609,65 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function openStatus(message, kind = "info") {
     setStatus(message, kind);
   }
-  async function openProjectWindow(config, dir, notify) {
-    const decision = decideProjectOpen(config, dir);
-    if (decision.kind === "message") {
-      if (notify) await host.toast({ kind: "error", message: decision.message });
-      return;
-    }
+  async function openCanvasWindow(notify) {
+    const ws = state.workspace;
+    if (!ws) return;
     state.pendingOpen = true;
-    openStatus(OPENING_STATUS);
     try {
-      const result = await openLive(decision.url, decision.dir);
-      if (result.ok) await saveLastUrl(state.directory, decision.url);
-      if (result.ok && result.started && decision.dir) markServerStartedByUs(decision.dir);
-      if (result.ok && dir) {
-        void ensureHarness(dir).catch(() => {
-        });
-      }
-      openStatus(formatOpenStatus(result), result.ok ? "info" : "error");
-    } catch (error) {
-      openStatus(`Could not open ${decision.url}: ${error instanceof Error ? error.message : String(error)}`, "error");
-    } finally {
-      state.pendingOpen = false;
-    }
-  }
-  async function resolveOpenUrl() {
-    const dir = state.directory;
-    if (dir) {
       try {
-        const read = await getConfig(dir);
-        if (state.directory === dir) {
+        const read = await getConfig(ws.dir);
+        if (state.workspace?.dir === ws.dir) {
           state.config = read.config;
           state.configPath = read.path;
-          state.configDir = dir;
+          state.configDir = ws.dir;
         }
-        const url = read.config?.url?.trim();
-        if (url) return { url, dir };
       } catch {
       }
-    }
-    const cached = currentConfig()?.url?.trim();
-    if (cached) return { url: cached, dir };
-    const last = await loadLastUrl(dir);
-    if (last) return { url: last, dir };
-    return null;
-  }
-  async function openCurrentProjectWindow(notify) {
-    state.pendingOpen = true;
-    try {
-      const resolved = await resolveOpenUrl();
-      if (!resolved) {
+      const url = state.config?.url?.trim() ?? await loadLastUrl(ws.dir) ?? void 0;
+      if (!url) {
         if (notify) await host.toast({ kind: "error", message: NO_PROJECT_URL_MESSAGE });
         return;
       }
-      await openProjectWindow({ url: resolved.url }, resolved.dir, notify);
+      openStatus(OPENING_STATUS);
+      const result = await openWorkspace({ dir: ws.dir });
+      if (result.ok) await saveLastUrl(ws.dir, result.url || url);
+      if (result.ok && result.started) markServerStartedByUs(ws.dir);
+      openStatus(formatOpenStatus(result), result.ok ? "info" : "error");
+    } catch (error) {
+      openStatus(`Could not open the canvas: ${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
       state.pendingOpen = false;
+    }
+  }
+  async function previewWorkspace(row) {
+    if (!row.url?.trim()) {
+      await host.toast({ kind: "error", message: NO_PROJECT_URL_MESSAGE });
+      return;
+    }
+    try {
+      const result = await openWorkspace({ dir: row.dir });
+      if (!result.ok) {
+        await host.toast({ kind: "error", message: result.error ?? "Could not open the canvas" });
+        return;
+      }
+      await host.toast({ kind: "success", message: `Opened ${row.name} \u2014 its canvas window is live.` });
+    } catch (error) {
+      await host.toast({ kind: "error", message: `Could not open the canvas: ${error instanceof Error ? error.message : String(error)}` });
     }
   }
   var directoryGeneration = 0;
   var serverActionSeq = 0;
+  function actionDir() {
+    return state.workspace?.dir ?? state.directory;
+  }
   function directoryMovedSince(dir, gen) {
-    return state.directory !== dir || directoryGeneration !== gen;
+    return actionDir() !== dir || directoryGeneration !== gen;
   }
   function markServerStartedByUs(dir) {
     if (dir) state.startedServers.add(dir);
   }
   async function resolveProjectId(dir) {
-    const rows = state.projects?.kind === "list" ? state.projects.rows : [];
-    const cached = rows.find((row) => row.directory === dir);
+    const cached = allProjects.find((row) => sameDirPath(row.directory, dir));
     if (cached) return { kind: "id", id: cached.id };
     let snapshot;
     try {
@@ -4416,7 +4676,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       return { kind: "unknown" };
     }
     if (snapshot.state !== "ready") return { kind: "unknown" };
-    const project = snapshot.projects.find((candidate) => candidate.directory === dir);
+    const project = snapshot.projects.find((candidate) => sameDirPath(candidate.directory, dir));
     return project ? { kind: "id", id: project.id } : { kind: "unregistered" };
   }
   async function countActiveDesignSessions(dir) {
@@ -4443,7 +4703,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return { stopped: false, error: result.error };
   }
   async function requestDevServerStop(options = {}) {
-    const dir = options.dir ?? state.directory;
+    const dir = options.dir ?? actionDir();
     if (!dir) return { stopped: false, held: false, blocked: false };
     const manual = options.manual ?? false;
     const gen = directoryGeneration;
@@ -4481,14 +4741,14 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     try {
       const status = await getServerStatus(dir);
       if (status.error) return status.error;
-      return status.pid ? "No preview dev server to stop." : "The service did not record this server; it was not started by Design Studio.";
+      return status.pid ? "No preview dev server to stop." : "The service did not record this server; it was not started by Design Canvas.";
     } catch {
       return "No preview dev server to stop.";
     }
   }
   function reportHonouredStop(result, dir) {
     if (result.stopped) {
-      if (state.directory === dir) {
+      if (state.workspace?.dir === dir) {
         state.serverStatus = false;
         state.serverError = null;
         renderServerControl();
@@ -4501,6 +4761,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     }
   }
   async function applySessionSnapshot(session) {
+    const changed = state.sessionId !== (session?.id ?? null);
     state.sessionId = session?.id ?? null;
     state.sessionBusy = session?.busy ?? false;
     if (state.sessionBusy) {
@@ -4513,6 +4774,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
       reportHonouredStop(result, request.dir);
     }
+    if (changed) await loadWorkspace();
     await loadMode();
   }
   async function handleSessionLifecycle(event) {
@@ -4555,11 +4817,14 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     else if (after === "stopped" && before !== "checking") announceServer("Preview dev server stopped.");
     else if (after === "error") announceServer("Preview dev server status unavailable \u2014 click to retry.");
   }
+  function workspaceDir() {
+    return state.workspace?.dir ?? null;
+  }
   async function refreshServerStatus() {
-    if (state.serverPending || !state.directory) return;
-    const dir = state.directory;
+    const dir = actionDir();
+    if (state.serverPending || !dir) return;
     const token = ++serverStatusRead;
-    const superseded = () => token !== serverStatusRead || state.serverPending || state.directory !== dir;
+    const superseded = () => token !== serverStatusRead || state.serverPending || actionDir() !== dir;
     try {
       const status = await getServerStatus(dir);
       if (superseded()) return;
@@ -4581,8 +4846,20 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   }
   function renderServerControl() {
     if (!barEl || !serverBtn) return;
-    const url = state.config?.url?.trim();
-    const ready = projectReady(state.config) && url !== void 0 && isLoopbackUrl(url);
+    const ws = state.workspace;
+    if (!ws) {
+      serverBtn.hidden = false;
+      serverBtn.disabled = state.serverPending;
+      serverBtn.classList.remove("is-stopped", "is-running", "is-loading", "is-error");
+      serverBtn.classList.add(state.serverPending ? "is-loading" : "is-stopped");
+      serverBtn.title = state.serverPending ? "Working\u2026" : "Create canvas \u2014 start a Design Canvas workspace";
+      serverBtn.setAttribute("aria-label", serverBtn.title);
+      const icon3 = q("span", "ds-server-icon");
+      serverBtn.replaceChildren(icon3);
+      return;
+    }
+    const url = currentConfig()?.url?.trim();
+    const ready = projectReady(currentConfig()) && url !== void 0 && isLoopbackUrl(url);
     if (!ready) {
       const hadFocus = focusInside(serverBtn);
       serverBtn.hidden = true;
@@ -4611,10 +4888,19 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     serverBtn.replaceChildren(icon2);
   }
   function currentConfig() {
-    return state.configDir === state.directory ? state.config : null;
+    return state.configDir === state.workspace?.dir ? state.config : null;
   }
   async function onServerControlClick() {
-    if (state.serverPending || !state.directory) return;
+    if (state.serverPending) return;
+    if (!state.workspace) {
+      const ws = await ensureCanvasWorkspace("");
+      if (!ws) {
+        announceServer("Could not create the canvas workspace.");
+        return;
+      }
+      await toggleMode(true);
+      return;
+    }
     const url = currentConfig()?.url?.trim();
     if (!url || !isLoopbackUrl(url)) return;
     if (state.serverStatus && !state.serverError) {
@@ -4624,7 +4910,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     }
   }
   async function startCurrentServer() {
-    const dir = state.directory;
+    const dir = actionDir();
     if (!dir) return;
     const url = currentConfig()?.url?.trim();
     if (!url || !isLoopbackUrl(url)) return;
@@ -4657,7 +4943,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     }
   }
   async function stopCurrentServer() {
-    const dir = state.directory;
+    const dir = actionDir();
     if (!dir) return;
     const gen = directoryGeneration;
     const action = ++serverActionSeq;
@@ -4694,13 +4980,13 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     }
   }
   async function readStudioConfig(reportErrors) {
-    const dir = state.directory;
+    const dir = workspaceDir();
     if (!dir) return;
     if (configReadInFlight) return;
     configReadInFlight = true;
     try {
       const { config, path } = await getConfig(dir);
-      if (state.directory !== dir) return;
+      if (workspaceDir() !== dir) return;
       state.config = config;
       state.configPath = path;
       state.configDir = dir;
@@ -4720,57 +5006,54 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     if (state.surface === "page") renderPage();
   }
   async function loadProjects() {
-    state.projects = { kind: "loading" };
-    rerender();
     let snapshot;
     try {
       snapshot = await host.listProjects();
-    } catch (error) {
+    } catch {
       allProjects = [];
-      state.projects = { kind: "error", message: error instanceof Error ? error.message : String(error) };
-      rerender();
       return;
     }
     allProjects = allProjectsFromSnapshot(snapshot);
-    const configs = {};
-    if (snapshot.state === "ready") {
-      await Promise.all(
-        snapshot.projects.map(async (project) => {
-          try {
-            const read = await getConfig(project.directory);
-            configs[project.directory] = { config: read.config, error: null };
-          } catch (error) {
-            configs[project.directory] = { config: null, error: error instanceof Error ? error.message : String(error) };
-          }
-        })
-      );
-    }
-    state.projects = projectRows(snapshot, configs);
-    rerender();
   }
-  async function loadDesignHome() {
-    await loadProjects();
-    await loadDesignChats();
-  }
-  async function readDesignModeSessionIds() {
-    const on = /* @__PURE__ */ new Set();
+  async function readWorkspaceSessionMap() {
+    const map = /* @__PURE__ */ new Map();
     let keys;
     try {
       keys = await host.storage.keys();
     } catch {
-      return on;
+      return map;
     }
-    const candidates = keys.map(modeSessionIdFromKey).filter((id) => id !== null);
+    const sessionIds = keys.map(wsSessionIdFromKey).filter((id) => id !== null);
     await Promise.all(
-      candidates.map(async (id) => {
+      sessionIds.map(async (id) => {
         try {
-          const value = await host.storage.get(modeStorageKey(id));
-          if (value && typeof value === "object" && value.on === true) on.add(id);
+          const value = await host.storage.get(workspaceStorageKey(id));
+          if (isWorkspaceRecord(value)) map.set(normalizeDirPath(value.dir), id);
         } catch {
         }
       })
     );
-    return on;
+    return map;
+  }
+  async function loadCanvasWorkspaces() {
+    state.workspaces = { kind: "loading" };
+    rerender();
+    wsSessionMap = await readWorkspaceSessionMap();
+    let result;
+    try {
+      result = await getWorkspaces();
+    } catch (error) {
+      state.workspaces = { kind: "error", message: error instanceof Error ? error.message : String(error) };
+      rerender();
+      return;
+    }
+    const rows = Array.isArray(result.workspaces) ? result.workspaces : [];
+    state.workspaces = rows.length === 0 ? { kind: "empty" } : { kind: "list", rows: joinWorkspaceSessions(rows, wsSessionMap) };
+    rerender();
+  }
+  async function loadDesignHome() {
+    await loadProjects();
+    await loadCanvasWorkspaces();
   }
   async function readDesignMarkerSessionIds() {
     const marked = /* @__PURE__ */ new Set();
@@ -4785,102 +5068,6 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       if (id !== null) marked.add(id);
     }
     return marked;
-  }
-  async function readDesignModeKeySessionIds() {
-    const used = /* @__PURE__ */ new Set();
-    let keys;
-    try {
-      keys = await host.storage.keys();
-    } catch {
-      return used;
-    }
-    for (const key of keys) {
-      const id = modeSessionIdFromKey(key);
-      if (id !== null) used.add(id);
-    }
-    return used;
-  }
-  async function loadDesignChats() {
-    const view = state.projects;
-    if (!view || view.kind === "loading") {
-      state.designChats = { kind: "loading" };
-      rerender();
-      return;
-    }
-    if (view.kind === "error") {
-      state.designChats = { kind: "error", message: view.message };
-      rerender();
-      return;
-    }
-    chatProjects = allProjects;
-    chatOnIds = await readDesignModeSessionIds();
-    chatMarkerIds = await readDesignMarkerSessionIds();
-    chatModeKeyIds = await readDesignModeKeySessionIds();
-    chatSnapshots = /* @__PURE__ */ new Map();
-    await Promise.all(
-      chatProjects.map(async (project) => {
-        try {
-          chatSnapshots.set(project.id, await host.listSessions(project.id));
-        } catch {
-          chatSnapshots.set(project.id, { kind: "sessions", projectId: project.id, state: "error", coverage: [], sessions: [] });
-        }
-      })
-    );
-    await recomputeDesignChats();
-    await subscribeDesignChats();
-  }
-  async function recomputeDesignChats() {
-    const listings = chatProjects.map((project) => ({
-      projectId: project.id,
-      projectName: project.name,
-      snapshot: chatSnapshots.get(project.id) ?? { kind: "sessions", projectId: project.id, state: "loading", coverage: [], sessions: [] }
-    }));
-    const view = designChatRows(listings, chatOnIds, chatMarkerIds, chatModeKeyIds);
-    state.designChats = view;
-    rerender();
-    if (view.kind !== "list") return;
-    const enriched = await withChatConfigs(view.rows);
-    if (state.designChats === view) {
-      state.designChats = { kind: "list", rows: enriched };
-      rerender();
-    }
-  }
-  async function withChatConfigs(rows) {
-    return Promise.all(
-      rows.map(async (row) => {
-        if (!row.directory) return row;
-        try {
-          const read = await getConfig(row.directory);
-          return { ...row, config: read.config, configError: null };
-        } catch (error) {
-          return { ...row, config: row.config ?? null, configError: error instanceof Error ? error.message : String(error) };
-        }
-      })
-    );
-  }
-  function clearChatSubscriptions() {
-    for (const off of chatUnsubscribes) {
-      try {
-        off();
-      } catch {
-      }
-    }
-    chatUnsubscribes = [];
-  }
-  async function subscribeDesignChats() {
-    clearChatSubscriptions();
-    await Promise.all(
-      chatProjects.map(async (project) => {
-        try {
-          const off = await host.onSessions(project.id, (snapshot) => {
-            chatSnapshots.set(project.id, snapshot);
-            void recomputeDesignChats();
-          });
-          chatUnsubscribes.push(off);
-        } catch {
-        }
-      })
-    );
   }
   var SVG_NS = "http://www.w3.org/2000/svg";
   function svgIcon(paths, size = 18) {
@@ -4957,7 +5144,6 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   }
   function currentOverlay() {
     if (state.typeMenuOpen) return "type";
-    if (state.dirMenuOpen) return "dir";
     if (state.attachMenuOpen) return "attach";
     if (state.dsMenuOpen) return "ds";
     return null;
@@ -4967,7 +5153,6 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     if (currentOverlay() === "attach") cancelReferenceValidation();
     const next = nextOverlayState(currentOverlay(), which);
     state.typeMenuOpen = next === "type";
-    state.dirMenuOpen = next === "dir";
     state.attachMenuOpen = next === "attach";
     state.dsMenuOpen = next === "ds";
     if (next === "ds") {
@@ -4982,7 +5167,6 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     if (!open) return;
     if (open === "attach") cancelReferenceValidation();
     state.typeMenuOpen = false;
-    state.dirMenuOpen = false;
     state.attachMenuOpen = false;
     state.dsMenuOpen = false;
     refocusOverlayTrigger = refocus ? open : null;
@@ -4991,7 +5175,6 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function closeActiveOverlay(id) {
     if (id === "attach") cancelReferenceValidation();
     state.typeMenuOpen = false;
-    state.dirMenuOpen = false;
     state.attachMenuOpen = false;
     state.dsMenuOpen = false;
     refocusOverlayTrigger = id;
@@ -5008,16 +5191,6 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     event.preventDefault();
     closeMenus(true);
   }
-  function currentDirLabel() {
-    const view = state.projects;
-    if (!view || view.kind === "loading") return "Loading\u2026";
-    const target = pageTarget();
-    if (target.kind === "project") {
-      const project = allProjects.find((candidate) => candidate.id === target.projectId);
-      return project?.name ?? fileBaseName(target.dir);
-    }
-    return state.directory ? "Not a registered project" : "No project open";
-  }
   function renderPage() {
     if (!pageBody || state.surface !== "page") return;
     pageBody.replaceChildren();
@@ -5029,7 +5202,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       shell.classList.add("ds-enter");
       pageEnter = false;
     }
-    shell.append(renderHero(), renderComposer(), renderDirRow(), renderIdeas(), renderDesignSection(), renderFooter());
+    shell.append(renderHero(), renderComposer(), renderWorkspaceRow(), renderIdeas(), renderCanvasSection(), renderFooter());
     pageBody.append(shell);
     updateComposerState();
     focusPendingTrigger();
@@ -5110,8 +5283,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     plus.append(svgIcon('<path d="M12 5v14"/><path d="M5 12h14"/>'));
     plus.title = "Add a reference";
     plus.setAttribute("aria-label", "Add a reference");
-    plus.disabled = state.pageBusy || pageTarget().kind !== "project";
-    if (pageTarget().kind !== "project") plus.title = "Register or select a project to add references";
+    plus.disabled = state.pageBusy || referencePending;
     plus.setAttribute("aria-expanded", String(state.attachMenuOpen));
     plus.addEventListener("click", () => toggleMenu("attach"));
     const attachAnchor = anchoredPopover({
@@ -5271,19 +5443,21 @@ Source: ${reference.sourceDirectory}`;
     return wrap;
   }
   function attachProject() {
-    const target = pageTarget();
-    const config = target.kind === "project" ? target.config ?? (target.dir === state.directory ? state.config : null) : state.config;
-    const dir = target.kind === "project" ? target.dir : state.directory ?? "";
-    const name = config?.name?.trim() || (dir ? fileBaseName(dir) : "Project");
-    return { dir, projectId: target.kind === "project" ? target.projectId : void 0, name, config };
+    const ws = state.workspace;
+    const dir = ws?.dir ?? state.directory ?? "";
+    const config = ws ? state.configDir === ws.dir ? state.config : null : state.config;
+    const name = ws?.name || (dir ? fileBaseName(dir) : "Canvas");
+    const projectId = allProjects.find((project) => dir !== "" && (sameDirPath(project.directory, dir) || pathContains(project.directory, dir)))?.id;
+    return { dir, projectId, name, config };
   }
   async function attachProjectReference() {
     const project = attachProject();
     if (state.surface === "page") {
       if (state.pageBusy || referencePending) return;
-      if (pageTarget().kind !== "project") {
-        referenceError = "Register or select a project to add references.";
+      if (!project.dir) {
+        referenceError = "No canvas workspace yet \u2014 start one with /canvas, then add references.";
         renderPage();
+        annotateReferenceFeedback();
         return;
       }
       stagePageReference({ id: `project:${project.dir}`, kind: "project", path: project.dir, sourceDirectory: project.dir, label: project.name });
@@ -5298,10 +5472,13 @@ Source: ${reference.sourceDirectory}`;
     try {
       const chip = projectReferenceChip({ projectId: project.projectId, dir: project.dir, name: project.name, url });
       await host.attach(chip);
-      await host.toast({ kind: "success", message: "Project reference added to the composer." });
+      await host.toast({ kind: "success", message: "Workspace reference added to the composer." });
     } catch (error) {
       await host.toast({ kind: "error", message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
     }
+  }
+  function annotateReferenceFeedback() {
+    announceReference(referenceError);
   }
   async function attachProjectPath(path) {
     const project = attachProject();
@@ -5309,14 +5486,14 @@ Source: ${reference.sourceDirectory}`;
       if (state.pageBusy || referencePending) return;
       attachPathDraft = path;
       referenceError = "";
-      if (pageTarget().kind !== "project") {
-        referenceError = "Register or select a project, then paste the file path again.";
+      if (!project.dir) {
+        referenceError = "No canvas workspace yet \u2014 start one with /canvas, then paste the file path again.";
         renderPage();
         announceReference(referenceError);
         return;
       }
       if (!path.trim()) {
-        referenceError = "Paste a project-relative or full file path.";
+        referenceError = "Paste a workspace-relative or full file path.";
         renderPage();
         return;
       }
@@ -5417,13 +5594,13 @@ Source: ${reference.sourceDirectory}`;
   function renderAttachPanel() {
     const panel = q("div", "ds-ds-panel ds-attach-panel");
     const project = attachProject();
-    const usable = pageTarget().kind === "project";
+    const usable = project.dir !== "";
     const list = q("div", "ds-ds-list ds-attach-list");
     list.setAttribute("role", "group");
     list.setAttribute("aria-label", "Add a reference");
-    const projectHint = usable ? project.dir || project.name : "Register or select a project to add references.";
+    const projectHint = usable ? project.dir || project.name : "No canvas workspace yet \u2014 /canvas creates one.";
     list.append(
-      attachOption("Reference the project", projectHint, !usable || referencePending || state.pageBusy, () => {
+      attachOption("Reference the workspace", projectHint, !usable || referencePending || state.pageBusy, () => {
         void attachProjectReference();
       })
     );
@@ -5465,14 +5642,14 @@ Source: ${reference.sourceDirectory}`;
       });
       input.addEventListener("blur", () => {
         if (!input.value.trim() && input.value.length > 0) {
-          referenceError = "Paste a project-relative or full file path.";
+          referenceError = "Paste a workspace-relative or full file path.";
           input.setAttribute("aria-invalid", "true");
           feedback.textContent = referenceError;
           feedback.classList.add("error");
         }
       });
       panel.append(form);
-      const feedback = q("div", `ds-attach-note${referenceError ? " error" : ""}`, referencePending ? referenceSlow ? "Still checking. Close this menu to cancel, then retry." : "Checking that the file is accessible\u2026" : referenceError || "Paste a project-relative or full path. Files are referenced, never uploaded.");
+      const feedback = q("div", `ds-attach-note${referenceError ? " error" : ""}`, referencePending ? referenceSlow ? "Still checking. Close this menu to cancel, then retry." : "Checking that the file is accessible\u2026" : referenceError || "Paste a workspace-relative or full path. Files are referenced, never uploaded.");
       feedback.id = "ds-reference-feedback";
       feedback.setAttribute("role", "status");
       if (referencePending) {
@@ -5605,66 +5782,14 @@ Source: ${reference.sourceDirectory}`;
     queueMicrotask(() => search.focus());
     return panel;
   }
-  function renderDirRow() {
+  function renderWorkspaceRow() {
     const row = q("div", "ds-dir");
-    const trigger = q("button", "ds-dir-trigger ds-menu-trigger");
-    trigger.dataset.overlayTrigger = "dir";
-    trigger.append(q("span", "ds-dir-label", "Working directory"));
-    trigger.append(q("span", "ds-dir-value", currentDirLabel()));
-    trigger.append(svgIcon('<path d="M6 9l6 6 6-6"/>', 16));
-    trigger.setAttribute("aria-label", "Choose the working directory");
-    trigger.addEventListener("click", () => toggleMenu("dir"));
-    row.append(trigger);
-    const view = state.projects;
-    if (view && view.kind !== "loading" && pageTarget().kind === "needs-project") {
-      row.append(q("div", "ds-dir-note", NEEDS_PROJECT_MESSAGE));
-    }
-    if (state.dirMenuOpen) row.append(renderDirMenu());
+    const label = q("span", "ds-dir-label", "Canvas workspace");
+    const ws = state.workspace;
+    const value = q("span", "ds-dir-value", ws ? ws.name.length > 38 ? `${ws.name.slice(0, 38)}\u2026` : ws.name : "Created on send \u2014 no project registration needed.");
+    value.title = ws ? ws.dir : NO_WORKSPACE_MESSAGE;
+    row.append(label, value);
     return row;
-  }
-  function renderDirMenu() {
-    const menu = q("div", "ds-menu");
-    const view = state.projects;
-    if (!view || view.kind === "loading") {
-      menu.append(q("div", "ds-menu-note", "Loading projects\u2026"));
-      return menu;
-    }
-    if (view.kind === "error") {
-      menu.append(q("div", "ds-menu-note error", `Could not list projects: ${view.message}`));
-      const retry = q("button", "ds-menu-retry", "Retry");
-      retry.addEventListener("click", () => void loadProjects());
-      menu.append(retry);
-      return menu;
-    }
-    const configRows = view.kind === "list" ? view.rows : [];
-    const currentRow = allProjects.find((project) => project.directory === state.directory);
-    const effectiveId = state.selectedProjectId ?? currentRow?.id ?? null;
-    if (allProjects.length === 0) {
-      menu.append(q("div", "ds-menu-note", "No registered projects yet."));
-    }
-    for (const project of allProjects) {
-      const matched = configRows.find((candidate) => candidate.directory === project.directory);
-      const config = matched?.config ?? null;
-      const sub = config?.url ? `${config.type ?? "custom"} \xB7 ${config.url}` : project.directory;
-      menu.append(dirOption(project.name, sub, project.id === effectiveId, project.id, projectReady(config) ? void 0 : NO_CONFIG_BADGE));
-    }
-    return menu;
-  }
-  function dirOption(title, subtitle, on, id, badge) {
-    const item = q("button", `ds-menu-item${on ? " on" : ""}`);
-    const main2 = q("span", "ds-menu-main");
-    const titleLine = q("span", "ds-menu-title");
-    titleLine.append(q("strong", void 0, title));
-    if (badge) titleLine.append(q("span", "ds-badge", badge));
-    main2.append(titleLine);
-    main2.append(q("span", "ds-menu-hint", subtitle));
-    item.append(main2);
-    if (on) item.append(svgIcon('<path d="M20 6L9 17l-5-5"/>', 16));
-    item.addEventListener("click", () => {
-      state.selectedProjectId = id;
-      closeActiveOverlay("dir");
-    });
-    return item;
   }
   function renderIdeas() {
     const wrap = q("div", "ds-ideas");
@@ -5692,12 +5817,11 @@ Source: ${reference.sourceDirectory}`;
   }
   function renderFooter() {
     const footer = q("footer", "ds-footer");
-    footer.append(q("span", "ds-footer-name", "Design Studio"));
-    footer.append(q("span", "ds-footer-hint", "Add references by \u2318-clicking an element in the live preview window."));
+    footer.append(q("span", "ds-footer-name", "Design Canvas"));
+    footer.append(q("span", "ds-footer-hint", "Add references by \u2318-clicking an element in the live canvas window."));
     return footer;
   }
-  var PROJECT_ROW_ICON = '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>';
-  var CHAT_ROW_ICON = '<path d="M20 15.5a2.5 2.5 0 0 1-2.5 2.5H8l-5 3.5V6a2.5 2.5 0 0 1 2.5-2.5h12A2.5 2.5 0 0 1 20 6z"/>';
+  var WORKSPACE_ROW_ICON = '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>';
   function rowIcon(paths) {
     const span = q("span", "ds-list-icon");
     span.setAttribute("aria-hidden", "true");
@@ -5714,27 +5838,13 @@ Source: ${reference.sourceDirectory}`;
     }
     return note;
   }
-  function renderDesignSection() {
+  function renderCanvasSection() {
     const section = q("section", "ds-section");
     const head = q("div", "ds-section-head");
     head.append(q("div", "ds-section-label", "Your design work"));
-    if (state.projectFilter) {
-      const showAll = q("button", "ds-section-reset", "Show all");
-      showAll.title = "Show every design project and chat";
-      showAll.addEventListener("click", () => {
-        state.projectFilter = null;
-        rerender();
-      });
-      head.append(showAll);
-    }
     section.append(head);
     const list = q("div", "ds-list");
-    const listedIds = state.projects?.kind === "list" ? new Set(state.projects.rows.map((row) => row.id)) : /* @__PURE__ */ new Set();
-    const view = designWorkRows(
-      state.projects ?? { kind: "loading" },
-      state.designChats ?? { kind: "loading" },
-      state.projectFilter ? void 0 : { omitChatProjectIds: listedIds }
-    );
+    const view = state.workspaces ?? { kind: "loading" };
     if (view.kind === "loading") {
       list.append(listNote("Loading\u2026"));
     } else if (view.kind === "error") {
@@ -5742,92 +5852,78 @@ Source: ${reference.sourceDirectory}`;
     } else if (view.kind === "empty") {
       list.append(listNote(NO_DESIGN_WORK_MESSAGE));
     } else {
-      const filter = state.projectFilter;
-      const rows = filter ? view.rows.filter((row) => row.kind === "project" ? row.project.id === filter : row.chat.projectId === filter) : view.rows;
-      for (const row of rows) {
-        list.append(row.kind === "project" ? renderProjectRow(row.project) : renderChatRow(row.chat));
-      }
-      if (filter && !rows.some((row) => row.kind === "chat")) {
-        list.append(listNote("No design sessions in this project yet."));
+      for (const row of view.rows) {
+        list.append(renderWorkspaceListRow(row));
       }
     }
     section.append(list);
     return section;
   }
-  function renderProjectRow(row) {
-    const ready = projectReady(row.config);
+  function renderWorkspaceListRow(row) {
+    const ready = Boolean(row.url?.trim());
     const item = q("div", "ds-list-row");
     const open = q("button", "ds-list-open");
-    open.setAttribute("aria-label", `Show the design sessions in ${row.name}`);
-    open.append(rowIcon(PROJECT_ROW_ICON));
+    open.setAttribute("aria-label", row.sessionId ? `Open the canvas chat ${row.name}` : `Open ${row.name} (starts its design chat)`);
+    open.append(rowIcon(WORKSPACE_ROW_ICON));
     const main2 = q("div", "ds-list-main");
     const titleLine = q("div", "ds-list-title");
-    titleLine.append(q("span", "ds-list-name", row.name));
+    titleLine.append(q("span", "ds-list-name", row.name || fileBaseName(row.dir)));
     titleLine.append(q("span", `ds-badge${ready ? " ready" : ""}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
     main2.append(titleLine);
-    main2.append(q("div", "ds-list-meta", projectMeta(row)));
-    if (row.configError) main2.append(q("div", "ds-list-warn", `Could not read .design-studio.json: ${row.configError}`));
+    main2.append(q("div", "ds-list-meta", workspaceMeta(row)));
     open.append(main2);
-    open.append(q("span", "ds-list-go", state.projectFilter === row.id ? "Showing" : "Open sessions"));
-    open.addEventListener("click", () => openProjectSessions(row));
+    open.append(q("span", "ds-list-go", row.sessionId ? "Open" : "Open chat"));
+    open.addEventListener("click", () => void openWorkspaceListRow(row));
     item.append(open);
     if (ready) {
       const preview = q("button", "ds-list-preview", "Preview");
       preview.title = `Open the ${row.name} preview`;
       preview.setAttribute("aria-label", `Open the ${row.name} preview`);
-      preview.addEventListener("click", () => void previewProject(row));
+      preview.addEventListener("click", () => void previewWorkspace(row));
       item.append(preview);
     }
     return item;
   }
-  function openProjectSessions(row) {
-    state.selectedProjectId = row.id;
-    state.projectFilter = row.id;
-    rerender();
-    scrollDesignSectionIntoView();
-  }
-  function scrollDesignSectionIntoView() {
-    const section = pageBody?.querySelector(".ds-section");
-    if (!section || typeof section.scrollIntoView !== "function") return;
-    const reduce = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    section.scrollIntoView({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
-  }
-  async function previewProject(row) {
-    const url = row.config?.url?.trim();
-    if (!url) {
-      await host.toast({ kind: "error", message: NO_PROJECT_URL_MESSAGE });
+  async function openWorkspaceListRow(row) {
+    if (row.sessionId) {
+      try {
+        await host.openSession(row.sessionId);
+      } catch (error) {
+        await host.toast({ kind: "error", message: `Could not open the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
+      }
       return;
     }
-    await openProjectWindow({ url }, row.directory, true);
-  }
-  function renderChatRow(row) {
-    const ready = projectReady(row.config);
-    const item = q("div", "ds-list-row");
-    const open = q("button", "ds-list-open");
-    open.setAttribute("aria-label", `Open the design chat ${row.title} in ${row.projectName}`);
-    open.append(rowIcon(CHAT_ROW_ICON));
-    const main2 = q("div", "ds-list-main");
-    const titleLine = q("div", "ds-list-title");
-    titleLine.append(q("span", "ds-list-name", row.title));
-    titleLine.append(q("span", `ds-badge${ready ? " ready" : ""}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
-    main2.append(titleLine);
-    main2.append(q("div", "ds-list-meta", designChatMeta(row)));
-    if (row.configError) main2.append(q("div", "ds-list-warn", `Could not read .design-studio.json: ${row.configError}`));
-    open.append(main2);
-    open.append(q("span", "ds-list-go", "Open"));
-    open.addEventListener("click", () => void openDesignChat(row));
-    item.append(open);
-    return item;
-  }
-  async function openDesignChat(row) {
+    const name = row.name || fileBaseName(row.dir);
+    const record = { dir: row.dir, name };
+    let result;
     try {
-      await host.openSession(row.sessionId);
+      result = await host.startSession({
+        providerId: "design-canvas",
+        id: `workspace:${fileBaseName(row.dir)}`,
+        title: name,
+        url: attachUrl(row.url),
+        text: workspaceOpenPrompt(record),
+        navigation: "preserve",
+        data: seedSessionData("hi-fi", "", record)
+      });
     } catch (error) {
-      await host.toast({ kind: "error", message: `Could not open the design chat: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast({ kind: "error", message: `Could not start the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
       return;
     }
-    const url = row.config?.url?.trim();
-    if (url) await openProjectWindow({ url }, row.directory || state.directory, false);
+    if (!result.sessionId || result.sent !== "sent") {
+      const failure = "failure" in result ? result.failure : void 0;
+      await host.toast({ kind: "error", message: `The canvas chat could not be started (${result.sent}${failure ? `: ${failure}` : ""}).` });
+      return;
+    }
+    try {
+      await host.storage.set(workspaceStorageKey(result.sessionId), record);
+    } catch {
+    }
+    try {
+      await host.openSession(result.sessionId);
+    } catch (error) {
+      await host.toast({ kind: "error", message: `The canvas chat could not open. Open it from Your design work. ${error instanceof Error ? error.message : String(error)}` });
+    }
   }
   function renderWindowStatus() {
     if (hintEl) {
@@ -5836,22 +5932,89 @@ Source: ${reference.sourceDirectory}`;
       hintEl.classList.toggle("idle", !pickHintActive(state));
     }
     renderSessionStatus();
+    renderCanvasControls();
   }
   function renderSessionStatus() {
     if (!sessionLineEl) return;
-    if (!projectReady(state.config)) {
-      sessionLineEl.textContent = NO_PROJECT_CONFIG_MESSAGE;
+    const ws = state.workspace;
+    if (!ws) {
+      sessionLineEl.textContent = NO_WORKSPACE_MESSAGE;
       sessionLineEl.classList.add("off");
       return;
     }
-    sessionLineEl.textContent = designSessionStatus({ modeOn: state.mode.on, configUrl: state.config?.url ?? null });
+    sessionLineEl.textContent = canvasSessionStatus({
+      modeOn: state.mode.on,
+      workspaceDir: ws.dir,
+      wsReady: projectReady(currentConfig())
+    });
     sessionLineEl.classList.toggle("off", !state.mode.on);
   }
+  function renderCanvasControls() {
+    const ready = Boolean(state.workspace && projectReady(currentConfig()));
+    const hasScreens = state.liveScreens.length > 0;
+    if (playToggleBtn) {
+      playToggleBtn.hidden = !ready || !hasScreens;
+      if (!playToggleBtn.hidden) {
+        const mode = state.liveMode;
+        playToggleBtn.textContent = mode === "play" ? "Play" : "Edit";
+        playToggleBtn.title = mode === "play" ? "Canvas is in play mode \u2014 click to switch to edit" : "Canvas is in edit mode \u2014 click to switch to play";
+        playToggleBtn.classList.toggle("on", mode === "play");
+      }
+    }
+    if (screenSelectEl) {
+      screenSelectEl.hidden = !ready || !hasScreens;
+      if (!screenSelectEl.hidden) {
+        screenSelectEl.replaceChildren();
+        for (const screen of state.liveScreens) {
+          screenSelectEl.append(option(screen.id, screen.title || screen.id));
+        }
+        screenSelectEl.value = state.activeScreen ?? state.liveScreens[0]?.id ?? "";
+        screenSelectEl.title = "Active screen";
+        screenSelectEl.setAttribute("aria-label", "Active screen");
+      }
+    }
+    if (focusLiveBtn) {
+      focusLiveBtn.hidden = !(state.mode.on && state.windowOpen);
+    }
+  }
+  async function onPlayToggleClick() {
+    const next = state.liveMode === "play" ? "edit" : "play";
+    try {
+      const result = await setMode(next);
+      if (result.ok === false && result.error) {
+        setStatus(result.error, "error");
+      } else {
+        state.liveMode = next;
+        state.mode.canvMode = next;
+        await saveMode();
+      }
+    } catch (error) {
+      setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+    renderCanvasControls();
+  }
+  async function onScreenSelectChange() {
+    const id = screenSelectEl?.value;
+    const ws = state.workspace;
+    if (!id || !ws) return;
+    try {
+      await openWorkspace({ dir: ws.dir, screen: id });
+      state.activeScreen = id;
+    } catch (error) {
+      setStatus(`Could not switch screens: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+    renderCanvasControls();
+  }
+  async function onFocusClick() {
+    try {
+      await focusLive();
+    } catch {
+    }
+  }
   function renderRow() {
-    const ready = projectReady(state.config);
-    if (barEl) barEl.classList.toggle("hidden", !ready);
-    if (hintEl) hintEl.classList.toggle("hidden", !ready);
-    if (!ready && (focusInside(barEl) || focusInside(hintEl))) focusSessionLine();
+    if (barEl) barEl.classList.toggle("hidden", false);
+    if (hintEl) hintEl.classList.toggle("hidden", !projectReady(currentConfig()));
+    if (!projectReady(currentConfig()) && focusInside(hintEl)) focusSessionLine();
     renderServerControl();
     renderWindowStatus();
   }
@@ -5859,9 +6022,14 @@ Source: ${reference.sourceDirectory}`;
     state.url = stateData.url;
     state.title = stateData.title;
     state.windowOpen = stateData.windowOpen;
+    if (stateData.mode === "edit" || stateData.mode === "play") state.liveMode = stateData.mode;
+    if (stateData.screens !== void 0) state.liveScreens = stateData.screens.map((screen) => ({ ...screen }));
+    state.activeScreen = stateData.activeScreen ?? null;
     if (stateData.lastPick && stateData.pickSeq > state.lastSeq) {
       state.lastSeq = stateData.pickSeq;
-      const pick = { ...stateData.lastPick, seq: stateData.pickSeq, url: stateData.url, pickedAt: /* @__PURE__ */ new Date() };
+      const screenState = stateData.lastPickScreen ? state.liveScreens.find((screen2) => screen2.id === stateData.lastPickScreen) : void 0;
+      const screen = screenState ? { id: screenState.id, url: screenState.url } : void 0;
+      const pick = { ...stateData.lastPick, seq: stateData.pickSeq, url: stateData.url, pickedAt: /* @__PURE__ */ new Date(), screen };
       if (state.mode.on && !stateData.bridgeActive) void addToChat(pick);
     }
     renderWindowStatus();
@@ -5886,7 +6054,7 @@ Source: ${reference.sourceDirectory}`;
     try {
       await applyState(await getState());
     } catch (error) {
-      setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Live window error: ${error instanceof Error ? error.message : String(error)}`, "error");
+      setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Live canvas error: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
     void refreshServerStatus();
   }
@@ -5948,7 +6116,18 @@ Source: ${reference.sourceDirectory}`;
     modeToggleBtn.addEventListener("click", () => {
       void toggleMode(!state.mode.on);
     });
-    bar.append(serverBtn, modeToggleBtn);
+    playToggleBtn = q("button", "ds-chip ds-play-toggle");
+    playToggleBtn.hidden = true;
+    playToggleBtn.addEventListener("click", () => void onPlayToggleClick());
+    screenSelectEl = q("select", "ds-screen-select");
+    screenSelectEl.hidden = true;
+    screenSelectEl.addEventListener("change", () => void onScreenSelectChange());
+    focusLiveBtn = q("button", "ds-chip ds-focus");
+    focusLiveBtn.textContent = "Focus";
+    focusLiveBtn.title = "Raise the live canvas window";
+    focusLiveBtn.hidden = true;
+    focusLiveBtn.addEventListener("click", () => void onFocusClick());
+    bar.append(serverBtn, modeToggleBtn, playToggleBtn, screenSelectEl, focusLiveBtn);
     barEl = bar;
     sessionLineEl = q("div", "ds-sessionline");
     hintEl = q("span", "ds-hintline");
@@ -6012,7 +6191,7 @@ Source: ${reference.sourceDirectory}`;
   async function main() {
     const root = document.getElementById("root");
     if (!root) throw new Error("missing #root");
-    host.onResolve((request) => resolveDesignCommand(request.args));
+    host.onResolve((request) => resolveCanvasCommand(request.args));
     let started = false;
     host.onReady((context) => {
       applyHostReady(context, document.documentElement);
@@ -6025,6 +6204,7 @@ Source: ${reference.sourceDirectory}`;
       build(root);
       setStatus("Loading\u2026");
       void loadMode();
+      void loadWorkspace();
       void loadStudioConfig();
       const kind = surfaceKind(state.surface);
       if (kind === "row") {
@@ -6045,7 +6225,6 @@ Source: ${reference.sourceDirectory}`;
       state.serverError = null;
       renderRow();
       rerender();
-      void loadStudioConfig();
     });
   }
   function setProjectDirectory(dir) {
@@ -6054,6 +6233,10 @@ Source: ${reference.sourceDirectory}`;
     state.serverStatus = null;
     state.serverPending = false;
     state.serverError = null;
+  }
+  function setWorkspace(workspace) {
+    state.workspace = workspace;
+    if (workspace) state.configDir = null;
   }
   function setSurface(surface) {
     state.surface = surface;
@@ -6088,9 +6271,6 @@ Source: ${reference.sourceDirectory}`;
   function getAllProjects() {
     return [...allProjects];
   }
-  function setSelectedProject(id) {
-    state.selectedProjectId = id;
-  }
   function setSessionBusy(busy) {
     state.sessionBusy = busy;
   }
@@ -6112,7 +6292,7 @@ Source: ${reference.sourceDirectory}`;
   }
   function setStudioConfig(config) {
     state.config = config;
-    state.configDir = state.directory;
+    state.configDir = state.workspace?.dir ?? state.directory;
   }
   function getServerControlState() {
     return { status: state.serverStatus, pending: state.serverPending, error: state.serverError };

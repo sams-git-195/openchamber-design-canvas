@@ -16,7 +16,7 @@ await cp(path.join(root,'shared'),path.join(scratch,'shared'),{recursive:true});
 await cp(path.join(root,'viewer-client/src/canvas-controller.js'),path.join(scratch,'viewer-client/src/canvas-controller.js'));
 await cp(path.join(root,'viewer-client/src/canvas-controller.d.ts'),path.join(scratch,'viewer-client/src/canvas-controller.d.ts'));
 await cp(path.join(root,'service/viewer-assets.generated.ts'),path.join(scratch,'service/viewer-assets.generated.ts'));
-await symlink(path.join(root,'node_modules'),path.join(scratch,'node_modules'));
+await symlink(path.join(root,'node_modules'),path.join(scratch,'node_modules'),process.platform==='win32'?'junction':undefined);
 const mutant=process.env.LIVE_CANVAS_MUTANT;
 async function mutate(file:string,from:string,to:string){const location=path.join(scratch,'service',file+'.ts'),source=await readFile(location,'utf8');assert.equal(source.split(from).length-1,1,'one scratch guard match');await writeFile(location,source.replace(from,to));}
 if(mutant==='artifact-authorization')await mutate('browser','if(screen&&context.matches(context.artifact(screen),session,params.executionContextId)) {',"if(params.name==='__dsPick'||params.name==='__dsArtifactEvent') {");

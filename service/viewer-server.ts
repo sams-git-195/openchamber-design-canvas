@@ -7,7 +7,11 @@ export async function startViewerServer(config: ViewerConfig): Promise<{ url: st
   const capability = '/canvas/' + randomBytes(32).toString('hex');
   let html = renderViewerHtml(config);
   html = html.replace('<meta charset="utf-8">', '<meta charset="utf-8"><meta name="referrer" content="no-referrer">');
-  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => "'sha256-" + createHash('sha256').update(match[1]!).digest('base64') + "'");
+  // Chrome normalizes CRLF/CR to LF in the input byte stream before parsing any
+  // element, so the integrity hash it verifies for an inline script is over the
+  // LF-normalized text. Hash that same normalized text here: a CRLF source file
+  // (git autocrlf on Windows) must never break the shell bootstrap.
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => "'sha256-" + createHash('sha256').update(match[1]!.replace(/\r\n?/g, '\n')).digest('base64') + "'");
   const csp = `default-src 'none'; script-src ${scripts.join(' ')}; style-src 'unsafe-inline'; font-src data:; frame-src http: https:; img-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
   let host = '';
   const server = createServer((req, res) => {

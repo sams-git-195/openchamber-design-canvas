@@ -4,6 +4,7 @@ import { readFile, mkdtemp, writeFile, readdir, access } from 'node:fs/promises'
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const hash=(value:string|Buffer)=>createHash('sha256').update(value).digest('hex');
@@ -32,7 +33,9 @@ test('private real stock Button fixture produces offline CSS/fonts and productio
   const css=JSON.parse(assets.match(/VIEWER_CLIENT_CSS = (".*");/)![1]!);
   assert.doesNotMatch(css,/@import|url\(["']?(https?:|\/\/)/);assert.match(css,/Geist Variable/);
   const dataFonts=[...css.matchAll(/data:[^;"')]+;base64,([A-Za-z0-9+/=]+)/g)].map(match=>hash(Buffer.from(match[1],'base64')));
-  const fontRoot=path.dirname(new URL(import.meta.resolve('@fontsource-variable/geist')).pathname);
+  // FORK-WIN: URL.pathname is '/C:/…' on win32 file: URLs; fileURLToPath gives
+  // the real absolute path (the naive join produced 'C:\C:\…').
+  const fontRoot = path.dirname(fileURLToPath(new URL(import.meta.resolve('@fontsource-variable/geist'))));
   const originalFonts=(await readdir(path.join(fontRoot,'files'))).filter(file=>file.endsWith('.woff2'));
   assert.ok(dataFonts.length>0);for(const encoded of dataFonts){const originals=await Promise.all(originalFonts.map(async file=>hash(await readFile(path.join(fontRoot,'files',file)))));assert.ok(originals.includes(encoded),'font bytes are unchanged official WOFF2');}
 });

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { request } from 'node:http';
 const modulePath = '../service/viewer-server.ts';
 const viewer = await import(modulePath).catch(() => null);
@@ -24,4 +25,30 @@ test('private viewer serves only its capability HTML with exact Host/method and 
     assert.equal(wrong,403);
   } finally { await server.close(); }
   await assert.rejects(()=>fetch(server.url));
+});
+
+test('CSP script hashes equal sha256 of the LF-normalized served script text (CRLF-proof)', async () => {
+  assert.ok(viewer, 'private viewer server must exist');
+  const server = await viewer.startViewerServer(config);
+  try {
+    const response = await fetch(server.url), html = await response.text();
+    const csp = response.headers.get('content-security-policy') ?? '';
+    const allowed = new Set((csp.match(/script-src ([^;]+)/) ?? [,''])[1].split(' '));
+    const bodies = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]!);
+    assert.ok(bodies.length >= 1 && allowed.size === bodies.length, 'one CSP script entry per inline script');
+    for (const body of bodies) {
+      // Chrome normalizes CRLF/CR to LF in the input byte stream before parsing
+      // any element, so the hash it verifies is over THIS text — a CRLF source
+      // file checked out by git autocrlf must not change it.
+      const normalized = body.replace(/\r\n?/g, '\n');
+      const entry = `'sha256-${createHash('sha256').update(normalized).digest('base64')}'`;
+      assert.ok(allowed.has(entry), 'CSP hash equals the LF-normalized served script text');
+      // Regression control: hashing the raw CRLF bytes (the pre-fix behavior)
+      // must never equal the entry Chrome verifies, so a CRLF regression
+      // anywhere in the chain is caught by the pin above.
+      const crlf = normalized.replace(/\n/g, '\r\n');
+      assert.notEqual(crlf, normalized, 'script bodies contain line breaks for the CRLF control');
+      assert.notEqual(`'sha256-${createHash('sha256').update(crlf).digest('base64')}'`, entry, 'raw CRLF hashing cannot match the CSP entry');
+    }
+  } finally { await server.close(); }
 });

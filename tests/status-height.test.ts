@@ -403,12 +403,13 @@ test('measurement includes content border-box and external vertical margins with
   }
 });
 
-test('the row keeps exactly two controls and the two text lines', async () => {
+test('the row keeps exactly four controls and the two text lines', async () => {
   freshMount(98);
   const bar = statusSection().find('ds-rowline');
   assert.ok(bar, 'the control bar exists');
   const buttons = bar!.findAll('button').length;
-  assert.equal(buttons, 2, `the bar has exactly two controls, found ${buttons}`);
+  assert.equal(buttons, 4, `the bar has exactly four controls, found ${buttons}`);
+  assert.equal(bar!.findAll('select').length, 1, 'the active-screen dropdown stays in the row');
   assert.ok(statusSection().find('ds-sessionline'), 'the session status line exists');
   assert.ok(statusSection().find('ds-hintline'), 'the ⌘-click hint exists');
   assert.equal(statusSection().find('ds-more'), undefined, 'no disclosure node in the mounted row');

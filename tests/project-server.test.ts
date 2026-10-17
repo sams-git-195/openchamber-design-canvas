@@ -57,6 +57,20 @@ async function processLstart(pid: number): Promise<string | null> {
   }
 }
 
+/**
+ * FORK-WIN: build a fixture `node -e` dev-server command that both shells pass
+ * through intact. cmd.exe treats single quotes as literal text, so the POSIX
+ * single-quoted envelope must become a double-quoted one on win32, the script's
+ * own strings flipped to single quotes, path separators flattened to `/` (JS
+ * string escapes would otherwise drop backslashes) and newlines stripped (the
+ * scripts have no literal newlines inside strings). The POSIX output stays
+ * byte-identical to the pre-fork fixture form.
+ */
+function nodeE(script: string): string {
+  if (process.platform !== 'win32') return `node -e '${script}'`;
+  return `node -e "${script.replace(/\\/g, '/').replace(/"/g, "'").replace(/\r?\n[ \t]*/g, '')}"`;
+}
+
 /** A detached, long-lived process whose pid is a live process-group id. */
 async function liveGroupLeader(): Promise<number> {
   const child = spawn('node', ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
@@ -67,10 +81,28 @@ async function liveGroupLeader(): Promise<number> {
   return pid;
 }
 
+/** FORK-WIN: kill the recorded leader — the pid on win32, the group elsewhere. */
+function killGroup(pgid: number): void {
+  if (process.platform === 'win32') {
+    // taskkill /T kills the shell->node tree the record's pid leads (a bare
+    // SIGKILL on that pid would orphan the real server child holding the port).
+    execFile('taskkill', ['/PID', String(pgid), '/T', '/F'], () => undefined);
+    return;
+  }
+  try {
+    process.kill(-pgid, 'SIGKILL');
+  } catch {
+    /* already gone */
+  }
+}
+
 /** True once the whole process group has no live member. */
 function groupGone(pgid: number): boolean {
   try {
-    process.kill(-pgid, 0);
+    // FORK-WIN: no POSIX process groups on Windows — the record's pgid IS the
+    // pid of the single detached leader, so signal that pid directly. The
+    // POSIX branch keeps the negative-pid group probe byte-identical.
+    process.kill(process.platform === 'win32' ? pgid : -pgid, 0);
     return false;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'ESRCH';
@@ -139,7 +171,7 @@ test('starts the configured command, reports it up, and does not restart on a se
   const pidFile = path.join(dir, 'server.pid');
   const port = await freePort();
   const url = `http://127.0.0.1:${port}/`;
-  const command = `node -e 'require("fs").writeFileSync("${pidFile}",""+process.pid);require("http").createServer(function(q,s){s.end("ok")}).listen(${port},"127.0.0.1")'`;
+  const command = nodeE(`require("fs").writeFileSync("${pidFile}",""+process.pid);require("http").createServer(function(q,s){s.end("ok")}).listen(${port},"127.0.0.1")`);
   await writeConfig(dir, { version: 1, url, command });
 
   try {
@@ -180,12 +212,11 @@ test('a command that starts but never serves times out with an actionable error'
   const port = await freePort();
   const url = `http://127.0.0.1:${port}/`;
   // FORK-MERGE (Phase 0/Windows): single-quoted commands are not quoted by
-  // cmd.exe — node -e receives one string literal and exits 0 at once, so this
-  // test needs double-quote (cross-shell) syntax or a .cjs sleeper file. The
-  // immediate win32 record write in project-server.ts now lets the early-exit
-  // handler catch this (baseline passed only because its failed `ps` probes
-  // delayed the listener past the exit).
-  const command = `node -e 'require("fs").writeFileSync("${pidFile}",""+process.pid);setTimeout(function(){},60000)'`;
+  // cmd.exe — node -e receives one string literal and exits 0 at once. The
+  // fixture builder below emits the double-quoted (cross-shell) envelope on
+  // win32; the immediate win32 record write in project-server.ts lets the
+  // early-exit handler catch a REAL early exit here.
+  const command = nodeE(`require("fs").writeFileSync("${pidFile}",""+process.pid);setTimeout(function(){},60000)`);
   await writeConfig(dir, { version: 1, url, command });
 
   try {
@@ -202,7 +233,7 @@ test('a command that starts but never serves times out with an actionable error'
 
 /** A detached server command that serves `port` and records its own pid. */
 function serveCommand(pidFile: string, port: number): string {
-  return `node -e 'require("fs").writeFileSync("${pidFile}",""+process.pid);require("http").createServer(function(q,s){s.end("ok")}).listen(${port},"127.0.0.1")'`;
+  return nodeE(`require("fs").writeFileSync("${pidFile}",""+process.pid);require("http").createServer(function(q,s){s.end("ok")}).listen(${port},"127.0.0.1")`);
 }
 
 test('records the process group and stopDevServer kills the group and frees the port', async () => {
@@ -238,7 +269,7 @@ test('records the process group and stopDevServer kills the group and frees the 
     await killPidFile(pidFile);
     if (pgid > 0) {
       try {
-        process.kill(-pgid, 'SIGKILL');
+        killGroup(pgid);
       } catch {
         /* already gone */
       }
@@ -278,14 +309,29 @@ async function writeServerRecordFile(
   dir: string,
   pgid: number,
   port: number | null,
-  identity?: string,
+  extra?: Record<string, unknown>,
 ): Promise<void> {
   await mkdir(path.join(dir, '.design-studio'), { recursive: true });
   await writeFile(
     path.join(dir, '.design-studio', 'server.json'),
-    JSON.stringify({ pgid, pid: pgid, port, startedAt: Date.now(), ...(identity ? { identity } : {}) }),
+    JSON.stringify({ pgid, pid: pgid, port, startedAt: Date.now(), ...(extra ?? {}) }),
     'utf8',
   );
+}
+
+/**
+ * FORK-WIN: win32 records carry no ps fingerprint — they carry
+ * `platform:'win32'` and verify through the recorded port's owner
+ * (project-server.ts FORK-WIN). A test that wants a VERIFIED record therefore
+ * only needs the record's pid to be the pid holding the port; an UNVERIFIABLE
+ * one names some other live pid. The POSIX branch keeps the `ps -o lstart=`
+ * fingerprint byte-identical.
+ */
+async function verifiedRecordFields(pid: number): Promise<Record<string, unknown>> {
+  if (process.platform === 'win32') return { platform: 'win32' };
+  const identity = await processLstart(pid);
+  assert.ok(identity, 'ps reports a start time for the live leader');
+  return { identity };
 }
 
 test('a URL whose port is occupied but which does not answer reports the port conflict instead of spawning', async () => {
@@ -370,7 +416,7 @@ test('stopping twice is safe: the second call is a no-op', async () => {
     await killPidFile(pidFile);
     if (pgid > 0) {
       try {
-        process.kill(-pgid, 'SIGKILL');
+        killGroup(pgid);
       } catch {
         /* already gone */
       }
@@ -387,7 +433,7 @@ test('concurrent ensureDevServer calls for one dir spawn exactly one server; joi
   const pidFile = path.join(dir, 'spawn.pids');
   const port = await freePort();
   const url = `http://127.0.0.1:${port}/`;
-  const command = `node -e 'require("fs").appendFileSync("${pidFile}",process.pid+"\\n");require("http").createServer(function(q,s){s.end("ok")}).listen(${port},"127.0.0.1")'`;
+  const command = nodeE(`require("fs").appendFileSync("${pidFile}",process.pid+"\\n");require("http").createServer(function(q,s){s.end("ok")}).listen(${port},"127.0.0.1")`);
   await writeConfig(dir, { version: 1, url, command });
 
   // Several spellings of the SAME directory: all must resolve to one claim.
@@ -409,14 +455,26 @@ test('concurrent ensureDevServer calls for one dir spawn exactly one server; joi
 
     const record = await readServerRecord(dir);
     assert.ok(record, 'the winner left a server record for the dir');
-    assert.equal(typeof record!.identity, 'string', 'the record carries the leader identity fingerprint');
-    assert.ok(record!.identity!.length > 0);
+    // FORK-WIN: win32 records carry no ps fingerprint — the lifetime scheme
+    // marker takes its place; the POSIX branch keeps the lstart pin.
+    if (process.platform === 'win32') {
+      assert.equal(record!.platform, 'win32', 'the record carries the win32 lifetime scheme');
+    } else {
+      assert.equal(typeof record!.identity, 'string', 'the record carries the leader identity fingerprint');
+      assert.ok(record!.identity!.length > 0);
+    }
   } finally {
     for (const line of pids) await killPidFile(line);
   }
 });
 
-test('a newer record written by a concurrent start survives a stop that is already running', { timeout: 30_000 }, async () => {
+test('a newer record written by a concurrent start survives a stop that is already running', {
+  timeout: 30_000,
+  // FORK-WIN: the graceful-SIGTERM-linger window this race runs in does not
+  // exist in the win32 taskkill path (instant kill); the win32 record/stop
+  // guards are pinned by the identity/stop suites above. POSIX keeps the test.
+  skip: process.platform === 'win32' ? 'no SIGTERM linger window in the win32 taskkill path' : false,
+}, async () => {
   const dir = await tempDir();
   const oldPidFile = path.join(dir, 'old.pid');
   const newPidFile = path.join(dir, 'new.pid');
@@ -426,15 +484,15 @@ test('a newer record written by a concurrent start survives a stop that is alrea
   // the port frees) but lingers alive — the shutdown window in which the
   // concurrent restart on the SAME port runs (a different-port start is refused
   // by the port-change guard while a live record exists).
-  const commandA = `node -e '
+  const commandA = nodeE(`
     const server = require("http").createServer(function(q,s){s.end("old")}).listen(${port},"127.0.0.1");
     require("fs").writeFileSync("${oldPidFile}", process.pid + "");
     process.on("SIGTERM", function(){ server.close(); server.closeAllConnections(); server.closeIdleConnections(); setTimeout(function(){process.exit(0)}, 800); });
-  '`;
+  `);
   // B writes its pid/record at once but binds the port only ~1.5s later — the
   // stop's port-free check completes before B binds (a bind racing the stop's
   // check is the known CAND-2 masked-success shape, out of scope here).
-  const commandB = `node -e 'require("fs").writeFileSync("${newPidFile}",""+process.pid);setTimeout(function(){require("http").createServer(function(q,s){s.end("new")}).listen(${port},"127.0.0.1")},1500)'`;
+  const commandB = nodeE(`require("fs").writeFileSync("${newPidFile}",""+process.pid);setTimeout(function(){require("http").createServer(function(q,s){s.end("new")}).listen(${port},"127.0.0.1")},1500)`);
 
   let oldPgid = 0;
   let newPgid = 0;
@@ -476,7 +534,7 @@ test('a newer record written by a concurrent start survives a stop that is alrea
     for (const pgid of [oldPgid, newPgid]) {
       if (pgid > 0) {
         try {
-          process.kill(-pgid, 'SIGKILL');
+          killGroup(pgid);
         } catch {
           /* already gone */
         }
@@ -490,12 +548,16 @@ test('a newer record written by a concurrent start survives a stop that is alrea
 // ---------------------------------------------------------------------------
 
 test('a record naming a live unrelated group is refused: status is not up and the stop spares the group', { timeout: 30_000 }, async () => {
+  // FORK-WIN: win32 records carry no fingerprint at all — both loop shapes
+  // below collapse to platform:'win32', whose port-owner verification is what
+  // the refusal runs through. POSIX keeps the two fingerprint shapes.
   for (const identity of [undefined, 'bogus-not-a-real-lstart']) {
     const dir = await tempDir();
     const unrelated = await liveGroupLeader();
     const holder = createServer((_q, res) => res.end('busy'));
     const port = await listening(holder);
-    await writeServerRecordFile(dir, unrelated, port, identity);
+    const extra = process.platform === 'win32' ? { platform: 'win32' as const } : (identity ? { identity } : {});
+    await writeServerRecordFile(dir, unrelated, port, extra);
 
     try {
       assert.equal(groupGone(unrelated), false, 'the unrelated group is alive');
@@ -514,7 +576,7 @@ test('a record naming a live unrelated group is refused: status is not up and th
       assert.ok(await readServerRecord(dir), 'the record survives the refused stop');
     } finally {
       try {
-        process.kill(-unrelated, 'SIGKILL');
+        killGroup(unrelated);
       } catch {
         /* already gone */
       }
@@ -539,9 +601,7 @@ test('a record with a verified identity is stopped as today (the fingerprint aut
     while (Date.now() < deadline && (await canBindPort(port))) await delay(50);
     assert.equal(await canBindPort(port), false, 'our recorded group holds the port');
 
-    const identity = await processLstart(pgid);
-    assert.ok(identity, 'ps reports a start time for the live leader');
-    await writeServerRecordFile(dir, pgid, port, identity);
+    await writeServerRecordFile(dir, pgid, port, await verifiedRecordFields(pgid));
 
     const stop = await stopDevServer(dir);
     assert.deepEqual(stop, { stopped: true });
@@ -552,7 +612,7 @@ test('a record with a verified identity is stopped as today (the fingerprint aut
     assert.equal(await readServerRecord(dir), null, 'the record was cleared');
   } finally {
     try {
-      process.kill(-pgid, 'SIGKILL');
+      killGroup(pgid);
     } catch {
       /* already gone */
     }
@@ -578,7 +638,7 @@ test('a stop whose port is still held afterwards reports stopped:false and keeps
     pgid = (await readServerRecord(dir))!.pgid;
 
     // Kill the group out-of-band, then let a foreign process grab the port.
-    process.kill(-pgid, 'SIGKILL');
+    killGroup(pgid);
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline && !(await canBindPort(port))) await delay(50);
     holder = createServer((_q, res) => res.end('foreign'));
@@ -601,7 +661,7 @@ test('a stop whose port is still held afterwards reports stopped:false and keeps
     await killPidFile(pidFile);
     if (pgid > 0) {
       try {
-        process.kill(-pgid, 'SIGKILL');
+        killGroup(pgid);
       } catch {
         /* already gone */
       }
@@ -632,15 +692,13 @@ test('an unreachable URL whose port is held by our own verified server reports u
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline && (await canBindPort(port))) await delay(50);
     assert.equal(await canBindPort(port), false, 'our group holds the port');
-    const identity = await processLstart(pgid);
-    assert.ok(identity);
-    await writeServerRecordFile(dir, pgid, port, identity);
+    await writeServerRecordFile(dir, pgid, port, await verifiedRecordFields(pgid));
 
     const result = await ensureDevServer(url, { dir, timeoutMs: 3_000 });
     assert.deepEqual(result, { started: false, up: true });
   } finally {
     try {
-      process.kill(-pgid, 'SIGKILL');
+      killGroup(pgid);
     } catch {
       /* already gone */
     }
@@ -706,15 +764,13 @@ test('a manual start trusts a live verified record that names the same port', { 
     assert.equal(await canBindPort(port), false, 'our recorded group holds the port');
     assert.equal((await fetch(url)).status, 200, 'our recorded server answers the URL');
 
-    const identity = await processLstart(pgid);
-    assert.ok(identity, 'ps reports a start time for the live leader');
-    await writeServerRecordFile(dir, pgid, port, identity);
+    await writeServerRecordFile(dir, pgid, port, await verifiedRecordFields(pgid));
 
     const result = await ensureDevServer(url, { dir, timeoutMs: 3_000, ownedOnly: true });
     assert.deepEqual(result, { started: false, up: true });
   } finally {
     try {
-      process.kill(-pgid, 'SIGKILL');
+      killGroup(pgid);
     } catch {
       /* already gone */
     }
@@ -735,9 +791,7 @@ test('a manual start refuses a verified record that names a DIFFERENT port', { t
   await listenOn(holder, port);
 
   try {
-    const identity = await processLstart(unrelated);
-    assert.ok(identity);
-    await writeServerRecordFile(dir, unrelated, otherPort, identity);
+    await writeServerRecordFile(dir, unrelated, otherPort, await verifiedRecordFields(unrelated));
 
     const result = await ensureDevServer(url, { dir, timeoutMs: 3_000, ownedOnly: true });
 
@@ -745,7 +799,7 @@ test('a manual start refuses a verified record that names a DIFFERENT port', { t
     assert.match(result.error ?? '', /port \d+ is already in use by another process/);
   } finally {
     try {
-      process.kill(-unrelated, 'SIGKILL');
+      killGroup(unrelated);
     } catch {
       /* already gone */
     }
@@ -799,8 +853,8 @@ test('a start for a different port is refused while the recorded server is live;
   const urlY = `http://127.0.0.1:${portY}/`;
   // X ignores SIGTERM so its stop exercises the full SIGTERM->SIGKILL path,
   // proving the ORIGINAL group is still reachable through its record.
-  const commandX = `node -e 'require("fs").writeFileSync("${xPidFile}",""+process.pid);process.on("SIGTERM",function(){});require("http").createServer(function(q,s){s.end("X")}).listen(${portX},"127.0.0.1");setTimeout(function(){},60000)'`;
-  const commandY = `node -e 'require("fs").writeFileSync("${yPidFile}",""+process.pid);require("http").createServer(function(q,s){s.end("Y")}).listen(${portY},"127.0.0.1")'`;
+  const commandX = nodeE(`require("fs").writeFileSync("${xPidFile}",""+process.pid);process.on("SIGTERM",function(){});require("http").createServer(function(q,s){s.end("X")}).listen(${portX},"127.0.0.1");setTimeout(function(){},60000)`);
+  const commandY = nodeE(`require("fs").writeFileSync("${yPidFile}",""+process.pid);require("http").createServer(function(q,s){s.end("Y")}).listen(${portY},"127.0.0.1")`);
 
   let pgidX = 0;
   let pgidY = 0;
@@ -852,7 +906,7 @@ test('a start for a different port is refused while the recorded server is live;
     for (const pgid of [pgidX, pgidY]) {
       if (pgid > 0) {
         try {
-          process.kill(-pgid, 'SIGKILL');
+          killGroup(pgid);
         } catch {
           /* already gone */
         }
@@ -870,9 +924,10 @@ test('a start for a different port refuses to overwrite an UNVERIFIABLE live rec
 
   // A live group this service cannot verify (hand-written record, no
   // fingerprint) names a different port; overwriting it would make the group
-  // unstoppable forever.
+  // unstoppable forever. FORK-WIN: a win32 record verifies through the port
+  // owner, and the recorded port here is free — the same unverifiable shape.
   const unrelated = await liveGroupLeader();
-  await writeServerRecordFile(dir, unrelated, portRecorded);
+  await writeServerRecordFile(dir, unrelated, portRecorded, process.platform === 'win32' ? { platform: 'win32' } : {});
 
   try {
     const result = await ensureDevServer(urlTarget, { dir, timeoutMs: 3_000 });
@@ -889,7 +944,7 @@ test('a start for a different port refuses to overwrite an UNVERIFIABLE live rec
     assert.equal(groupGone(unrelated), false, 'the live group was never touched');
   } finally {
     try {
-      process.kill(-unrelated, 'SIGKILL');
+      killGroup(unrelated);
     } catch {
       /* already gone */
     }
