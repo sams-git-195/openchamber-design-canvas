@@ -13,6 +13,7 @@
 // and `browser.snapshot` report just the viewport they are looking at. After a
 // matrix walk the previous viewport is restored.
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 
 import {
@@ -129,6 +130,28 @@ function projectDir(context: BrowserProviderContext): string | null {
   return dir && path.isAbsolute(dir) ? dir : null;
 }
 
+/**
+ * Canvas workspace dir fallback chain (spec §B): the request's own dir when it
+ * carries a `.design-studio.json` (the workspace marker name is deliberately
+ * NOT renamed — decision 1), else the dir the service recorded from the last
+ * `openWorkspace` call, else the request dir unchanged.
+ */
+function resolveDir(context: BrowserProviderContext, browser: Browser): string | null {
+  const explicit = projectDir(context);
+  if (explicit && existsSync(path.join(explicit, '.design-studio.json'))) return explicit;
+  const workspace = browser.currentWorkspaceDir();
+  if (workspace) return workspace;
+  return explicit;
+}
+
+/** The optional `screen` parameter every canvas action accepts (default: the
+ *  active artboard). Invalid shapes are ignored, same as the SDK treats all
+ *  unknown parameter fields. */
+function requestScreen(parameters: unknown): string | undefined {
+  const screen = (parameters as { screen?: unknown } | null)?.screen;
+  return typeof screen === 'string' && screen ? screen : undefined;
+}
+
 function requireSelector(value: string | undefined, action: string): string {
   if (!value || !value.trim()) {
     throw new ActionError(`The ${action} action needs a CSS selector; pass one in "selector".`);
@@ -226,13 +249,18 @@ async function handleResize(
 
 async function handleOpen(
   browser: Browser,
-  params: { url: string; viewport?: BrowserViewportMode },
+  params: { url: string; viewport?: BrowserViewportMode; screen?: string },
   dir: string | null,
 ): Promise<BrowserProviderResult> {
   // Navigate FIRST: the window is launched lazily at the real URL (never
   // about:blank), so the browser only has a session — and can be resized —
-  // after navigate() has run.
-  const nav = await browser.navigate(params.url);
+  // after navigate() has run. `screen` names the artboard to navigate;
+  // undefined keeps the active screen (or the legacy single 'preview').
+  const nav = await browser.navigate(params.screen, params.url);
+  // An explicit open target becomes the focused artboard: the matrix walk,
+  // stable mode and viewport that follow all operate on the ACTIVE screen, and
+  // the agent asked to open THIS one.
+  if (params.screen) await browser.setActive(params.screen);
   if (params.viewport) {
     const size = MODE_SIZES[params.viewport];
     if (size) await browser.resize(size.width, size.height);
@@ -289,7 +317,9 @@ function problemsFromGates(
       problems.push({
         level: finding.severity === 'P0' ? 'error' : 'warning',
         message: `${finding.gate} ${finding.id}: ${finding.message}`,
-        source: 'design-studio',
+        // FORK-MERGE(spec §1): renamed from 'design-studio' with the identity
+        // switch to Design Canvas.
+        source: 'design-canvas',
       });
       if (problems.length >= MAX_PROBLEMS) return problems;
     }
@@ -584,7 +614,14 @@ export async function handleBrowserControl(
 
   try {
     const browser = await ensureBrowser();
-    const dir = projectDir(request.context);
+    const dir = resolveDir(request.context, browser);
+    // Every action accepts an optional `screen`; the default is the active
+    // artboard, and a named screen becomes active first so the whole
+    // verification/navigation machinery (which is active-screen-only in v1)
+    // operates on it. `browser.open` carries its own screen to navigate()
+    // instead, because a cold launch has no artboards to activate yet.
+    const screen = requestScreen(request.parameters);
+    if (screen && request.action !== 'browser.open') await browser.setActive(screen);
 
     switch (request.action) {
       case 'browser.open':
@@ -613,9 +650,11 @@ export async function handleBrowserControl(
     const detail = error instanceof Error ? error.message : 'unknown error';
     // A not-started browser is the common case: the window launches lazily, so
     // any action before browser.open has no session to act on.
-    const hint = /not started|no attached session/i.test(detail)
-      ? 'No live window is open yet — call browser.open with a url first.'
-      : 'Make sure Chrome is installed, then try again.';
+    const hint = /unknown screen/i.test(detail)
+      ? 'Name a screen the canvas lists (GET /state), or omit "screen" to act on the active artboard.'
+      : /not started|no attached session/i.test(detail)
+        ? 'No live window is open yet — call browser.open with a url first.'
+        : 'Make sure Chrome is installed, then try again.';
     return fail(`The browser action failed: ${detail}. ${hint}`);
   }
 }

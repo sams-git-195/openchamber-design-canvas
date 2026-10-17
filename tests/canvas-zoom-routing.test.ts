@@ -8,6 +8,7 @@ import { Browser } from '../service/browser.ts';
 
 const source=await readFile(new URL('../service/browser.ts',import.meta.url),'utf8');
 const bridge=source.match(/const ARTIFACT_BRIDGE = `([\s\S]*?)`;[\s\S]*?const ARTIFACT_SCRIPTS/)![1]!;
+const shellBridge=source.match(/const SHELL_BRIDGE = `([\s\S]*?)`;/)![1]!;
 type EventData=Record<string,any>;
 function child(){
   const handlers=new Map<string,Array<{callback:(event:EventData)=>void;options:any}>>();
@@ -33,12 +34,23 @@ function backend(rect={x:120,y:80,width:640,height:400}){
   let current={session:'artifact',frame:'owned-frame',id:7,unique:'document-a'};
   const handlers=new Map<string,(params:EventData,session?:string)=>void>();
   const calls:EventData[]=[];
-  b.contexts={artifact:()=>current,shell:()=>null,matches:(record:any,session:string,id:number)=>record===current&&session===current.session&&id===current.id};
+  // Multi-frame stub (spec §D): the artboard 'home' is the active screen; the
+  // context authority resolves screen ids through screenForContext, exactly as
+  // ArtifactContexts does against real frames.
+  b.contexts={
+    artifact:(id?:string)=>(id??'home')==='home'?current:undefined,
+    shell:()=>null,
+    screenForContext:(session:string|undefined,id:number)=>session==='artifact'&&id===current.id?'home':null,
+    matches:(record:any,session:string,id:number)=>record===current&&session===current.session&&id===current.id,
+  };
+  b.activeScreenId='home';
+  b.screens=new Map([['home',{id:'home',url:'http://fixture/',liveUrl:'http://fixture/',title:'Home',liveTitle:'',width:1280,height:800,state:'ready',message:''}]]);
+  b.screenOrder=['home'];
   const dimensions=Object.freeze({width:1280,height:800,dpr:1,font:'16px',uuid:'document-a',toolbarHeight:40});
   const frame={clientWidth:dimensions.width,clientHeight:dimensions.height,getBoundingClientRect:()=>rect};
   const canvas={getBoundingClientRect:()=>({x:20,y:40,width:800,height:600})};
   const api={zoomCamera:(event:EventData)=>{calls.push(event);return true;}};
-  b.shellEval=async(expression:string)=>runInNewContext(expression,{document:{getElementById:(id:string)=>id==='preview'?frame:canvas},__dsCanvas:api,Number});
+  b.shellEval=async(expression:string)=>runInNewContext(expression,{document:{getElementById:(id:string)=>id==='ds-frame-home'?frame:canvas},__dsCanvas:api,Number});
   b.wireEvents({on:(name:string,callback:any)=>{handlers.set(name,callback);return()=>undefined;}});
   const send=(value:EventData)=>handlers.get('Runtime.bindingCalled')!({name:'__dsArtifactEvent',payload:JSON.stringify(value),executionContextId:7},'artifact');
   const flush=async()=>{await b.operationTail;await Promise.resolve();};
@@ -50,6 +62,17 @@ test('unit oracle qualification: finite frame geometry, exact anchor hit and app
   assert.equal(owned.defaultPrevented,true);assert.equal(c.messages.length,0);
   const b=backend();assert.equal(b.dimensions.width,1280);assert.equal(b.dimensions.dpr,1);
   assert.ok(Number.isFinite(640)&&640>0);assert.equal(Number.isFinite(Infinity),false);
+});
+
+test('SHELL_BRIDGE is syntactically valid and carries the v2 artboard contract',()=>{
+  // The bridge is injected via Runtime.evaluate; a syntax slip here breaks
+  // every canvas, so parse it exactly as the shell would. new Function only
+  // parses (it is never invoked), so this is a pure syntax gate.
+  assert.doesNotThrow(() => new Function(shellBridge));
+  assert.match(shellBridge, /data-ds-screen/, 'the bridge resolves artboards by data-ds-screen');
+  assert.match(shellBridge, /type:'screen-pick'/, 'artboard picks report through the §C screen-pick message');
+  assert.doesNotMatch(shellBridge, /getElementById\('preview'\)/, 'the v1 single-frame lookup is gone');
+  assert.doesNotMatch(shellBridge, /frame\.name=/, 'the post-load naming loop is deleted (name is static markup now)');
 });
 
 test('artifact Cmd/Ctrl zoom keys emit camera actions and prevent native defaults without claiming literal text',()=>{
