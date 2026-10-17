@@ -1,5 +1,5 @@
 /** This function must remain self-contained for server-side source serialization. */
-export type CanvasScreenConfig = { id: string; url: string; width: number; height: number; title: string };
+export type CanvasScreenConfig = { id: string; url: string; width: number; height: number; title: string; x?: number | null; y?: number | null };
 export function initCanvas(initialConfig: {
   screens?: readonly CanvasScreenConfig[];
   viewport?: { width: number; height: number };

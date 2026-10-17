@@ -23,7 +23,9 @@ test('renderer bakes one artboard per screen with hardening attributes and never
   assert.doesNotMatch(rendered, /allow-top-navigation/);
   assert.doesNotMatch(rendered, /id="preview"/);
   assert.match(rendered, /class="ds-ab-title"/);
-  assert.match(rendered, /class="ds-ab-size">1280 × 800</);
+  assert.match(rendered, /class="ds-ab-size">1280×800</);
+  assert.match(rendered, /class="ds-ab-title">1 · Home<\/button>/);
+  assert.match(rendered, /class="ds-ab-title">2 · Checkout<\/button>/);
   assert.doesNotMatch(rendered, /srcdoc|contentDocument|contentWindow\.document|fixtureDocument|Fieldnotes|DEMO/);
   assert.match(rendered, /frame\.src\s*=/);
   assert.doesNotMatch(rendered, /<script[^>]+src=|<link[^>]+href=/);
@@ -80,13 +82,27 @@ test('canvas mode is baked and only edit or play survive', () => {
   assert.match(html({ mode: 'sideways' as never }), /id="canvas" class="canvas" data-mode="edit"/);
 });
 
+test('the bake places positioned screens at their view.json coordinates and flows the rest', () => {
+  const rendered = html({ screens: [{ ...home }, { ...other, x: 500, y: 700 }] });
+  assert.match(rendered, /data-screen="home"[^>]*style="left:0px;top:0px;width:1280px;height:800px"/);
+  assert.match(rendered, /data-screen="other"[^>]*style="left:500px;top:700px;width:768px;height:1024px"/);
+  // bbox spans max(1280, 500+768) x max(800, 700+1024)
+  assert.match(rendered, /id="camera"[^>]*style="width:1280px;height:1724px"/);
+  // explicit null = auto flow, still first-painted from the bake
+  const auto = html({ screens: [{ ...home, x: null, y: null }, { ...other, x: null, y: null }] });
+  assert.match(auto, /data-screen="other"[^>]*style="left:1328px;top:0px;width:768px;height:1024px"/);
+  // one-sided or non-finite prescriptions are refused, never silently baked
+  assert.throws(() => html({ screens: [{ ...home, x: 100 }] }), /both/i);
+  assert.throws(() => html({ screens: [{ ...home, x: Infinity, y: 0 }] }), /finite/i);
+});
+
 test('rendered client exposes the CDP contract and the approved narrow outbound mode commands', () => {
   const rendered = html();
   for (const name of ['setScreens', 'setMode', 'setActive', 'getActive', 'setScreenState', 'fitAll', 'focusScreen', 'zoomToScreen', 'getScreens',
     'setViewport', 'setStatus', 'setPage', 'getCamera', 'restoreCamera', 'dismissMenu', 'beginCapture', 'normalizeCapture', 'endCapture']) assert.ok(rendered.includes(name), name);
   assert.match(rendered, /window\.__dsCanvasSend/);
   assert.doesNotMatch(rendered, /host\.attach|fetch\(|XMLHttpRequest|WebSocket|localStorage/);
-  for (const type of ['ready', 'page', 'retry', 'layout', 'fit-size', 'screen-pick', 'screen-activate', 'mode-request']) assert.ok(rendered.includes(`'${type}'`), type);
+  for (const type of ['ready', 'page', 'retry', 'layout', 'fit-size', 'screen-pick', 'screen-activate', 'mode-request', 'screen-move', 'camera-changed']) assert.ok(rendered.includes(`'${type}'`), type);
 });
 
 function clientFunction(name: string): string {
@@ -169,7 +185,14 @@ test('live readiness is backend-reported, not inferred from the iframe load even
   // The controller waits for the toolbar's mounted hook, never for a frame's
   // load event; the compiled bundle's own load listeners are library internals.
   const controller = [...rendered.matchAll(/<script>([\s\S]*?)<\/script>/g)][0]![1]!;
-  assert.doesNotMatch(controller, /frame\.onload\s*=|addEventListener\(['"]load['"]/);
+  assert.doesNotMatch(controller, /frame\.onload\s*=/);
+  // The only frame 'load' listener is the P2 src-sync (seam 3): it may touch
+  // bookkeeping, never status/state -- readiness stays service-driven.
+  for (const match of controller.matchAll(/addEventListener\(['"]load['"]/g)) {
+    const site = match.index ?? 0;
+    assert.match(controller.slice(site, site + 560), /s\.src\s*=/, 'frame load listeners only sync src');
+    assert.doesNotMatch(controller.slice(site, site + 560), /setScreenState|renderBoardState|setStatus|state\s*=\s*['"]ready/);
+  }
   for (const state of ['loading', 'ready', 'empty', 'error']) assert.ok(rendered.includes(`'${state}'`));
   assert.match(rendered, /allows embedding/);
   assert.match(rendered, /15000/);

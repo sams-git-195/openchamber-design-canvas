@@ -4,7 +4,7 @@ export function initCanvas(initialConfig) {
   const $ = id => document.getElementById(id);
   const canvas = $('canvas'), camera = $('camera');
   const presets = {desktop:{width:1280,height:800},large:{width:1920,height:1080},tablet:{width:768,height:1024},mobile:{width:390,height:844}};
-  const GRID_GAP=48, MIN_EXTENT=64, MAX_EXTENT=65536, MAX_SCREENS=12;
+  const GRID_GAP=48, FLOW_BUDGET=3200, POS_CLAMP=32768, MIN_EXTENT=64, MAX_EXTENT=65536, MAX_SCREENS=12, EMIT_DEBOUNCE_MS=400;
   const SCREEN_ID=/^[a-z0-9][a-z0-9-]{0,30}$/;
   const BOARD_COPY={loading:'Loading this screen.',ready:'',error:'This screen could not be displayed. Check that the dev server is running and the page allows embedding.'};
   const bootConfig=initialConfig||{};
@@ -13,7 +13,8 @@ export function initCanvas(initialConfig) {
   const boards = new Map();
   const view = {width:0,height:0,nominalHeight:Number.isInteger(bootConfig.viewport&&bootConfig.viewport.height)?bootConfig.viewport.height:800,layoutMode:'viewport',reason:'',preset:'desktop',mode:'fit',scale:1,panX:0,panY:0,pan:false,space:false,ready:false};
   let openMenu = null, drag = null, slowTimer = null, statusState = 'loading', message = '';
-  let captureState = null, captureSequence = 0, repaintPending = false, lastTap = null;
+  let captureState = null, captureSequence = 0, repaintPending = false, lastTap = null, boardDrag = null, boardDragSquelch = false;
+let cameraTimer = null, applyingCamera = false, lastCameraSent = null, lastPositions = new Map();
   // Geometry constants from the original camera, not toolbar/theme tokens.
   const numToken = name => name === '--s7' ? 48 : name === '--pan-step' ? 32 : parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
   const finite = n => typeof n === 'number' && Number.isFinite(n);
@@ -34,26 +35,48 @@ export function initCanvas(initialConfig) {
   function announce(text){$('announcement').textContent=text;}
   function validUrl(value){try{const u=new URL(value);return ['http:','https:'].includes(u.protocol)&&!u.username&&!u.password?u.href:null;}catch{return null;}}
   function clampExtent(value){return value===0?0:Math.max(MIN_EXTENT,Math.min(MAX_EXTENT,value));}
+const clampPos=n=>Math.round(Math.max(-POS_CLAMP,Math.min(POS_CLAMP,n)));
   function validScreen(item){
     if(!item||typeof item!=='object'||typeof item.id!=='string'||!SCREEN_ID.test(item.id))return null;
     const url=validUrl(item.url);if(!url)return null;
     if(!Number.isInteger(item.width)||item.width<200||item.width>8192||!Number.isInteger(item.height)||item.height<200||item.height>8192)return null;
     const title=typeof item.title==='string'&&item.title.trim()?item.title.trim().slice(0,120):item.id;
-    return {id:item.id,url,width:item.width,height:item.height,title};
+    // Positions are camera-space natural px: absent = auto-grid, null = back to
+    // auto, a numeric pair = placed (finite, clamped to +-POS_CLAMP, rounded).
+    // One-sided or junk values refuse the whole list -- setScreens stays honest.
+    if(item.x!==undefined||item.y!==undefined){
+      const pair=typeof item.x==='number'&&Number.isFinite(item.x)&&typeof item.y==='number'&&Number.isFinite(item.y);
+      if(!pair&&!(item.x===null&&item.y===null))return null;
+    }
+    const x=typeof item.x==='number'?clampPos(item.x):null,y=typeof item.y==='number'?clampPos(item.y):null;
+    return {id:item.id,url,width:item.width,height:item.height,title,x,y};
   }
-  // Grid model: artboards live at NATURAL px inside camera space; camera scale is
-  // a transform only and never multiplies into these layout numbers.
-  function gridBounds(list){
+  // Placement model: positioned screens keep their camera-space x/y exactly;
+  // unpositioned screens flow in array order (row budget FLOW_BUDGET, gap
+  // GRID_GAP). The auto flow is computed as if only unpositioned screens
+  // existed, so positioned siblings never consume or disturb auto slots.
+  function placeScreens(list){
     const n=list.length;
     if(!n)return {width:0,height:0,cells:[],centers:new Map()};
-    const cols=Math.max(1,Math.ceil(Math.sqrt(n))),rows=Math.ceil(n/cols);
-    const colW=new Array(cols).fill(0),rowH=new Array(rows).fill(0);
-    for(let i=0;i<n;i++){const c=i%cols,r=Math.floor(i/cols);if(list[i].width>colW[c])colW[c]=list[i].width;if(list[i].height>rowH[r])rowH[r]=list[i].height;}
-    const colX=[],rowY=[];let x=0;for(let c=0;c<cols;c++){colX.push(x);x+=colW[c]+GRID_GAP;}
-    let y=0;for(let r=0;r<rows;r++){rowY.push(y);y+=rowH[r]+GRID_GAP;}
-    const cells=[],centers=new Map();
-    for(let i=0;i<n;i++){const c=i%cols,r=Math.floor(i/cols);cells.push({x:colX[c],y:rowY[r]});centers.set(list[i].id,{x:colX[c]+list[i].width/2,y:rowY[r]+list[i].height/2});}
-    return {width:x-GRID_GAP,height:y-GRID_GAP,cells,centers};
+    const auto=[],cells=new Array(n);
+    for(let i=0;i<n;i++){
+      if(list[i].x===null||list[i].y===null)auto.push(i);else cells[i]={x:list[i].x,y:list[i].y};
+    }
+    let cursorX=0,cursorY=0,rowBottom=0;
+    for(const i of auto){
+      if(cursorX>0&&cursorX+list[i].width>FLOW_BUDGET){cursorX=0;cursorY=rowBottom+GRID_GAP;}
+      cells[i]={x:cursorX,y:cursorY};
+      cursorX+=list[i].width+GRID_GAP;
+      rowBottom=Math.max(rowBottom,cursorY+list[i].height);
+    }
+    let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+    const centers=new Map();
+    for(let i=0;i<n;i++){
+      const c=cells[i],s=list[i];
+      minX=Math.min(minX,c.x);minY=Math.min(minY,c.y);maxX=Math.max(maxX,c.x+s.width);maxY=Math.max(maxY,c.y+s.height);
+      centers.set(s.id,{x:c.x+s.width/2,y:c.y+s.height/2});
+    }
+    return {width:maxX-minX,height:maxY-minY,cells,centers};
   }
   function renderBoardState(b,s){
     b.overlay.hidden=s.state==='ready';b.overlay.dataset.state=s.state;
@@ -61,10 +84,35 @@ export function initCanvas(initialConfig) {
     b.action.hidden=s.state!=='error';
   }
   function wireBoard(id,b){
-    b.title.onclick=()=>transaction(()=>applyActive(id,true));
+    b.title.onclick=()=>{if(boardDragSquelch){boardDragSquelch=false;return;}transaction(()=>applyActive(id,true));};
+    b.title.addEventListener('pointerdown',e=>{
+      if(captureState||!e||e.button!==0)return;
+      const s=screens.find(x=>x.id===id);if(!s)return;
+      const placed=lastPositions.get(id);if(!placed)return;
+      // D14 risk 5: bind the camera scale at pointerdown so a zoom racing the
+      // drag can never jitter the deltas; live drag stays in-memory only.
+      e.preventDefault();e.stopPropagation();
+      if(typeof b.title.setPointerCapture==='function')b.title.setPointerCapture(e.pointerId);
+      boardDrag={id,moved:false,startX:e.clientX,startY:e.clientY,originX:placed.x,originY:placed.y,scale:view.scale||1,wasAuto:s.x===null||s.y===null};
+    });
     b.action.onclick=()=>transaction(()=>retryScreen(id));
     b.section.ondblclick=e=>{if(e&&typeof e.preventDefault==='function')e.preventDefault();transaction(()=>{if(applyActive(id,true))focusScreen(id);});};
-    b.frame.addEventListener('error',()=>transaction(()=>{const s=screens.find(s=>s.id===id);if(s&&s.state==='ready')setScreenStateCore(id,{state:'error'});}));
+    b.frame.addEventListener('load',()=>{
+      // Seam 3: keep s.src mirrored to what the frame actually shows. A
+      // setPage({navigate:false}) confirmation (in-frame navigation) then no
+      // longer leaves s.src stale, so a later relayout cannot rewrite the
+      // iframe.src to the URL it is already displaying (duplicate load).
+      const s=screens.find(x=>x.id===id);if(!s)return;
+      const current=typeof b.frame.src==='string'?b.frame.src:'';
+      if(current&&current!=='about:blank'&&s.src!==current)s.src=current;
+    });
+    b.frame.addEventListener('error',()=>transaction(()=>{
+      const s=screens.find(x=>x.id===id);if(!s||s.state!=='ready')return;
+      // Seam 5: never clobber a specific service message with the generic
+      // BOARD_COPY text; pass whatever the service already said through.
+      const existing=typeof s.message==='string'&&s.message?s.message:BOARD_COPY.error;
+      setScreenStateCore(id,{state:'error',message:existing});
+    }));
   }
   // The renderer bakes the initial artboards into CANVAS_MARKUP; adopt them so a
   // first setScreens never duplicates a board or reloads a src that already matches.
@@ -100,9 +148,10 @@ export function initCanvas(initialConfig) {
     return board;
   }
   function relayout(){
-    const layout=gridBounds(screens);
+    const layout=placeScreens(screens);
     view.width=clampExtent(layout.width);view.height=clampExtent(layout.height);
     cellCenters=layout.centers;
+    lastPositions=new Map(screens.map((s,i)=>{const c=layout.cells[i];return [s.id,{x:c.x,y:c.y}];}));
     const live=new Set(screens.map(s=>s.id));
     for(const [id,b] of [...boards]){if(!live.has(id)){b.section.remove();boards.delete(id);}}
     // Stray baked artboards (ids the service removed before this controller ever
@@ -116,15 +165,21 @@ export function initCanvas(initialConfig) {
       if(!b){
         b=adoptBoard(s.id);
         if(!b){b=createBoard(s.id);camera.appendChild(b.section);}
-        else{const baked=b.frame.getAttribute?b.frame.getAttribute('src')||'':'';if(baked===s.url)s.src=s.url;}
         boards.set(s.id,b);
       }
       b.section.dataset.screen=s.id;
       b.section.style.left=cell.x+'px';b.section.style.top=cell.y+'px';
       b.section.style.width=s.width+'px';b.section.style.height=s.height+'px';
       b.section.dataset.active=s.id===active?'true':'false';
-      b.title.textContent=s.title;b.size.textContent=s.width+' × '+s.height;
-      if(s.url&&s.src!==s.url){b.frame.src=s.url;s.src=s.url;}
+      b.title.textContent=(i+1)+' · '+s.title;b.size.textContent=s.width+'×'+s.height;
+      if(s.url&&s.src!==s.url){
+        // If the frame already shows s.url (in-frame navigation synced through
+        // the load hook) only the bookkeeping needs to move -- never rewrite
+        // the src, or the same document loads twice.
+        const current=typeof b.frame.src==='string'?b.frame.src:'';
+        if(current===s.url){s.src=s.url;}
+        else{b.frame.src=s.url;s.src=s.url;}
+      }
       renderBoardState(b,s);
     });
     view.ready=screens.length>0;
@@ -141,7 +196,24 @@ export function initCanvas(initialConfig) {
     camera.style.transform='translate('+x+'px,'+y+'px) scale('+view.scale+')';
     $('layout-reason').hidden=!(view.layoutMode==='viewport'&&view.reason);$('layout-reason').textContent=view.reason?'Viewport fallback: '+view.reason:'';
     $('pan-layer').hidden=!(view.ready&&(view.pan||view.space));
+    scheduleCameraChanged();
     publish();
+  }
+  // User camera churn (wheel/pan/drag-zoom, all funneled through paint) emits
+  // one debounced camera-changed command; service-originated camera application
+  // (restoreCamera) never echoes back as user churn.
+  function scheduleCameraChanged(){
+    if(applyingCamera||captureState)return;
+    clearTimeout(cameraTimer);
+    cameraTimer=setTimeout(emitCameraChanged,EMIT_DEBOUNCE_MS);
+  }
+  function emitCameraChanged(){
+    cameraTimer=null;
+    if(applyingCamera||captureState||!view.ready)return;
+    const camera={mode:view.mode,scale:view.scale,panX:view.panX,panY:view.panY};
+    if(lastCameraSent&&lastCameraSent.mode===camera.mode&&lastCameraSent.scale===camera.scale&&lastCameraSent.panX===camera.panX&&lastCameraSent.panY===camera.panY)return;
+    lastCameraSent=camera;
+    send({type:'camera-changed',camera:{mode:camera.mode,scale:camera.scale,panX:camera.panX,panY:camera.panY}});
   }
   function setScreensCore(list){
     if(captureState||!Array.isArray(list)||list.length>MAX_SCREENS)return false;
@@ -151,7 +223,11 @@ export function initCanvas(initialConfig) {
       const s=validScreen(item);
       if(!s||seen.has(s.id))return false;seen.add(s.id);
       const old=previous.get(s.id);
-      next.push({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:old?old.state:'loading',message:old?old.message:'',src:old?old.src:''});
+      // Absent x/y on an entry whose live screen already carries a position
+      // (user drag not yet persisted in the pushed registry) inherits it;
+      // explicit null means "back to auto" and always applies.
+      const inherit=old&&item.x===undefined&&item.y===undefined&&old.x!==null&&old.y!==null;
+      next.push({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:old?old.state:'loading',message:old?old.message:'',src:old?old.src:'',x:inherit?old.x:s.x,y:inherit?old.y:s.y});
     }
     screens=next;
     if(!screens.some(s=>s.id===active))active=screens.length?screens[0].id:'';
@@ -234,7 +310,7 @@ export function initCanvas(initialConfig) {
     publish();return true;
   }
   function setModeCore(mode){
-    if(!['edit','play'].includes(mode))return false;
+    if(captureState||!['edit','play'].includes(mode))return false;
     shellMode=mode;canvas.dataset.mode=mode;paint();
     announce(mode==='edit'?'Edit mode: clicking a screen picks that element for the chat.':'Play mode: screens accept real interaction.');
     return true;
@@ -251,7 +327,7 @@ export function initCanvas(initialConfig) {
   }
   function zoomTo(value,point){
     if(!view.ready||captureState||view.layoutMode==='fit')return;if(value==='fit'){view.mode='fit';paint();announce('Fit page width, up to 100 percent');return;}
-    const next=Number(value);if(!finite(next))return;const old=view.scale,scale=Math.min(3,Math.max(.1,next)),box=canvas.getBoundingClientRect(),px=point?point.x-box.width/2:0,py=point?point.y-box.height/2:0;
+    const next=Number(value);if(!finite(next))return;const old=view.scale,scale=Math.min(3,Math.max(.1,next)),box=canvas.getBoundingClientRect(),px=point?point.x-box.width/2:0,py=point?point.y-numToken('--s7'):0;
     view.panX=px-(px-view.panX)*scale/old;view.panY=py-(py-view.panY)*scale/old;view.scale=scale;view.mode='manual';paint();announce('Zoom '+Math.round(scale*100)+' percent');
   }
   function zoomCamera(info){
@@ -320,7 +396,7 @@ export function initCanvas(initialConfig) {
     if(e.key===' '){e.preventDefault();view.space=true;paint();}else if(e.key.toLowerCase()==='h'){e.preventDefault();setPan(!view.pan);}else if(e.key==='+'||e.key==='='){e.preventDefault();zoomTo(view.scale*1.25);}else if(e.key==='-'){e.preventDefault();zoomTo(view.scale/1.25);}else if(e.shiftKey&&(e.code==='Digit1'||e.key==='!')){e.preventDefault();zoomTo('fit');}else if(e.shiftKey&&(e.code==='Digit0'||e.key===')')){e.preventDefault();zoomTo(1);}else if(e.key.startsWith('Arrow')){e.preventDefault();moveCamera(e.key.slice(5).toLowerCase(),e.shiftKey?3:1);}
   });
   function moveCamera(direction,multiplier=1){if(!view.ready||captureState||view.layoutMode==='fit')return;view.mode='manual';const step=numToken('--pan-step')*multiplier;if(direction==='left')view.panX-=step;if(direction==='right')view.panX+=step;if(direction==='up')view.panY-=step;if(direction==='down')view.panY+=step;paint();}
-  document.addEventListener('keyup',e=>{if(e.key===' '){view.space=false;paint();}});window.addEventListener('blur',()=>{view.space=false;drag=null;lastTap=null;canvas.classList.remove('dragging');paint();});
+  document.addEventListener('keyup',e=>{if(e.key===' '){view.space=false;paint();}});window.addEventListener('blur',()=>{view.space=false;drag=null;lastTap=null;finishBoardDrag(true);canvas.classList.remove('dragging');paint();});
   function choosePreset(id){if(!view.ready||captureState||!active||!(id==='fit'||Object.hasOwn(presets,id)))return;if(id==='fit'){setLayout({mode:'fit',preset:'fit',...getFitBounds(),nominalHeight:view.nominalHeight});send({type: 'layout',mode:'fit',preset:'fit',screen:active});}else{const p=presets[id];setLayout({mode:'viewport',preset:id,width:p.width,height:p.height,nominalHeight:p.height});send({type: 'layout',mode:'page',preset:id,screen:active});}announce((id==='large'?'Desktop Large':id)+' layout');}
   canvas.addEventListener('pointerdown',e=>{if(!view.ready||view.layoutMode==='fit'||e.button!==0||e.target.closest('.state')||e.target.closest('.ds-ab-title')||e.target.closest('.ds-ab-state'))return;canvas.focus();view.mode='manual';drag={x:e.clientX,y:e.clientY,panX:view.panX,panY:view.panY,moved:false,section:e.target.closest('.ds-artboard')};canvas.setPointerCapture(e.pointerId);canvas.classList.add('dragging');e.preventDefault();});
   canvas.addEventListener('pointermove',e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if((Math.abs(dx)>4||Math.abs(dy)>4)&&!drag.moved){drag.moved=true;lastTap=null;}view.panX=drag.panX+dx;view.panY=drag.panY+dy;paint();});
@@ -336,6 +412,32 @@ export function initCanvas(initialConfig) {
     lastTap={id,at:Date.now()};
     transaction(()=>{applyActive(id,false);pickAt(section,e);});
   }canvas.addEventListener('pointerup',endDrag);canvas.addEventListener('pointercancel',endDrag);
+  // Artboard drag-reposition: pointerdown on the title bar only (shell chrome,
+  // never the iframe) -- deltas convert screen px to natural px through the
+  // scale captured at pointerdown; live move is in-memory style updates only;
+  // the pointerup commits relayout + one screen-move command.
+  function boardDragMove(e){
+    if(!boardDrag)return;
+    const dx=(e.clientX-boardDrag.startX)/boardDrag.scale,dy=(e.clientY-boardDrag.startY)/boardDrag.scale;
+    if(!boardDrag.moved&&(Math.abs(e.clientX-boardDrag.startX)>4||Math.abs(e.clientY-boardDrag.startY)>4))boardDrag.moved=true;
+    const s=screens.find(x=>x.id===boardDrag.id),b=s&&boards.get(s.id);
+    if(!s||!b)return;
+    s.x=clampPos(boardDrag.originX+dx);s.y=clampPos(boardDrag.originY+dy);
+    b.section.style.left=s.x+'px';b.section.style.top=s.y+'px';
+  }
+  function finishBoardDrag(cancelled){
+    if(!boardDrag)return;
+    const done=boardDrag;boardDrag=null;boardDragSquelch=done.moved;
+    const s=screens.find(x=>x.id===done.id);
+    if(!s)return;
+    if(!cancelled&&!done.moved)return; // a plain title click commits nothing
+    if(cancelled){s.x=done.wasAuto?null:done.originX;s.y=done.wasAuto?null:done.originY;}
+    transaction(()=>{relayout();paint();});
+    if(!cancelled)send({type:'screen-move',screen:done.id,x:s.x,y:s.y});
+  }
+  window.addEventListener('pointermove',boardDragMove);
+  window.addEventListener('pointerup',()=>finishBoardDrag(false));
+  window.addEventListener('pointercancel',()=>finishBoardDrag(true));
   function pickAt(section,e){
     const s=screens.find(s=>s.id===section.dataset.screen);if(!s)return;
     const r=section.getBoundingClientRect();
@@ -354,12 +456,24 @@ export function initCanvas(initialConfig) {
   $('state-action').onclick=()=>transaction(retry);
   window.__dsCanvas = {
     setViewport:(...args)=>transaction(()=>setViewport(...args)),setScreens:list=>transaction(()=>setScreensCore(list)),setMode:mode=>transaction(()=>setModeCore(mode)),setActive:id=>transaction(()=>applyActive(id,false)),getActive:()=>active,getMode:()=>shellMode,
-    setScreenState:(id,info)=>transaction(()=>setScreenStateCore(id,info)),fitAll:()=>transaction(()=>fitAll()),focusScreen:id=>transaction(()=>focusScreen(id)),zoomToScreen:id=>transaction(()=>focusScreen(id)),getScreens:()=>screens.map(s=>({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:s.state,message:s.message,src:s.src})),
+    setScreenState:(id,info)=>transaction(()=>setScreenStateCore(id,info)),fitAll:()=>transaction(()=>fitAll()),focusScreen:id=>transaction(()=>focusScreen(id)),zoomToScreen:id=>transaction(()=>focusScreen(id)),getScreens:()=>screens.map(s=>({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:s.state,message:s.message,src:s.src,x:s.x,y:s.y})),
     setLayout:info=>transaction(()=>setLayout(info)),getFitBounds,setStatus:info=>transaction(()=>setStatus(info)),setPage:info=>transaction(()=>setPage(info)),beginCapture,normalizeCapture,endCapture:token=>transaction(()=>endCapture(token)),zoomCamera:info=>transaction(()=>zoomCamera(info)),
     getCamera:()=>({mode:view.mode,scale:view.scale,panX:view.panX,panY:view.panY,width:screens.find(s=>s.id===active)?.width??view.width,height:screens.find(s=>s.id===active)?.height??view.height,preset:view.preset,layoutMode:view.layoutMode,nominalHeight:view.nominalHeight,reason:view.reason,gridWidth:view.width,gridHeight:view.height}),
     // width/height round-trip the ACTIVE screen size (like the old single frame);
     // the grid extent is derived from the screens list and never restored.
-    restoreCamera:state=>transaction(()=>{if(captureState||!state||!['fit','manual','fit-all'].includes(state.mode)||![state.scale,state.panX,state.panY].every(finite)||state.scale<=0)return false;if(state.layoutMode!==undefined&&!setLayout({mode:state.layoutMode,preset:state.preset,width:state.width,height:state.height,nominalHeight:state.nominalHeight,reason:state.reason||''}))return false;view.mode=state.mode;view.scale=Math.min(3,Math.max(.05,state.scale));view.panX=state.panX;view.panY=state.panY;paint();return true;}),
+    restoreCamera:state=>transaction(()=>{if(captureState||!state||!['fit','manual','fit-all'].includes(state.mode)||![state.scale,state.panX,state.panY].every(finite)||state.scale<=0)return false;
+      // Applying service-originated camera state must not echo back as user
+      // churn: suppress the debounce during application and stamp the applied
+      // values as the last-sent baseline so later paints only emit real changes.
+      applyingCamera=true;clearTimeout(cameraTimer);cameraTimer=null;
+      try{
+        if(state.layoutMode!==undefined&&!setLayout({mode:state.layoutMode,preset:state.preset,width:state.width,height:state.height,nominalHeight:state.nominalHeight,reason:state.reason||''}))return false;
+        view.mode=state.mode;view.scale=Math.min(3,Math.max(.05,state.scale));view.panX=state.panX;view.panY=state.panY;paint();return true;
+      }finally{
+        applyingCamera=false;
+        lastCameraSent={mode:view.mode,scale:view.scale,panX:view.panX,panY:view.panY};
+      }
+    }),
     dismissMenu:()=>closeMenu(),
     handleCanvasInput:event=>{if(!event||view.layoutMode==='fit'||(!view.pan&&view.layoutMode!=='page')||event.type!=='wheel')return false;return wheelInput(event.deltaX,event.deltaY,event.x,event.y,Boolean(event.zoom));}
   };
