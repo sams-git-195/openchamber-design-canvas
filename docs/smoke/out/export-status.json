@@ -1,49 +1,49 @@
 {
   "state": "done",
-  "startedAt": "2026-10-17T18:08:02.562Z",
+  "startedAt": "2026-10-17T18:15:08.278Z",
   "results": [
     {
       "screen": "home",
       "png": {
         "ok": true,
-        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-qvhhU3\\cozy-brew\\exports\\home.png"
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-2GMr94\\cozy-brew\\exports\\home.png"
       },
       "pdf": {
         "ok": true,
-        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-qvhhU3\\cozy-brew\\exports\\home.pdf"
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-2GMr94\\cozy-brew\\exports\\home.pdf"
       }
     },
     {
       "screen": "phone",
       "png": {
         "ok": true,
-        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-qvhhU3\\cozy-brew\\exports\\phone.png"
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-2GMr94\\cozy-brew\\exports\\phone.png"
       },
       "pdf": {
         "ok": true,
-        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-qvhhU3\\cozy-brew\\exports\\phone.pdf"
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-2GMr94\\cozy-brew\\exports\\phone.pdf"
       }
     },
     {
       "screen": "tall",
       "png": {
         "ok": true,
-        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-qvhhU3\\cozy-brew\\exports\\tall.png"
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-2GMr94\\cozy-brew\\exports\\tall.png"
       },
       "pdf": {
         "ok": true,
-        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-qvhhU3\\cozy-brew\\exports\\tall.pdf"
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-2GMr94\\cozy-brew\\exports\\tall.pdf"
       }
     },
     {
       "screen": "about",
       "png": {
         "ok": true,
-        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-qvhhU3\\cozy-brew\\exports\\about.png"
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-2GMr94\\cozy-brew\\exports\\about.png"
       },
       "pdf": {
         "ok": true,
-        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-qvhhU3\\cozy-brew\\exports\\about.pdf"
+        "file": "C:\\Users\\samhe\\AppData\\Local\\Temp\\ds-smoke-2GMr94\\cozy-brew\\exports\\about.pdf"
       }
     }
   ]

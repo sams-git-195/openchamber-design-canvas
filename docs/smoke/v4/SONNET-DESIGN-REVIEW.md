@@ -1,0 +1,74 @@
+# Design Canvas — design smoke review (Sonnet 5.5)
+
+Reviewer role: demanding designer, not a code reviewer. Branch `canvas-fork` @ a33850f, Windows 11, real Chrome.
+Method: `node docs/smoke/run-smoke.mjs` (20/20, fresh `docs/smoke/v4/*.png`), then five deeper probes driven over CDP
+against a live service (scratch scripts in `%TEMP%\dc-design-review`, no repo edits, no git). Evidence in
+`docs/smoke/v4/showcase/` (see its README). No code was changed.
+
+## Verdict
+
+**It is recognisably Claude Design in structure and ~70 % of the way in feel.** The art-wall, dot grid, live artboards,
+Edit/Play, hover-before-click, pick→toast, context menu, per-artboard errors and fit-all default are all there and mostly
+work first time. What stops it feeling *finished* is a cluster of small, visible rough edges that a designer hits within
+five minutes: ghost hover outlines, a context menu that falls off the window, headers that overprint each other, a toolbar
+that breaks on a long title, an active outline that disappears at fit-all, and a dot grid you cannot see.
+
+| Axis | Score | One-line justification |
+|---|---|---|
+| **Look** | **7 / 10** | Palette, shadows, header type, counter-scaled labels (13 px at every zoom, verified) and the hover/pick overlays are on-brand; fit-all framing is good. Loses points for the near-invisible dot grid, 0.6 px active outline at fit-all, header/size-label collisions, bare-text "Retry", flat 8-item menu with no grouping. |
+| **Feel** | **6 / 10** | Hover appears in 29–65 ms, rename converges in 0.3 s, reset-position in 0.1 s, in-frame navigation in 0.8 s — fast. But stale hover outlines accumulate as you move between artboards, the menu can clip off-screen, and play mode never moves the active outline to the artboard you are actually using. |
+| **Trust** | **6 / 10** | Core promises held in every controlled run: sizes never changed after activation, exports are exact, nothing the agent wrote was lost, a dead server never blanked the grid. One unexplained intermittent: edit-mode click that never reached `/picks` (see F5) — a silent miss is the most trust-damaging failure this product can have. |
+
+## Smoke result
+
+`SMOKE SUMMARY: 20/20 pass, 0 skip, 0 fail` (scaffold 127.0.0.1 ✓, token bridge ✓ — body font is Inter not Times ✓, E1 sizes
+exact after activating each header ✓, 100 % zoom via toolbar ✓, pick ≤300 ms ✓, 4th screen live in 630 ms ✓, corrupt
+registry → banner → cleared ✓, export PNG IHDR == registry ✓, context menu ✓). Screenshots refreshed 20:14–20:15.
+
+## Probe outcomes
+
+| # | Probe | Result | What I observed |
+|---|---|---|---|
+| a | Play-mode click on `<a href="home.html">` inside the phone artboard | **PASS** | Navigation stayed in the artboard; `/state` url `checkout.html`→`home.html`, title "Checkout — Cozy Brew"→"brew-lab" in **812 ms**; artboard stayed 390×844; `screens.json` untouched (`file` still `checkout.html`); shell top URL unchanged. Nit: the *active* outline stays on Home while you play inside Checkout (F13). |
+| b | Edit hover → outline before click → pick → ack toast | **PASS with caveat** | Hover outline (blue `rgb(59,130,246)`, label `button#b 85×43`, rect == element rect) visible 29–65 ms after the move, before any click. Click → `/picks` entry `menu #b` in 5–12 ms; `POST /picks/ack` → bottom-centre pill `Added to chat · button#b`, gone by 2.3 s. **Caveats:** (1) hover outline of the previous artboard is never cleared (F1); (2) in 3 of ~30 attempts the click produced no pick for 6–12 s (F5). |
+| c | Context menu: rename → reset-position | **PASS** | Rename via menu → inline input → Enter: `screens.json` title changed in **109 ms**, header re-rendered in **318 ms** (`3 · Menu v2 — Seasonal`). Title-drag moved the artboard and persisted `positions.menu = {x:1981,y:323}`. Menu ▸ Reset position → artboard back to its exact auto-grid slot (Δ 0 px) in **105 ms**; view.json holds `"menu": null` (the key is nulled, not removed — F15). |
+| d | Ugly workspace (1280×800 w/ 66-char title, 8000×200, 390×844) | **PASS (didn't break) / UGLY** | Grid wrapped into a column, fit-all = **12 %**, headers counter-scaled to a true 13 px, no artboard overlap. But each header collides with its size label (3/3 `overlap:true`), and the long screen chip overflows the toolbar: native horizontal scrollbar over the toolbar and the status icon pushed off-screen (F3, F4). |
+| e | Kill dev server → error card → restart via menu | **PASS (better than expected)** | Killing the server alone changes nothing visible (loaded pages stay rendered; states stay `ready`). New screen added while dead → that artboard (only) shows the error card in 629 ms; siblings untouched. Menu ▸ Reload screen → service restarts the dev server itself → `ready` in **855 ms**. Card copy/legibility need work (F7). |
+
+## Findings
+
+Severity: **blocker** = ships broken · **major** = a designer notices in minutes, damages trust/feel · **minor** = visible, workaround
+exists · **polish** = pixel-level. No blockers found.
+
+| # | Sev | Finding | Evidence | Concrete fix |
+|---|---|---|---|---|
+| F1 | **major** | **Ghost hover outlines.** Hover artboard A, then artboard B: A's blue outline stays forever (until you hover A again and leave it). After a few moves several frames show stale outlines. Measured: hover menu → `{menu:block}`; hover checkout → `{menu:block, checkout:block}`; empty canvas → only checkout clears. | `showcase/DEFECT-hover-ghost.png`; `service/browser.ts:2403` (`runHoverLoop` sets `lastHoverScreen = target.screen` without ending the previous screen) | In `runHoverLoop`, if `lastHoverScreen && lastHoverScreen !== target.screen`, `evalIn('__dsHoverEnd()', lastHoverScreen)` first. Also end on shell `mode` change and on `captureInFlight`. Add a 2-artboard regression pin. |
+| F2 | **major** | **Context menu is not clamped to the window.** Right-click in the right/lower part of the view → menu runs 69 px past the right edge or 65 px below the bottom (Copy file path / Rename… unreachable with the mouse). | `showcase/DEFECT-context-menu-clipped.png`; `viewer-client/src/canvas-controller.js:444` (`style.left/top = x/y` raw); `service/viewer-ui.ts:186` | After append, measure and clamp: `left = min(x, innerWidth − w − 8)`, `top = min(y, innerHeight − h − 8)` (flip above the cursor if it does not fit). Re-run on resize. |
+| F3 | **major** | **Header title overprints the size label.** `max-width` of the title is the whole artboard width, so any title longer than (width − size label) runs under `390×844`. Hits long titles, renamed screens, and every narrow artboard at low zoom (`3 · Menu v2 — Seasonal` at 37 %; all three headers in the stress grid at 12 %). | `showcase/DEFECT-header-title-collision.png`, `stress-grid.png`; `service/viewer-ui.ts:157` | Reserve the label: `max-width: calc(var(--w) * var(--cam-scale) − var(--ab-size-w, 84px))` and drop the size label when `--w × cam-scale < 140px`. Or put both in one flex row (`display:flex; justify-content:space-between`) so the title is the only flexible, ellipsising child. |
+| F4 | **major** | **A long screen title breaks the toolbar.** Chips have no `max-width`/truncate; with a 66-char title the chip row pushes the zoom cluster right, a native horizontal scrollbar appears across the toolbar, and the status icon is clipped off. (The "Screens ▾" overflow only triggers at >4 screens, not by width.) | `showcase/stress-grid.png` (1263×1513, y 33–47 scrollbar; status icon missing); `viewer-client/src/Toolbar.tsx:99` | `className="max-w-[18ch] truncate"` on chips + `title=` (already there); `min-w-0 overflow-hidden` on the chip row so it can never create a scrollbar; collapse into "Screens ▾" when the row would overflow, not only at >4. |
+| F5 | **major (unexplained)** | **Intermittent silent pick miss.** In ~30 controlled edit-mode clicks, 3 produced no `/picks` entry in 6–12 s although the hover outline had just rendered on the same element (so the in-frame script and service link were alive). 12 consecutive re-runs incl. cold dev-server starts could not reproduce it; the misses all came from fresh-Chrome runs right after a dev-server kill/restart. Environment is noisy (6+ leaked dev servers and other lanes' Chromes on this box), so I can neither pin nor dismiss it — it smells like the E17 lease/bridge race. | probe logs: first (b) run `pickMs 12272`, `probes7 (b) pickMs 6156`, `p9_57012 pickMs 6128` | Ship the V4-15 `shellBridge` telemetry into the panel; make the shell show a small "Click didn't register — try again" toast when `screen-pick` gets no `__dsPick` within ~1.5 s; add the 20× cold-start hover→click loop to `run-smoke.mjs` with a per-iteration timing table. |
+| F6 | minor | **Active outline vanishes at fit-all.** The 2 px outline sits inside the camera transform, so at 37 % it renders ≈0.6 px (measured 0.59 px) and at 12 % it is gone — exactly where "which one am I on" matters most. Also dim in `02-active-phone.png`. | `service/viewer-ui.ts:154`; probe meta `outlineWidthEffective: 0.59` | Counter-scale: `outline-width: calc(2px / var(--cam-scale,1)); outline-offset: calc(2px / var(--cam-scale,1))` (same trick as the headers). |
+| F7 | minor | **Dead-server card: jargon, tiny, button-less.** Copy says "…Check the dev server and CSP/X-Frame-Options embedding permissions." for what is almost always "dev server isn't running". The card is inside the camera so its text is ≈7 px at fit-all; "Retry" is plain white text, not a button. The controller's own default copy (`BOARD_COPY.error`) is friendlier and is overridden by the service string. | `showcase/error-recovery.png`; `service/browser.ts:2630` vs `canvas-controller.js:14`; `viewer-ui.ts:167` (`.ds-ab-retry{color}` only) | Lead with the likely cause: "The dev server isn't running." + "Reload starts it." Style Retry as a `secondary` button (border, 8×14 padding); counter-scale the card (`transform: scale(1/--cam-scale)`) or show only icon + "Reload" below ~0.5 zoom. Show "Starting the dev server…" while ensureDevServer runs (V4-15). |
+| F8 | minor | **Toolbar name slot is not the workspace name.** It shows the *active screen's* title, duplicating the highlighted chip (`Menu v2 — Seasonal` twice in one row). V4-9 asked for the workspace name. | any screenshot, e.g. `pick-toast.png` top-left; `Toolbar.tsx:64-65,80` | Show the workspace/brief name (`cozy-brew`), muted; keep the active state on the chips only. |
+| F9 | polish | **Dot grid is almost invisible.** `oklch(1 0 0 / .07)` 1 px dots on `oklch(.17 0 0)`; at fit-all they land 8.9 px apart at ~7 % white — I had to zoom the PNG to find them. Claude Design's grid reads at a glance. | `canvas-fit-all.png`; `viewer-ui.ts:145` | alpha .12–.14, 1.25 px dot, fade in with zoom (`opacity ∝ clamp((scale−.25)/.5)`) so it never aliases to mush at 12 %. |
+| F10 | polish | **Context menu is a flat list.** Eight equal items, no dividers, no icons, no shortcut hints; rarely-used Reset position and Export sit between Reload and Copy path; Rename is last. | `showcase/context-menu.png`; `canvas-controller.js:15` | Group with 1 px separators: *Send to chat* │ *Zoom to screen · Reload* │ *Rename… · Reset position* │ *Export PNG · PDF · Copy file path*; add 14 px icons and right-aligned hints (`⏎`, `F`). |
+| F11 | polish | **Rename input is a fixed 220 px**, wider than the artboard at 45 % (174 px) and spills off the window; header keeps a rectangular white focus ring after Esc (06-final-overview.png "2 · Phone" double outline). | `showcase/DEFECT-rename-input-overflow.png`; `viewer-ui.ts:163`; `06-final-overview.png` | `width: min(220px, calc(var(--w)*var(--cam-scale)))` and use `:focus-visible` with a 2 px blue ring + radius 4. |
+| F12 | polish | **Registry-error banner reads like a stack trace.** `screens.json: Unexpected token 'o', …"creens":[ oops" is not valid JSON` — correct, but tells the designer nothing about their canvas (is it broken? stale?). | `showcase/registry-error-banner.png` | "screens.json has a syntax error — showing the last good version. (Unexpected token 'o' at …)", amber (`warn`) not red, since nothing is lost; keep the raw message in `title=`. |
+| F13 | polish | **Play mode doesn't move the active outline.** After clicking inside Checkout the outline stays on Home and the toolbar still says Home. | `showcase/play-clickthrough-before-after.png` | On a pointerdown inside an artboard in Play mode, send `screen-activate` (cheap, size-neutral since V4-1). |
+| F14 | polish | **New-artboard pulse is heavy.** Caught mid-fade in the smoke still as a ~16 px dark-navy slab around "About" (ring is `0 0 0 16px` in camera space, so it also scales). | `registry-error-banner.png` (About) ; `viewer-ui.ts:169` | Counter-scale and shorten: ring 0→8 px / 800 ms, plus a 1-frame fade-in of the artboard itself. |
+| F15 | polish | **Reset position nulls instead of removing the key** (`"positions":{"menu":null}`); V4-10 says "removes the key". Harmless but leaves residue in `view.json`. | probe (c) `viewResetPositions` | Delete the key in `mergeView` when value is `null`. |
+| F16 | polish | **Native scrollbar chrome inside artboards** (Tall artboard in `canvas-fit-all.png` shows a full scrollbar) and a thin white focus ring around the canvas after a click (top edge of `pick-toast.png`). Claude Design shows neither. | `canvas-fit-all.png`, `pick-toast.png` | In-frame (edit mode): `html{scrollbar-width:none}` via PICK_SCRIPT; `.canvas:focus-visible{outline:none}`. |
+| F17 | minor (hygiene) | **Dev servers are leaked.** `/close` leaves `npm run dev`/vite alive; after a handful of smoke runs there were 6+ orphaned `ds-smoke-*` vite processes (plus the two I created while probing). Not visible to the designer but eats ports (5200–5999 band) and CPU, and it was a confound while testing. | `tasklist`/CIM listing during review | Smoke `die()` should stop the workspace dev server it started; `/close` could take `{stopDevServer:true}`; reaper for `ds-smoke-*` older than 1 h. |
+
+## Top 10 by severity
+
+F1 hover ghosts · F2 menu clipped off-window · F3 header/size-label collision · F4 long title breaks toolbar ·
+F5 intermittent silent pick miss (unexplained) · F6 active outline invisible at fit-all · F7 error-card copy/legibility ·
+F8 toolbar name = active screen, not workspace · F9 dot grid too faint · F10 context menu has no grouping.
+
+## What is already right (don't touch)
+
+Counter-scaled headers (13 px rendered at 12 %, 37 %, 45 %, 100 %) · hover overlay design (outline + tint + `tag#id W×H` chip) ·
+green pick state and the bottom-centre "Added to chat · …" pill · fit-all as the default and auto-grid wrapping of absurd ratios
+· `Reset position` returning to the exact auto slot · per-artboard error isolation and one-click recovery · rename round-trip
+speed · screens.json never mutated by play-mode navigation · sizes never drifting after activation.
