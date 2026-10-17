@@ -384,6 +384,33 @@ async function applyDock(browser: Browser, host: { x: number; y: number; width: 
   }
 }
 
+/**
+ * V4-13 auto-dock (integrator decision, A's MUST 7): the panel CANNOT send a
+ * dock rect yet — the OpenChamber SDK exposes no host-window bounds API (see
+ * the FORK-MERGE in panel/main.ts; sending guest-iframe numbers would
+ * mis-dock Chrome). The spec's intent is "canvas beside the chat", so on a
+ * user-initiated open (focus:true) WITHOUT an explicit dock the service
+ * assumes the chat occupies the LEFT HALF of the available screen and docks
+ * Chrome into the remainder via the same pure dockPlacement math: it places
+ * only when the right side leaves ≥640 px (640 floor, 1440 cap), and a
+ * non-zero-origin (secondary) display simply answers null → placement is left
+ * exactly as the user put it. An explicit body dock always overrides this.
+ */
+async function applyAutoDock(browser: Browser): Promise<void> {
+  try {
+    const screen = await browser.screenAvailRect();
+    if (!screen) return;
+    const spec = dockPlacement(
+      { x: screen.x, y: screen.y, width: Math.round(screen.width / 2), height: screen.height },
+      screen.width,
+    );
+    if (!spec) return;
+    await browser.placeWindow(spec.x, spec.y, spec.width, spec.height);
+  } catch {
+    /* placement is best effort — never fails an open */
+  }
+}
+
 // ---- V4-11: the async scaffold job (E15: first-run cannot time out) ----------
 type ScaffoldJobState = 'installing' | 'booting' | 'done' | 'failed';
 type ScaffoldJob = {
@@ -1533,9 +1560,11 @@ const server = http.createServer(async (req, res) => {
           // dir's watch); the dedupe key seeds with what we just pushed.
           lastPushedRegistry = JSON.stringify(registry);
           startRegistryWatch(dirValue);
-          // V4-13 (P2): dock only on user-initiated opens (focus flag), and
-          // only when the screen really has room beside the host window.
-          if (focusRequested && dock) await applyDock(browser, dock);
+          // V4-13 (P2): dock only on user-initiated opens (focus flag). An
+          // explicit body dock wins; with none, the auto-dock heuristic docks
+          // beside the left-half "chat" — but only when dockPlacement says the
+          // right side really leaves ≥640 px (otherwise placement is untouched).
+          if (focusRequested) await (dock ? applyDock(browser, dock) : applyAutoDock(browser));
           // Same shape /state answers with: {ok, started} + BrowserState (which
           // P1-browser extends with mode/screens/activeScreen; R1/R2 add
           // modeApplied and per-screen state/message; V4 adds registryError

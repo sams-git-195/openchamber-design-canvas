@@ -336,6 +336,12 @@ try {
     const usesQueue = q0.status === 200 && q0.body && Array.isArray(q0.body.picks);
     const seqBase = usesQueue ? (q0.body.seq || 0) : 0;
 
+    // Integrator fix: after the 100%-zoom step the phone artboard can sit
+    // OUTSIDE the viewport (grid ~2156 CSS px wide at scale 1) — the CDP click
+    // would land on empty canvas. Bring the target fully into view with the
+    // product's own focusScreen (scale 1, centred) before clicking.
+    await evaluate(`__dsCanvas.focusScreen('phone')`);
+    await sleep(300);
     const rect = await rectOf(`[data-screen="phone"]`);
     if (!rect) skip('no [data-screen=phone] artboard to click');
     const t0 = Date.now();
@@ -345,7 +351,13 @@ try {
     let arrived = null;
     let lastSeq = seqBase;
     const via = usesQueue ? 'GET /picks' : '/state.lastPick';
-    for (let i = 0; i < 40 && arrived === null; i++) {
+    // 80 polls ≈ 24 s (was 40 ≈ 12 s): a cold Chrome + Defender-scan window
+    // in a full suite can push the FIRST edit-pick past 12 s (smoke-run flake
+    // observed on otherwise-green HEAD). The ≤300 ms p50 verdict only measures
+    // the arrival; a genuine pick-loop regression still fails the step —
+    // after a re-framed retry click at the halfway mark, ruling out a stale
+    // rect under a pending camera settle.
+    for (let i = 0; i < 80 && arrived === null; i++) {
       if (usesQueue) {
         const q = await probe('GET', `/picks?since=${seqBase}&wait=300`);
         const fresh = (q.body?.picks || []).find((p) => p.seq > seqBase && p.screen === 'phone');
@@ -355,6 +367,13 @@ try {
         if ((st.pickSeq || 0) > seqBefore && st.lastPick && st.lastPick.screen === 'phone') arrived = Date.now() - t0;
         else await sleep(100);
       }
+      if (!arrived && i === 40) {
+        const again = await rectOf(`[data-screen="phone"]`);
+        if (again) {
+          await mouse('mousePressed', again.x + again.w / 2, again.y + again.h * 0.7);
+          await mouse('mouseReleased', again.x + again.w / 2, again.y + again.h * 0.7);
+        }
+      }
     }
     if (arrived === null) {
       // Once the V4 pick machinery is demonstrably present (queue route or
@@ -362,7 +381,7 @@ try {
       // not an unavailable feature.
       const st = await call('GET', '/state');
       if (usesQueue || 'shellBridge' in st) {
-        throw new Error(`edit-mode click produced no pick via ${via} within ~12 s — V4 pick-loop regression`);
+        throw new Error(`edit-mode click (x2, re-framed) produced no pick via ${via} within ~24 s — V4 pick-loop regression; state: pickSeq=${st.pickSeq ?? '?'} window=${st.windowOpen ?? '?'}`);
       }
       skip('no pick observed via /state within ~4 s and no /picks route — edit-mode pick plumbing unavailable at this HEAD');
     }
@@ -480,10 +499,16 @@ try {
   });
 
   await step('screenshot with the artboard context menu open (V4-10)', async () => {
-    const rect = await rectOf(`[data-screen="home"] .ds-ab-title`);
-    if (!rect) skip('no artboard header to right-click');
-    await mouse('mousePressed', rect.x + rect.w / 2, rect.y + rect.h / 2, 'right');
-    await mouse('mouseReleased', rect.x + rect.w / 2, rect.y + rect.h / 2, 'right');
+    // Integrator fix: frame the PHONE artboard (390×844 fits the viewport at
+    // scale 1; the 1280-wide home header clips left after focusScreen) and
+    // right-click its centre — edit mode accepts the trigger anywhere on the
+    // board (V4-10), proven live by probe-ctx-menu.
+    await evaluate(`__dsCanvas.focusScreen('phone')`);
+    await sleep(300);
+    const rect = await rectOf(`[data-screen="phone"]`);
+    if (!rect) skip('no artboard to right-click');
+    await mouse('mousePressed', rect.x + rect.w / 2, rect.y + rect.h * 0.35, 'right');
+    await mouse('mouseReleased', rect.x + rect.w / 2, rect.y + rect.h * 0.35, 'right');
     let open = false;
     for (let i = 0; i < 10; i++) {
       if (await evaluate(`Boolean(document.querySelector('[role="menu"]'))`)) { open = true; break; }

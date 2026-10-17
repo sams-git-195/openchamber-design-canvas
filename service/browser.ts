@@ -1804,6 +1804,11 @@ export class Browser {
       screens: this.viewerScreens(),
       viewport: this.viewport(),
       mode: this.mode,
+      // Integrator (fit-page root cause): bake the launch kind so the shell's
+      // boot pose and the legacy fit-size channel follow it — workspace opens
+      // get V4's fit-all + silent observer; the legacy single-frame launch
+      // keeps v1's 'fit' pose and its auto-refit emit byte-identical.
+      workspace: this.workspaceMode,
     });
     const url = this.viewer.url;
     this.launchUrl = url;
@@ -1864,6 +1869,9 @@ export class Browser {
     await this.contexts.discover();
     await this.shellBridgeSettled();
     await this.contexts.initializeArtifact();
+    // Integrator (boot 'ready' race — see shellHandshakeFlush): guarantee the
+    // handshake arrives even when the page mounted before bindings propagated.
+    await this.shellHandshakeFlush();
   }
 
   /** Create a fresh page target and attach to it (last-resort fallback). */
@@ -2031,6 +2039,36 @@ export class Browser {
       catch { /* discovery in flight or the context was swapped; retry */ }
       if(Date.now()>=deadline)return false;
       await delay(50);
+    }
+  }
+  /**
+   * Integrator fix — boot `ready` race (found by the V4-4 route-live pin,
+   * failing 2/4 full-suite runs on this Windows host). Chrome is launched
+   * straight at the baked viewer URL, so the toolbar can mount and fire its
+   * ONE-SHOT `ready` (main.tsx __dsToolbarMounted) BEFORE Runtime.addBinding
+   * has propagated into the pre-existing root context — a lag this file
+   * itself documents above shellBridgeSettled. The controller's send-guard
+   * then drops that `ready` silently (readySent stays false and nothing
+   * re-invokes __dsToolbarMounted), so canvasCommand never runs and
+   * /state.shellBridge.lastCommandAt stays null for the whole session — a
+   * false E17 "lease loss" and a heartbeat-acceptance failure that showed up
+   * exactly when page-load beat attach. This flush re-invokes the guarded
+   * handshake until it reports sent: __dsToolbarMounted sends `ready` only
+   * while unsent and latches on success, so when the original arrived first
+   * this is a pure no-op; the `ready` handler (shellBridgeSettled + discover
+   * + initializeArtifact + pushes) is idempotent and reload-safe by design.
+   * Bounded (8 s) so a dead window cannot hang boot — the flush is fire-and-
+   * forget at the launch site.
+   */
+  private async shellHandshakeFlush(timeoutMs=8000):Promise<boolean>{
+    const deadline=Date.now()+timeoutMs;
+    for(;;){
+      try {
+        const sent=await this.shellEval('window.__dsToolbarMounted?window.__dsToolbarMounted():false');
+        if(sent===true)return true;
+      } catch { /* lease/discovery churn mid-boot; retry */ }
+      if(Date.now()>=deadline)return false;
+      await delay(100);
     }
   }
   /**
@@ -2966,6 +3004,22 @@ export class Browser {
     try {
       const value = await this.shellEval('window.screen&&typeof window.screen.availWidth==="number"?window.screen.availWidth:null');
       return typeof value === 'number' && Number.isFinite(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Integrator (V4-13 auto-dock): the full available-screen rect, same
+   * honesty argument as screenAvailWidth — the shell page lives on the very
+   * display the docked window will occupy. Null when no window or the browser
+   * does not report finite geometry.
+   */
+  async screenAvailRect(): Promise<{ x: number; y: number; width: number; height: number } | null> {
+    if (!this.cdp) return null;
+    try {
+      const value = await this.shellEval('window.screen&&[window.screen.availLeft,window.screen.availTop,window.screen.availWidth,window.screen.availHeight].every(n=>typeof n==="number"&&Number.isFinite(n)&&n>=0)?{x:window.screen.availLeft,y:window.screen.availTop,width:window.screen.availWidth,height:window.screen.availHeight}:null') as { x: number; y: number; width: number; height: number } | null;
+      return value !== null && typeof value === 'object' && [value.x, value.y, value.width, value.height].every((n) => Number.isFinite(n)) ? value : null;
     } catch {
       return null;
     }

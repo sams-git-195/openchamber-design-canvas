@@ -4,7 +4,7 @@ import { VIEWER_CLIENT_JS, VIEWER_CLIENT_CSS } from './viewer-assets.generated.t
 
 export type ViewerPage = { id: string; label: string; url: string };
 export type ViewerScreen = { id: string; url: string; width: number; height: number; title: string; x?: number | null; y?: number | null };
-export type ViewerConfig = { screens: ViewerScreen[]; viewport: { width: number; height: number }; mode: 'edit' | 'play' };
+export type ViewerConfig = { screens: ViewerScreen[]; viewport: { width: number; height: number }; mode: 'edit' | 'play'; /** V4 seam (integrator): true = multi-artboard workspace (fit-all boot pose, no fit-size emit); false = legacy single-frame (v1 'fit' pose + its auto-refit channel). Absent = treated as workspace. */ workspace?: boolean };
 
 const MAX_SCREENS = 12;
 const GRID_GAP = 48;
@@ -122,10 +122,12 @@ export function renderViewerHtml(config: ViewerConfig): string {
   const safeConfig: ViewerConfig = {
     screens: screens.map((s) => ({ id: s.id, url: s.url, width: s.width, height: s.height, title: s.title, ...(s.x === null ? {} : { x: s.x, y: s.y }) })),
     viewport: { width, height }, mode,
+    // Allowlisted launch kind flag (booleans only — never echoes caller junk).
+    ...(config.workspace === undefined ? {} : { workspace: config.workspace === true }),
   };
   const bootstrap = `window.__dsViewerConfig=${inlineJson(safeConfig)};(${initCanvas.toString()})(window.__dsViewerConfig);`;
   return `<!DOCTYPE html><html lang="en" class="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Design Canvas · Live screens</title>
-<style>${VIEWER_CLIENT_CSS.replace(/<\/style/gi, '<\\/style')}</style><style>${CANVAS_GEOMETRY}</style></head><body>${CANVAS_MARKUP(screens, mode)}<script>${inlineScript(bootstrap)}</script><script>${inlineScript(VIEWER_CLIENT_JS)}</script></body></html>`;
+<style>${VIEWER_CLIENT_CSS.replace(/<\/style/gi, '<\\/style')}</style><style>${CANVAS_GEOMETRY}</style></head><body>${CANVAS_MARKUP(screens, mode, config.workspace === false)}<script>${inlineScript(bootstrap)}</script><script>${inlineScript(VIEWER_CLIENT_JS)}</script></body></html>`;
 }
 
 // Canvas-only geometry. No legacy toolbar, control, typography, or palette CSS.
@@ -170,6 +172,9 @@ iframe{display:block;border:0;width:100%;height:100%}
 .canvas[data-agent-input] .ds-artboard>iframe{pointer-events:auto}
 #toolbar-status-area{position:absolute;top:0;left:0;right:0;z-index:6;display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 16px;pointer-events:none}
 #toolbar-status-area:empty{padding:0}
+/* Integrator restore (legacy bake only): the v1 visible viewport-fallback band
+   (b21378f CSS, byte-identical). Only rendered when workspace:false. */
+.fallback{position:absolute;bottom:0;left:0;max-width:100%;overflow-wrap:anywhere;pointer-events:none}
 .ds-notice{display:flex;align-items:center;gap:8px;max-width:720px;padding:6px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--foreground);font-size:13px;line-height:1.4;box-shadow:0 12px 32px rgb(0 0 0/.35)}
 .ds-notice[data-kind=error]{border-color:var(--destructive)}
 .ds-notice[data-kind=warn]{border-color:#d97706}
@@ -186,11 +191,11 @@ iframe{display:block;border:0;width:100%;height:100%}
 .sr{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 `;
 
-const CANVAS_MARKUP = (screens: readonly PlacedScreen[], mode: 'edit' | 'play'): string => {
+const CANVAS_MARKUP = (screens: readonly PlacedScreen[], mode: 'edit' | 'play', legacyReasonBand: boolean): string => {
   const layout = flowLayout(screens);
   const artboards = screens.map((screen, index) => renderArtboard(screen, layout.cells[index]!, index, index === 0)).join('');
   const zero = screens.length === 0;
   return `
-<div id="toolbar-root"></div><main id="canvas" class="canvas" data-mode="${mode}" tabindex="0" aria-label="Design canvas. Arrow keys pan. Plus and minus zoom. Shift 1 fits all screens. H toggles Pan. Double-click or press a screen title to focus it. Right-click a screen for options."><div id="toolbar-status-area"></div><div id="camera" class="camera" style="width:${layout.width}px;height:${layout.height}px">${artboards}</div><div id="pan-layer" class="pan-layer" hidden aria-hidden="true"></div><section id="state" class="state" data-state="empty"${zero ? '' : ' hidden'} aria-labelledby="state-title"><div class="state-body"><div id="spinner" role="status" aria-label="Loading screens"${zero ? ' hidden' : ''}>Loading…</div><h1 id="state-title"${zero ? '' : ' hidden'}>No screens on this canvas</h1><p id="state-copy"${zero ? '' : ' hidden'}>Ask the agent to design a screen, or retry after adding an entry to screens.json.</p><button id="state-action" hidden>Retry</button></div></section></main><div id="announcement" class="sr" aria-live="polite" aria-atomic="true"></div>
+<div id="toolbar-root"></div><main id="canvas" class="canvas" data-mode="${mode}" tabindex="0" aria-label="Design canvas. Arrow keys pan. Plus and minus zoom. Shift 1 fits all screens. H toggles Pan. Double-click or press a screen title to focus it. Right-click a screen for options."><div id="toolbar-status-area"></div><div id="camera" class="camera" style="width:${layout.width}px;height:${layout.height}px">${artboards}</div><div id="pan-layer" class="pan-layer" hidden aria-hidden="true"></div><section id="state" class="state" data-state="empty"${zero ? '' : ' hidden'} aria-labelledby="state-title"><div class="state-body"><div id="spinner" role="status" aria-label="Loading screens"${zero ? ' hidden' : ''}>Loading…</div><h1 id="state-title"${zero ? '' : ' hidden'}>No screens on this canvas</h1><p id="state-copy"${zero ? '' : ' hidden'}>Ask the agent to design a screen, or retry after adding an entry to screens.json.</p><button id="state-action" hidden>Retry</button></div></section>${legacyReasonBand ? '<p id="layout-reason" class="fallback" role="status" hidden></p>' : ''}</main><div id="announcement" class="sr" aria-live="polite" aria-atomic="true"></div>
 `;
 };

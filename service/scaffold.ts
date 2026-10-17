@@ -787,6 +787,27 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
 }
 
 /** Run `npm install` in `dir`, bounded, capturing the output for errors. */
+/**
+ * Environment for the `npm install` child. When THIS process was launched
+ * under `npm run` (the test suite, host tooling, or any npm-wrapped start),
+ * npm exports its own script-policy config as `npm_config_*` variables —
+ * including `allow_scripts` fed from the root package.json's allowScripts
+ * field. A workspace-level `npm install` then reads them as if the
+ * `--allow-scripts` FLAG had been passed and hard-fails EALLOWSCRIPTS ("not
+ * allowed in project-scoped installs"). The workspace's own package.json /
+ * .npmrc is the honest home for those entries, so the install runs with only
+ * this config family stripped; everything else is inherited untouched.
+ */
+function npmInstallEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of [
+    'npm_config_allow_scripts', 'npm_config_allow-scripts',
+    'npm_config_never_allow_scripts', 'npm_config_never-allow-scripts',
+    'npm_config_dangerously_allow_all_scripts', 'npm_config_dangerously-allow-all-scripts',
+  ]) delete env[key];
+  return env;
+}
+
 async function runNpmInstall(dir: string): Promise<{ ok: true } | { ok: false; error: string }> {
   return new Promise((resolve) => {
     let output = '';
@@ -813,8 +834,8 @@ async function runNpmInstall(dir: string): Promise<{ ok: true } | { ok: false; e
       // escapes them and cmd then execs the literal file `"npm"` (not
       // recognized). POSIX spawns `npm` directly (a shebang'd shim, no shell).
       child = win
-        ? spawn('cmd.exe', ['/d', '/s', '/c', 'npm install --no-audit --no-fund'], { cwd: dir })
-        : spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: dir });
+        ? spawn('cmd.exe', ['/d', '/s', '/c', 'npm install --no-audit --no-fund'], { cwd: dir, env: npmInstallEnv() })
+        : spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: dir, env: npmInstallEnv() });
     } catch (error) {
       finish({ ok: false, error: `could not run npm install: ${error instanceof Error ? error.message : String(error)}` });
       return;

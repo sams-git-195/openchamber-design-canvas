@@ -131,7 +131,12 @@ test('rendered client exposes the CDP contract incl. the SPEC-V4 §3 surface and
     // SPEC-V4 §3 (frozen shell->service emissions, verbatim shapes):
     'screen-hover', 'screen-hover-end', 'screen-menu', 'screen-rename']) assert.ok(rendered.includes(`'${type}'`), type);
   // REMOVED from shell emission (V4-1): the legacy layout machinery messages.
-  assert.doesNotMatch(rendered, /type:\s*'layout'|type:\s*'fit-size'|type:\s*'viewport'/);
+  // Integrator re-pin: the ONE allowed `fit-size` site is the legacy
+  // single-frame auto-refit channel (bootConfig.workspace===false gated) that
+  // keeps the pinned v1 behavior; workspace/toolbar paths emit none.
+  assert.doesNotMatch(rendered, /type:\s*'layout'|type:\s*'viewport'/);
+  assert.equal((rendered.match(/type:\s*'fit-size'/g) ?? []).length, 1, 'exactly one legacy fit-size emit site');
+  assert.match(rendered, /bootConfig\.workspace === false && view\.layoutMode === 'fit'|bootConfig\.workspace===false&&view\.layoutMode==='fit'/, 'the fit-size emit is welded to the legacy launch gate');
   // The context menu action union is the frozen §3 set.
   for (const action of ['send-to-chat', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path']) assert.ok(rendered.includes(`'${action}'`), action);
 });

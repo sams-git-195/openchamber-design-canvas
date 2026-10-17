@@ -19,11 +19,13 @@
 // a pid/pgid the OS handed to an unrelated process is never killed. The
 // service NEVER kills a pid/PGID it cannot verify as its own.
 //
-// Determinism note: a scaffolded `command` should bind all interfaces (Vite
-// `--host`, Next `-H 0.0.0.0`) because the in-app Chrome resolves `localhost`
-// to IPv4 while the dev server may bind IPv6 (`[::1]`) only. The panel already
-// surfaces that scaffold guidance, and the reachability probe here checks both
-// loopback literals so a server that came up on either one is still seen.
+// Binding note (V4-14): a scaffolded `command` binds loopback ONLY — the V4
+// scaffold ships `vite --host 127.0.0.1 --strictPort`, and nothing in this
+// product may listen beyond 127.0.0.1. The earlier advice to bind all
+// interfaces (Vite `--host`, Next `-H 0.0.0.0`) exposed workspace servers to
+// the LAN and is retired; hand-written project commands follow the same
+// loopback rule. The reachability probe here still checks both loopback
+// literals (127.0.0.1 and ::1), whichever one a server answers on.
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { createServer } from 'node:net';

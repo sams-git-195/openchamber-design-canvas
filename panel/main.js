@@ -1669,9 +1669,28 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     }
     return JSON.parse(result.body);
   }
+  var PICK_ACK_LABEL_MAX = 80;
+  function getPicks(since, waitMs) {
+    return callService("/picks", { since: String(since), wait: String(waitMs) });
+  }
+  function ackPicks(seq, label) {
+    return callService(
+      "/picks/ack",
+      void 0,
+      "POST",
+      JSON.stringify({ seq, label: label.slice(0, PICK_ACK_LABEL_MAX) })
+    );
+  }
+  function pickAckLabel(entry) {
+    const raw = entry.kind === "screen" ? `screen ${entry.screen}` : entry.selector || entry.tag || `screen ${entry.screen}`;
+    return raw.slice(0, PICK_ACK_LABEL_MAX);
+  }
+  var WORKSPACE_MISSING_CODE = "WORKSPACE_MISSING";
   var OPENING_STATUS = "Starting dev server\u2026";
   function openWorkspace(input) {
-    const payload = input.screen !== void 0 ? { dir: input.dir, screen: input.screen } : { dir: input.dir };
+    const payload = { dir: input.dir };
+    if (input.screen !== void 0) payload.screen = input.screen;
+    if (input.focus !== void 0) payload.focus = input.focus;
     return callService("/open", void 0, "POST", JSON.stringify(payload));
   }
   function closeLive() {
@@ -1695,6 +1714,14 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function focusLive() {
     return callService("/focus", void 0, "POST");
   }
+  function postAgentStatus(busy, label) {
+    const body = { busy };
+    if (label !== void 0) body.label = label.slice(0, 60);
+    return callService("/agent-status", void 0, "POST", JSON.stringify(body));
+  }
+  function syncScreens(dir) {
+    return callService("/screens/sync", void 0, "POST", JSON.stringify({ dir }));
+  }
   function getConfig(dir) {
     return callService("/config", { dir });
   }
@@ -1715,7 +1742,17 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return callService("/critique", void 0, "POST", JSON.stringify({ dir }));
   }
   function scaffoldProject(dir, spec) {
-    return callService("/scaffold", void 0, "POST", JSON.stringify({ dir, ...spec }));
+    return callService("/scaffold", void 0, "POST", JSON.stringify({ dir, ...spec, async: true }));
+  }
+  function getScaffoldStatus(job) {
+    return callService("/scaffold/status", { job });
+  }
+  function scaffoldProgressText(job) {
+    const seconds = Math.max(0, Math.round((job.elapsedMs ?? 0) / 1e3));
+    if (job.state === "installing") return `Setting up the canvas\u2026 installing (${seconds} s)`;
+    if (job.state === "booting") return `Setting up the canvas\u2026 starting the dev server (${seconds} s)`;
+    if (job.state === "done") return `Canvas workspace is ready (${seconds} s) \u2014 opening the canvas.`;
+    return `Canvas setup failed${job.error ? `: ${job.error}` : "."}`;
   }
   function normalizeDirPath(dir) {
     const text = String(dir).trim().replace(/\\/g, "/");
@@ -1793,7 +1830,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function sessionShowsDesignMode(session) {
     return Array.isArray(session.items) && session.items.some((item) => isModeChipData(item.data));
   }
-  var PICK_HINT = "\u2318-click an element to add a reference";
+  var PICK_HINT = "Click an element in edit mode to add a reference";
   function pickHintActive(state2) {
     return state2.windowOpen;
   }
@@ -1822,6 +1859,15 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     if (!state2.modeOn) return "Design Mode is off \u2014 turn it on to open the canvas";
     if (!state2.workspaceDir) return "Design session \xB7 workspace being created\u2026";
     return state2.wsReady ? `Design session \xB7 workspace ${state2.workspaceDir}` : `Design session \xB7 ${state2.workspaceDir} (no .design-studio.json url yet)`;
+  }
+  function shouldToastRegistryError(lastToastKey, registryError) {
+    const message = typeof registryError === "string" && registryError.trim() !== "" ? registryError.trim() : null;
+    if (message === null) return { toast: false, key: null };
+    if (message === lastToastKey) return { toast: false, key: lastToastKey };
+    return { toast: true, key: message };
+  }
+  function registryErrorToastMessage(registryError) {
+    return `The canvas screens registry is broken \u2014 ${registryError}`;
   }
   var NO_PROJECT_URL_MESSAGE = "No .design-studio.json url for this workspace \u2014 add one, or turn the dev server on first";
   var ATTACH_NEEDS_URL = "References need an http(s) url from .design-studio.json.";
@@ -1876,6 +1922,14 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       "```html",
       pick.outerHTML,
       "```"
+    ].join("\n");
+  }
+  function screenReferenceText(entry, pickedAt) {
+    return [
+      "Reference from Design Canvas",
+      ...pickedAt ? [`Picked at ${localTimeOf(pickedAt)}`] : [],
+      `Screen: ${entry.screen} (${entry.width}\xD7${entry.height}) \u2014 ${entry.file}`,
+      `Screen URL: ${entry.screenUrl}`
     ].join("\n");
   }
 
@@ -3755,7 +3809,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     );
     lines.push(
       "",
-      "Workflow: in the live canvas the user picks elements; each pick arrives as a reference chip with its screen id. Apply what it asks for and keep the system consistent.",
+      "Workflow: in the live canvas (edit mode) the user clicks elements; EACH click arrives as its own reference chip with its screen id. Sending a whole artboard from its menu arrives as a `Screen: <id> (<w>\xD7<h>) \u2014 <file>` chip with the screen URL \u2014 edit that file.",
       "",
       VERIFY_PROTOCOL
     );
@@ -3954,13 +4008,34 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   }
 
   // panel/attach-dialog.ts
-  function buildAttachPayload(pick, seq, url, pickedAt, screen) {
+  function buildAttachPayload(pick) {
+    if (pick.kind === "screen") {
+      const pickedAt2 = Number.isFinite(pick.at) ? new Date(pick.at) : void 0;
+      return {
+        providerId: "design-canvas",
+        id: `screen-${pick.seq}`,
+        title: `Screen \xB7 ${pick.screen}`,
+        url: pick.screenUrl,
+        text: screenReferenceText(pick, pickedAt2),
+        data: {
+          screen: pick.screen,
+          screenUrl: pick.screenUrl,
+          width: pick.width,
+          height: pick.height,
+          file: pick.file,
+          url: pick.screenUrl
+        }
+      };
+    }
+    const url = pick.screenUrl;
+    const screen = pick.screen ? { id: pick.screen, url } : void 0;
+    const pickedAt = Number.isFinite(pick.at) ? new Date(pick.at) : void 0;
     const data = {
-      selector: pick.selector,
-      tag: pick.tag,
-      classes: pick.classes,
-      snippet: pick.outerHTML,
-      styles: pick.styles,
+      selector: pick.selector ?? "",
+      tag: pick.tag ?? "",
+      classes: pick.classes ?? "",
+      snippet: pick.outerHTML ?? "",
+      styles: pick.styles ?? {},
       url
     };
     if (screen) {
@@ -3969,10 +4044,23 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     }
     return {
       providerId: "design-canvas",
-      id: `element-${seq}`,
-      title: pick.selector,
+      id: `element-${pick.seq}`,
+      title: pick.selector ?? "",
       url,
-      text: referenceText(pick, url, pickedAt, screen),
+      text: referenceText(
+        {
+          selector: pick.selector ?? "",
+          tag: pick.tag ?? "",
+          classes: pick.classes ?? "",
+          text: pick.text ?? "",
+          outerHTML: pick.outerHTML ?? "",
+          styles: pick.styles ?? {},
+          rect: pick.rect ?? { x: 0, y: 0, width: 0, height: 0 }
+        },
+        url,
+        pickedAt,
+        screen
+      ),
       data
     };
   }
@@ -4038,7 +4126,16 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     windowOpen: false,
     /** True while OUR side is bringing the window up (see openCanvasWindow). */
     pendingOpen: false,
-    lastSeq: 0,
+    /**
+     * V4-5: another panel currently claims the pick→chat bridge (`/state.bridgeActive`)
+     * — the row's pick loop HOLDS (no attach, no ack; the queue keeps everything).
+     */
+    bridgeActive: false,
+    /**
+     * V4-4: the last `/state.registryError` message we toasted while the condition
+     * held. Null clears the arm, so a fixed-then-rebroken registry toasts again.
+     */
+    registryErrorNotified: null,
     /** The live canvas controls from `GET /state` (spec §B). */
     liveMode: "edit",
     liveScreens: [],
@@ -4235,9 +4332,47 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       await host.toast({ kind: "error", message: scaffold.error });
       return { ok: false, error: scaffold.error };
     }
-    await host.toast({ kind: "success", message: `Canvas workspace created at ${dir} \u2014 served at ${scaffold.url}` });
     await maybeShowPermissionToast(dir);
-    return { ok: true, record: { dir, name }, url: scaffold.url };
+    return { ok: true, record: { dir: scaffold.dir || dir, name }, jobId: scaffold.jobId, url: scaffold.url };
+  }
+  var SCAFFOLD_POLL_MS = 2e3;
+  var SCAFFOLD_TOAST_STEP_MS = 1e4;
+  var SCAFFOLD_MAX_MS = 15 * 6e4;
+  async function runScaffoldJob(jobId, timing = {}) {
+    const pollMs = timing.pollMs ?? SCAFFOLD_POLL_MS;
+    const maxMs = timing.maxMs ?? SCAFFOLD_MAX_MS;
+    const start = Date.now();
+    let lastKey = "";
+    for (; ; ) {
+      let job;
+      try {
+        job = await getScaffoldStatus(jobId);
+      } catch (error) {
+        const message = `Canvas setup failed: the job status could not be read (${error instanceof Error ? error.message : String(error)}).`;
+        await host.toast({ kind: "error", message });
+        return { error: message };
+      }
+      if (job.state === "done") {
+        await host.toast({ kind: "success", message: scaffoldProgressText(job) });
+        return "done";
+      }
+      if (job.state === "failed") {
+        const message = scaffoldProgressText(job);
+        await host.toast({ kind: "error", message });
+        return { error: message };
+      }
+      const key = `${job.state}:${Math.floor((job.elapsedMs ?? 0) / SCAFFOLD_TOAST_STEP_MS)}`;
+      if (key !== lastKey) {
+        lastKey = key;
+        await host.toast({ kind: "info", message: scaffoldProgressText(job) });
+      }
+      if (Date.now() - start >= maxMs) {
+        const message = "Canvas setup is taking unusually long \u2014 the workspace files exist; press Start to try opening it.";
+        await host.toast({ kind: "error", message });
+        return { error: message };
+      }
+      await sleep(pollMs);
+    }
   }
   async function ensureCanvasWorkspace(brief, forSessionId = null) {
     const sessionId = forSessionId ?? state.sessionId;
@@ -4260,6 +4395,8 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     state.workspace = outcome.record;
     renderRow();
     rerender();
+    const job = await runScaffoldJob(outcome.jobId);
+    if (job !== "done") return null;
     return outcome.record;
   }
   function modeStoragePayload() {
@@ -4540,6 +4677,10 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       await host.toast({ kind: "error", message: outcome.error });
       return { kind: "failed", error: outcome.error };
     }
+    const job = await runScaffoldJob(outcome.jobId);
+    if (job !== "done") {
+      return { kind: "failed", error: job.error };
+    }
     return { kind: "new", workspace: outcome.record, url: outcome.url };
   }
   async function startNewDesign() {
@@ -4598,13 +4739,85 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       rerender();
     }
   }
-  async function addToChat(pick) {
+  async function addToChat(entry) {
     try {
-      await host.attach(buildAttachPayload(pick, pick.seq, pick.url, pick.pickedAt, pick.screen));
-      await host.toast({ kind: "success", message: "Reference added to the chat composer." });
+      await host.attach(buildAttachPayload(entry));
+      return true;
     } catch (error) {
-      await host.toast({ kind: "error", message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
+      setStatus(`Could not attach a canvas pick: ${error instanceof Error ? error.message : String(error)}`, "error");
+      return false;
     }
+  }
+  var PICK_LONG_POLL_MS = 12e3;
+  var PICK_SHORT_POLL_MS = 250;
+  var PICK_SHORT_POLL_BUDGET_MS = 3e4;
+  var PICK_HELD_POLL_MS = 900;
+  var PICK_IDLE_POLL_MS = 1e3;
+  var pickCursor = 0;
+  var pickLoopActive = false;
+  function getPickCursor() {
+    return pickCursor;
+  }
+  async function deliverPickBatch(picks) {
+    let lastDelivered = null;
+    for (const entry of [...picks].sort((a, b) => a.seq - b.seq)) {
+      if (entry.seq <= pickCursor) continue;
+      if (!state.mode.on || state.bridgeActive) break;
+      if (!await addToChat(entry)) break;
+      lastDelivered = entry;
+    }
+    if (!lastDelivered) return false;
+    pickCursor = lastDelivered.seq;
+    try {
+      await ackPicks(lastDelivered.seq, pickAckLabel(lastDelivered));
+    } catch {
+    }
+    return true;
+  }
+  function picksResultValid(result) {
+    return Boolean(result && Array.isArray(result.picks));
+  }
+  async function pollPicksOnce(waitMs) {
+    try {
+      const result = await getPicks(pickCursor, waitMs);
+      if (!picksResultValid(result)) return "error";
+      if (typeof result.seq === "number" && result.seq < pickCursor) pickCursor = 0;
+      return await deliverPickBatch(result.picks) ? "progress" : "idle";
+    } catch {
+      return "error";
+    }
+  }
+  async function runPickLoop(stop) {
+    while (!stop()) {
+      if (!state.mode.on || state.bridgeActive) {
+        await sleep(PICK_HELD_POLL_MS);
+        continue;
+      }
+      const outcome = await pollPicksOnce(PICK_LONG_POLL_MS);
+      if (outcome === "progress") continue;
+      if (outcome === "idle") {
+        await sleep(PICK_IDLE_POLL_MS);
+        continue;
+      }
+      const backoffStart = Date.now();
+      while (!stop() && Date.now() - backoffStart < PICK_SHORT_POLL_BUDGET_MS) {
+        if (!state.mode.on || state.bridgeActive) break;
+        await sleep(PICK_SHORT_POLL_MS);
+        if (await pollPicksOnce(0) !== "error") break;
+      }
+    }
+  }
+  function startPickLoop() {
+    if (pickLoopActive) return;
+    pickLoopActive = true;
+    void runPickLoop(() => !pickLoopActive);
+  }
+  function stopPickLoop() {
+    pickLoopActive = false;
+  }
+  function resetPickLoop() {
+    pickLoopActive = false;
+    pickCursor = 0;
   }
   function openStatus(message, kind = "info") {
     setStatus(message, kind);
@@ -4629,7 +4842,11 @@ ${CRAFT_RULES[id]}`).join("\n\n");
         return;
       }
       openStatus(OPENING_STATUS);
-      const result = await openWorkspace({ dir: ws.dir });
+      const result = await openWorkspace({ dir: ws.dir, focus: true });
+      if (!result.ok && result.code === WORKSPACE_MISSING_CODE) {
+        await handleMissingWorkspace(ws.dir, result.error);
+        return;
+      }
       if (result.ok) await saveLastUrl(ws.dir, result.url || url);
       if (result.ok && result.started) markServerStartedByUs(ws.dir);
       openStatus(formatOpenStatus(result), result.ok ? "info" : "error");
@@ -4639,13 +4856,34 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       state.pendingOpen = false;
     }
   }
+  async function handleMissingWorkspace(dir, message) {
+    state.workspace = null;
+    state.config = null;
+    state.configPath = null;
+    state.configDir = null;
+    state.startedServers.delete(dir);
+    wsSessionMap.delete(normalizeDirPath(dir));
+    const key = workspaceStorageKey(state.sessionId);
+    if (key) {
+      try {
+        await host.storage.delete(key);
+      } catch {
+      }
+    }
+    renderRow();
+    rerender();
+    await host.toast({
+      kind: "error",
+      message: `${message ?? `The canvas folder ${dir} no longer exists.`} Start creates a new canvas.`
+    });
+  }
   async function previewWorkspace(row) {
     if (!row.url?.trim()) {
       await host.toast({ kind: "error", message: NO_PROJECT_URL_MESSAGE });
       return;
     }
     try {
-      const result = await openWorkspace({ dir: row.dir });
+      const result = await openWorkspace({ dir: row.dir, focus: true });
       if (!result.ok) {
         await host.toast({ kind: "error", message: result.error ?? "Could not open the canvas" });
         return;
@@ -4760,10 +4998,26 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       announceServer("Could not verify other design sessions \u2014 the queued stop stays pending.");
     }
   }
+  async function reportAgentStatus(busy) {
+    try {
+      await postAgentStatus(busy, busy ? "Designing\u2026" : void 0);
+    } catch {
+    }
+  }
+  async function syncRegistryBackstop() {
+    const dir = state.workspace?.dir;
+    if (!dir) return;
+    try {
+      await syncScreens(dir);
+    } catch {
+    }
+  }
   async function applySessionSnapshot(session) {
     const changed = state.sessionId !== (session?.id ?? null);
+    const wasBusy = state.sessionBusy;
     state.sessionId = session?.id ?? null;
     state.sessionBusy = session?.busy ?? false;
+    if (wasBusy !== state.sessionBusy) await reportAgentStatus(state.sessionBusy);
     if (state.sessionBusy) {
       if (state.pendingStop) {
         state.pendingStop = null;
@@ -4778,10 +5032,13 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     await loadMode();
   }
   async function handleSessionLifecycle(event) {
-    if (event.phase === "completed" && state.pendingStop && !state.sessionBusy) {
-      const request = state.pendingStop;
-      const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
-      reportHonouredStop(result, request.dir);
+    if (event.phase === "completed") {
+      void syncRegistryBackstop();
+      if (state.pendingStop && !state.sessionBusy) {
+        const request = state.pendingStop;
+        const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
+        reportHonouredStop(result, request.dir);
+      }
     }
   }
   var serverAnnouncements = [];
@@ -5818,7 +6075,7 @@ Source: ${reference.sourceDirectory}`;
   function renderFooter() {
     const footer = q("footer", "ds-footer");
     footer.append(q("span", "ds-footer-name", "Design Canvas"));
-    footer.append(q("span", "ds-footer-hint", "Add references by \u2318-clicking an element in the live canvas window."));
+    footer.append(q("span", "ds-footer-hint", "Add references by clicking an element in the live canvas \u2014 edit mode turns every click into a chip."));
     return footer;
   }
   var WORKSPACE_ROW_ICON = '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>';
@@ -5998,7 +6255,7 @@ Source: ${reference.sourceDirectory}`;
     const ws = state.workspace;
     if (!id || !ws) return;
     try {
-      await openWorkspace({ dir: ws.dir, screen: id });
+      await openWorkspace({ dir: ws.dir, screen: id, focus: false });
       state.activeScreen = id;
     } catch (error) {
       setStatus(`Could not switch screens: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -6022,15 +6279,14 @@ Source: ${reference.sourceDirectory}`;
     state.url = stateData.url;
     state.title = stateData.title;
     state.windowOpen = stateData.windowOpen;
+    state.bridgeActive = stateData.bridgeActive === true;
     if (stateData.mode === "edit" || stateData.mode === "play") state.liveMode = stateData.mode;
     if (stateData.screens !== void 0) state.liveScreens = stateData.screens.map((screen) => ({ ...screen }));
     state.activeScreen = stateData.activeScreen ?? null;
-    if (stateData.lastPick && stateData.pickSeq > state.lastSeq) {
-      state.lastSeq = stateData.pickSeq;
-      const screenState = stateData.lastPickScreen ? state.liveScreens.find((screen2) => screen2.id === stateData.lastPickScreen) : void 0;
-      const screen = screenState ? { id: screenState.id, url: screenState.url } : void 0;
-      const pick = { ...stateData.lastPick, seq: stateData.pickSeq, url: stateData.url, pickedAt: /* @__PURE__ */ new Date(), screen };
-      if (state.mode.on && !stateData.bridgeActive) void addToChat(pick);
+    const registry = shouldToastRegistryError(state.registryErrorNotified, stateData.registryError ?? null);
+    state.registryErrorNotified = registry.key;
+    if (registry.toast) {
+      await host.toast({ kind: "error", message: registryErrorToastMessage(stateData.registryError) });
     }
     renderWindowStatus();
     if (!state.windowOpen && state.mode.on && !state.pendingOpen) {
@@ -6210,6 +6466,7 @@ Source: ${reference.sourceDirectory}`;
       if (kind === "row") {
         void poll();
         setInterval(() => void poll(), POLL_MS);
+        startPickLoop();
       }
     });
     host.onSession((session) => {
@@ -6237,6 +6494,9 @@ Source: ${reference.sourceDirectory}`;
   function setWorkspace(workspace) {
     state.workspace = workspace;
     if (workspace) state.configDir = null;
+  }
+  function getWorkspaceState() {
+    return state.workspace;
   }
   function setSurface(surface) {
     state.surface = surface;

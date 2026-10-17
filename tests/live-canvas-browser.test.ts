@@ -495,11 +495,26 @@ test('shell camera-changed/screen-move persist into view.json (D5 write path, co
   }
 });
 
-test('restoreCamera accepts the §C grid extents (64–65536) and rejects below (R6)', { timeout: 120000 }, async (t) => {
+// V4-1 re-baseline (integrator, A's MUST 1): the §C grid-extent validation is
+// pinned on the LEGACY single-frame launch, where restoreCamera still funnels
+// layoutMode/width/height/nominalHeight through both validators (service
+// 64–65536 check, then the shell's setLayout MIN_EXTENT/MAX_EXTENT check)
+// byte-identically to v1. Inside a workspace the call is camera-only by spec,
+// so extent refusal there was never a live contract — the old pin asserted the
+// forbidden requalification itself.
+test('restoreCamera accepts the §C grid extents (64–65536) and rejects below (R6, legacy-frame baseline)', { timeout: 120000 }, async (t) => {
   if (!(await liveTest(t))) return;
   await owned(async (browser, url) => {
-    await browser.openWorkspace({ screens: [{ id: 'a', url: url + 'a', width: 1280, height: 800, title: 'A' }], baseUrl: url, mode: 'play' });
-    await until(async () => (await boardStates(browser)).every((board) => board.state === 'ready'), 'the artboard is ready');
+    await browser.open(url);
+    await until(async () => (await boardStates(browser)).every((board) => board.state === 'ready'), 'the preview board is ready');
+    // The page-requalification tail runs after settle; run the extent pins on
+    // a quiet camera so the assertions test validation, not settle races.
+    let previous = JSON.stringify(await browser.getCamera());
+    await until(async () => {
+      await pause(150);
+      const now = JSON.stringify(await browser.getCamera());
+      const stable = now === previous; previous = now; return stable;
+    }, 'the camera settled before the extent pins');
     const before = await browser.getCamera();
     // The widened grid-bbox extent: 64 is accepted (applyLayout + shell push).
     await browser.restoreCamera({ layoutMode: 'page', preset: 'desktop', width: 64, height: 64, nominalHeight: 64, reason: '', mode: 'manual', scale: 1, panX: 0, panY: 0 });

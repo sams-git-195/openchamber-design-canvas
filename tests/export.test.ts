@@ -86,6 +86,16 @@ test('printScreenToPdf prints a hidden throwaway target and keeps the R7 invaria
     await browser.open(url);
     await until(async () => (await browser.state()).windowOpen && /Export fixture/.test((await browser.state()).title), 'the window is up');
     assert.equal(await browser.pageTargetCount(), 1, 'idle: exactly one page target');
+    // Integrator settle-wait (V4-9 fit-all default widened the settle window):
+    // the requalification tail lands asynchronously AFTER the settle promise,
+    // so freeze the camera only once two consecutive full snapshots agree;
+    // otherwise the pre/post prints deep-equal compares two DIFFERENT stages
+    // of the same tail and fails in both directions (A's MUST 4).
+    await until(async () => {
+      const first = JSON.stringify(await browser.getCamera());
+      await pause(200);
+      return first === JSON.stringify(await browser.getCamera());
+    }, 'the camera quiesced after open', 10000);
     const before = await browser.getCamera();
 
     const pdf = await browser.printScreenToPdf(url + 'pdfsource', 1280, 800);

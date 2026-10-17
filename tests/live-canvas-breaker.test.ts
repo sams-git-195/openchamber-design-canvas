@@ -10,7 +10,7 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 const approved='/private/var/folders/hx/6ykzfqb5519dsfc25bzxxrzc0000gn/T/opencode';
 const scratch=await mkdtemp(path.join(await access(approved).then(()=>approved,()=>tmpdir()),'live-canvas-breaker-'));
 await mkdir(path.join(scratch,'service'));await mkdir(path.join(scratch,'viewer-client/src'),{recursive:true});
-for(const file of ['browser','artifact-context','viewer-server','viewer-ui','view-state','screens'])await cp(path.join(root,'service',file+'.ts'),path.join(scratch,'service',file+'.ts'));
+for(const file of ['browser','artifact-context','viewer-server','viewer-ui','view-state','screens','last-workspace','pick-queue'])await cp(path.join(root,'service',file+'.ts'),path.join(scratch,'service',file+'.ts'));
 await cp(path.join(root,'shared'),path.join(scratch,'shared'),{recursive:true});
 // Stock controller + compiled asset module are real imports of viewer-ui.ts.
 await cp(path.join(root,'viewer-client/src/canvas-controller.js'),path.join(scratch,'viewer-client/src/canvas-controller.js'));
@@ -149,7 +149,12 @@ test('A6 native touch cancellation after menu dismissal must not consume next or
   });
 });
 
-async function barrier(check:()=>Promise<boolean>,description:string){for(let i=0;i<80;i++){if(await check())return;await pause(20);}assert.fail(description);}
+// 250×20 ms = 5 s: the dismissal/focus acknowledgement is a CDP→shell→binding-
+// message→service round trip; under full-suite machine load (Defender scanning
+// the scaffold test's fresh node_modules, prior files' Chrome teardown) the
+// original 1.6 s ceiling flaked once in three suite runs. Arrival is still
+// mandatory — the teeth are unchanged, only the patience.
+async function barrier(check:()=>Promise<boolean>,description:string){for(let i=0;i<250;i++){if(await check())return;await pause(20);}assert.fail(description);}
 async function nativeMouse(browser:InstanceType<typeof Browser>,type:string,point:{x:number;y:number}){const b=internal(browser);await b.cdp.send('Input.dispatchMouseEvent',{type,x:point.x,y:point.y,button:'left',buttons:type==='mousePressed'?1:0,clickCount:1},b.sessionId);}
 async function openZoom(browser:InstanceType<typeof Browser>){await barrier(async()=>await shell(browser,"!!window.__dsToolbarBridge&&document.getElementById('zoom')!==null"),'the toolbar mounts before the menu test');await shell(browser,"document.getElementById('zoom').click()");await barrier(async()=>internal(browser).canvasFlags.menu,'native Zoom menu did not open');}
 

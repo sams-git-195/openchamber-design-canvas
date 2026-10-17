@@ -124,3 +124,179 @@ keep them in phase order.
   without `DS_CHROME_PATH` (16/17).
 - Authored `docs/SPEC-V4-CARBON-PARITY.md` (V4-1…V4-17, 4 file-disjoint workstreams, fence). V4 P0+P1 land
   before P2.5. No code changed by this gate.
+
+## V4 integration — rebuild, lane reconciliation, honest-green suite (2026-10-17, integrator)
+
+**Rebuild + digests.** `npm run build:viewer` x2 -> byte-identical output
+(determinism proven); final `npm run build` rebuilt both committed guest bundles
+from the four lanes' sources (they were committed STALE vs sources).
+Final viewer digests: inputDigest
+`b235095801597c1fc0931341c52c8ea88153e71a8d32ebc6f8545c2205eac7fc`, jsSha256
+`af549ea239a2029cf86d6c54058a626b710b221c205e6422d77380bc5f78cf55` (482,609 B),
+cssSha256 `d56442e38933b01cea544fc9cfa255055ab92250c9c3a53e62a90b98250e33a6`
+(146,966 B). B's "provisional css" digest IS final (only B edits viewer-client
+sources). The input digest moved from B's pre-integration `756a60ac...` because
+the digest walk hashes `viewer-client/**/*.json` and this integration re-pinned
+`stock-provenance.json` (see integrator corrections). Bundles spot-verified for
+V4 strings: `/picks` (svc+panel), `screens-watch`, `pick-queue`, `dockPlacement`
+(svc), `setNotice`/`showToast` (svc), `registryError` (svc+panel), scaffold
+aliases (svc), the legacy fit-size gate (svc).
+
+**A's MUSTS 1-7 — all landed.**
+1. R6 grid-extent pin re-baselined to the LEGACY single-frame launch
+   (`tests/live-canvas-browser.test.ts`): extent 64 accepted / 63 refused
+   through BOTH validators, previous camera survives, settle-wait before the
+   pins. The old workspace-side pin asserted the forbidden requalification
+   itself (V4-1 makes restoreCamera camera-only there), so it retired by spec;
+   R6 validation coverage stays on the byte-identical legacy path.
+2. `tests/service.test.ts` four pre-V4 fixture dirs gained
+   `.design-studio.json` markers (PUT /screens, PATCH /view, POST /export +
+   POST /critique no-window probes) per the main.ts isDesignWorkspace FORK-MERGE
+   recipe. v4-service's both-direction marker guards (marker->200, no-marker->
+   400) untouched — the 400-guard strength is unchanged.
+3. fit-page root cause + fix — see integrator corrections below; breaker
+   scratch copy-manifests gained `['last-workspace','pick-queue']` (fit-page,
+   live-canvas, nova — browser.ts's legitimate V4 imports).
+4. `printScreenToPdf` R7: two-consecutive-equal `getCamera()` settle-wait
+   before the pre-print snapshot (V4-9 fit-all widened the post-open
+   requalification window; the pin failed "both ways" pre-fix).
+5. **E17 20x loop (new `tests/v4-live.test.ts` pin): 20/20 rounds persisted,
+   ZERO misses; persist latency min 315 / median 329 / max 349 ms, total
+   6,578 ms** (final suite run; A's 15x push-persist pin also green). E17 is
+   measured-and-closed per spec 6.
+6. D carry-overs: `verify.test.ts` + `window.test.ts` swept to
+   `tests/helpers/chrome.ts` `liveTest()` (DS_REQUIRE_CHROME=1 now LOUD);
+   `service/project-server.ts` header comment rewritten all-interfaces advice ->
+   loopback-only per V4-14 (comment-only); strip-only-hostile TS sweep of
+   service|shared|panel came back CLEAN (no parameter properties, enums,
+   namespaces, decorators, import-equals).
+7. **V4-13 dock wired (decision: auto-dock ON for user opens)**: on
+   user-initiated `/open` (focus:true) with NO explicit body dock,
+   `applyAutoDock` docks Chrome beside the "chat" using the pure
+   `dockPlacement` math against a new `Browser.screenAvailRect()` — assumes the
+   chat owns the LEFT HALF of the available screen, places only when the right
+   side leaves >= 640 px (floor 640, cap 1440); secondary/odd-origin displays
+   answer null -> placement untouched. Explicit body dock always wins; agent
+   paths never dock. README one-liner added. (Panel still cannot send host
+   window numbers — the SDK has no bounds API; C's FORK-MERGE stands and this
+   service-side heuristic is what unblocks the feature.)
+
+**Full suite — the honesty bar.** `npm run test` with `DS_REQUIRE_CHROME=1` +
+real Chrome: **559 tests, 555 pass, 0 fail, 0 cancelled, 4 skipped** (156.97 s).
+The 4 skips are the documented win32 PLATFORM skips, identical to the ones P2
+recorded: SIGTERM-linger window (win32 taskkill path), 2x plain-symlink needs
+developer mode, mode-0 unreadability not expressible on Windows. There are NO
+Chrome-discovery skips left (E14 closed — every live file rides `liveTest()`).
+`typecheck` + `typecheck:viewer`: 0 errors.
+
+**Suite-run flakes hunted to root cause (all fixed):**
+1. `POST /server/stop` "service exited early: 1" — reproduced with the child's
+   stderr surfaced: `listen EACCES 127.0.0.1:56118`. Windows EXCLUDES whole TCP
+   ranges on this host (`netsh int ipv4 show excludedportrange`: 55978-56477
+   covers most of the test's blind `56000+rand(1500)` band; 50000-50059 sits in
+   another). Fix: every blind band draw in service.test / v4-service / v4-live
+   now goes through `pickFreePort()` — probe-bind candidates stride-37 until
+   the OS lets one listen, then release. Deterministic repro pair
+   (server-stop+service) went 1 fail -> 99/99. `waitForHealth` errors embed the
+   crashed child's stderr now (permanent diagnostics).
+2. `V4-4 route-live` heartbeat null for the whole session
+   (`/state.shellBridge.lastCommandAt`) — NOT a slow machine: a real BOOT RACE.
+   Chrome launches straight at the baked viewer URL, so the toolbar can mount
+   and fire its ONE-SHOT `ready` BEFORE `Runtime.addBinding` has propagated
+   into the pre-existing context (the lag browser.ts itself documents). The
+   shell's send-guard drops that `ready` silently (readySent stays false,
+   nothing re-invokes `__dsToolbarMounted`) -> canvasCommand honours nothing ->
+   heartbeat reads null ALL SESSION: a false E17 "lease loss". Product fix:
+   `Browser.shellHandshakeFlush()` after the boot bridge-settle re-invokes the
+   guarded, latching handshake until it reports sent (bounded 8 s; pure no-op
+   when the original arrived first; the `ready` handler is idempotent /
+   reload-safe by design). Route-live green on repeated runs after the fix.
+3. `live-canvas-breaker` B6 dismissal-ack barrier timed out once under
+   full-suite load (green standalone x2, green in every unloaded run) — the
+   shared `barrier()` ceiling 1.6 s -> 5 s. Arrival is still mandatory; only
+   the patience changed.
+
+**Integrator corrections (lane code genuinely broken beyond seam-fixing).**
+- **fit-page root cause (A's MUST 3):** A proved the failure is shell-side
+  (b21378f's shell passes the legacy pins, d98e647's does not). V4-B's V4-9
+  fit-all boot default is the WORKSPACE pose but was baked for EVERY launch:
+  legacy single-frame launches booted fit-all, and the page-requalification
+  tail pushes a frame HEIGHT change from a centered fit-all base — the
+  height-invariant v1 fit pose never moved the artboard's top-left, but
+  fit-all re-poses both axes mid down/up pair (dispatchCanvasInput reads the
+  live rect per event after 2 rAF) -> the legacy native-click pin landed on
+  nothing and the export R7 pre/post snapshots compared two tail stages.
+  Separately, V4-B deleted the v1 ResizeObserver `fit-size` auto-refit emit
+  for ALL modes, killing the legacy fit-mode window-resize chain the service
+  still honours when not workspaceMode ("fit-size uses current available
+  area" timed out). Fix without weakening v1 or V4 workspace semantics:
+  ViewerConfig gains an allowlisted `workspace` boolean (baked from
+  `workspaceMode` at launch); the controller boots `'fit'` iff
+  `bootConfig.workspace===false` else `fit-all` (absent flag = V4 default, so
+  every pre-flag config including all test environments keeps V4 behavior);
+  the v1 `fit-size` emit is restored welded to the same gate (dead by BOTH
+  guards in workspaces: the flag AND pinWorkspaceLayout keeping layoutMode off
+  'fit'); the legacy `#layout-reason` fallback band + its byte-identical v1
+  CSS return for legacy bakes ONLY (workspace markup untouched — B's
+  absence pin at viewer-ui.test:30 stays green because the band renders only
+  when `workspace:false`). stock-controller + viewer-ui source pins re-scoped:
+  exactly ONE gated fit-size emit site allowed; `layout`/`viewport` emissions
+  and the preset machinery stay banned; the boot-pose gate is content-asserted.
+- `nova-canvas-breaker` N1 clicked the P2-era
+  `#zoom-menu [role="menuitemradio"]:nth-of-type(4)` — V4-B's toolbar renders
+  base-ui menuitems with frozen ids; re-pinned to `#zoom-menu #zoom-200`
+  (same fourth item, same 200% trusted-ACK teeth).
+- `stock-nova-assets` provenance digest for `viewer-client/src/index.css`
+  re-pinned (V4-B added 10 V4-9 token lines inside its owned files);
+  `stock-provenance.json` gained a machine-readable `rebase` audit note; the
+  Geist / --radius / no-fork-CSS content guards and the negative-identity
+  control still run.
+- `scaffold.test` real-install probe died under `npm run test` with
+  EALLOWSCRIPTS: npm re-exports the root package.json allowScripts as
+  `npm_config_*` variables into every child, and a workspace-level
+  `npm install` then reads them as if the forbidden `--allow-scripts` FLAG
+  had been passed. Product fix: `runNpmInstall` spawns with exactly that
+  config family stripped (`npmInstallEnv()`); everything else inherited
+  unchanged; the DEP0190-free `npm install --no-audit --no-fund` literal
+  untouched. The real install now runs green INSIDE the npm-wrapped suite.
+- `fit-page-breaker` `capture-renderer-finally` anchored a substring V4-2's
+  capture restructure duplicated -> replaceOnce matched twice (first sweep
+  flagged it as ANCHOR-BROKEN, a false kill the sweep script now detects
+  explicitly). Re-anchored to the unique `!overrideApplied` early-failure
+  cleanup site; verified a TRUE kill (F4 fails on `__dsCaptureActive` still
+  true, not an anchor assert) and the plain breaker stays 4/4.
+
+**Mutant sweep.** The five breaker files' env lists enumerate **23** distinct
+named branches (FIT 4, LIVE_CANVAS 6, NOVA 5, REFERENCE 6, ROOT_WORKSPACE 2).
+**All 23 KILLED** (non-zero exit AND a real functional failure — the sweep
+grep-classifies anchor-mismatch so a stale anchor can never masquerade as a
+kill; the one such case found, capture-renderer-finally, was re-anchored and
+re-killed). Honest note: P2's commit message claimed "24" while P2-D
+tabulated 15 — SPEC-V4 section 1 flagged the count as never re-run; this
+integration enumerated the actual named branches from the sources: 23 exist,
+23 die.
+
+**Smoke.** `node docs/smoke/run-smoke.mjs` under DS_REQUIRE_CHROME=1 + real
+Chrome: **20/20 pass, 0 skip, 0 fail** — the V4-10 context-menu step
+UN-skipped and passed (real right-click -> `[role=menu]` popover ->
+05-context-menu.png). Fresh artifacts `docs/smoke/v4/`:
+01-overview-fit-all.png, 02-active-home/phone/tall.png, 03-zoom-100.png,
+04-registry-error-banner.png, 05-context-menu.png, 06-final-overview.png,
+summary.json; plus docs/smoke/out/ (canvas-overview.png, PNG/PDF exports,
+state.json). E1/E2 exactness, the <=300 ms pick p50, the 4th-screen watch
+push (614 ms final run) and the registryError banner all verified live.
+Integrator harness fixes to run-smoke.mjs: the pick and context-menu steps
+frame their target artboard with `__dsCanvas.focusScreen()` before the CDP
+click (after the 100%-zoom step the phone/home boards can sit outside the
+viewport — geometry, not product), the pick step's queue window went 12 s ->
+24 s with ONE re-framed retry click at the halfway mark, and the context-menu
+right-click moved to the phone board centre (the 1280-wide home header clips
+left at scale 1; edit mode accepts the trigger anywhere on a board per V4-10).
+
+**Open / deferred (honest).** Panel sends no dock rect — the OpenChamber SDK
+exposes no host-window-bounds API (C's FORK-MERGE stands; upstream feature
+request; `/canvas dock` re-apply rides the same gap — the service-side
+auto-dock heuristic is what unblocks V4-13 today). The 4 win32 platform skips
+stay (the environment cannot express those features; ubuntu CI runs them).
+Boot `ready` race: FIXED at the root (shellHandshakeFlush) rather than papered
+over — the 15 s -> 30 s heartbeat budget on route-live is margin, not the fix.

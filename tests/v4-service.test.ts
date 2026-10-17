@@ -9,6 +9,27 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:net';
+
+/** Integrator: probe-bind candidate ports so blind random draws can never
+ *  land in a Windows OS-excluded port range (EACCES at child bind). See
+ *  tests/service.test.ts pickFreePort for the full rationale. */
+function pickFreePort(min: number, span: number, attempts = 48): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const start = Math.floor(Math.random() * span);
+    let i = 0;
+    const tryNext = (): void => {
+      if (i >= attempts) { reject(new Error(`no bindable port in ${min}..${min + span - 1}`)); return; }
+      const candidate = (start + i * 37) % span + min;
+      i += 1;
+      const probe = createServer();
+      probe.once('error', () => { probe.removeAllListeners('listening'); setTimeout(tryNext, 10); });
+      probe.once('listening', () => probe.close(() => resolve(candidate)));
+      probe.listen(candidate, '127.0.0.1');
+    };
+    tryNext();
+  });
+}
 
 import { Browser, dockPlacement, MIN_DOCK_WIDTH, resolveChromePath } from '../service/browser.ts';
 import type { PickedElement } from '../service/browser.ts';
@@ -559,7 +580,7 @@ test('V4-4/V4-15: getState surfaces registryError and shellBridge; notice/toast/
 // ---- V4 route contract (spawned service, NO Chrome) ----------------------------
 
 test('v4 routes: malformed → 400, workspace-marker guards → 400, business failures → 200', async () => {
-  const port = 44000 + Math.floor(Math.random() * 1500);
+  const port = await pickFreePort(44000, 1500);
   const plain = await mkdtemp(path.join(tmpdir(), 'v4-plain-'));
   const workspace = await mkdtemp(path.join(tmpdir(), 'v4-ws-'));
   await writeFile(path.join(workspace, '.design-studio.json'), JSON.stringify({ version: 1, name: 'ws', type: 'hi-fi', url: 'http://localhost:5999/', command: 'npm run dev', entry: 'index.html' }), 'utf8');

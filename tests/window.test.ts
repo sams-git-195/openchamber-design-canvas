@@ -13,9 +13,9 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { Browser } from '../service/browser.ts';
+import { liveTest } from './helpers/chrome.ts';
 
 const execFileP = promisify(execFile);
-const CHROME = process.env.DS_CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 // macOS allows negative coordinates; the window lands left of/above every
 // display, so nothing appears on screen during tests.
@@ -137,10 +137,8 @@ function cdpCall(wsUrl: string, method: string, params: Record<string, unknown>)
 }
 
 test('closing the window by hand quits Chrome, removes the profile and relaunches fresh', { timeout: 90_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  // V4-16 sweep (D carry-over 1, integrator): honest Chrome gate.
+  if (!(await liveTest(t))) return;
 
   const previousWindow = process.env.DS_WINDOW;
   process.env.DS_WINDOW = OFFSCREEN;
@@ -211,10 +209,8 @@ test('closing the window by hand quits Chrome, removes the profile and relaunche
 });
 
 test('the window is reused, its bounds round-trip and closure is detected', { timeout: 90_000 }, async (t) => {
-  if (!(await exists(CHROME))) {
-    t.skip(`Chrome not found at ${CHROME}`);
-    return;
-  }
+  // V4-16 sweep (D carry-over 1, integrator): honest Chrome gate.
+  if (!(await liveTest(t))) return;
 
   // DS_WINDOW is read at construct time; pin it around the construction only.
   const previousWindow = process.env.DS_WINDOW;

@@ -40,10 +40,35 @@ function freePort(): Promise<number> {
   });
 }
 
-async function waitForHealth(port: number, child: ChildProcess): Promise<void> {
+/**
+ * Pick a port in [min, min+span) that the OS will actually let us BIND.
+ * Blind random draws hit Windows' excluded port ranges (netsh shows blocks
+ * like 55978–56477 covering most of the 56000 band) and the service dies
+ * with EACCES before health — an environment flake the suite must not carry.
+ * Probes stride 37 apart so a ~100-port exclusion block clears within a few
+ * candidates; the final TOCTOU window (close→child bind) is milliseconds.
+ */
+function pickFreePort(min: number, span: number, attempts = 48): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const start = Math.floor(Math.random() * span);
+    let i = 0;
+    const tryNext = (): void => {
+      if (i >= attempts) { reject(new Error(`no bindable port in ${min}..${min + span - 1}`)); return; }
+      const candidate = (start + i * 37) % span + min;
+      i += 1;
+      const probe = createServer();
+      probe.once('error', () => { probe.removeAllListeners('listening'); setTimeout(tryNext, 10); });
+      probe.once('listening', () => probe.close(() => resolve(candidate)));
+      probe.listen(candidate, '127.0.0.1');
+    };
+    tryNext();
+  });
+}
+
+async function waitForHealth(port: number, child: ChildProcess, stderr: () => string = () => ''): Promise<void> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`service exited early: ${child.exitCode}`);
+    if (child.exitCode !== null) throw new Error(`service exited early: ${child.exitCode}${stderr() ? `\nchild stderr:\n${stderr().slice(0, 2000)}` : ''}`);
     try {
       const res = await fetch(`http://127.0.0.1:${port}/health`, { headers: { authorization: `Bearer ${TOKEN}` } });
       if (res.status === 200) return;
@@ -56,7 +81,7 @@ async function waitForHealth(port: number, child: ChildProcess): Promise<void> {
 }
 
 test('service requires the bearer token and reports live-window state', async () => {
-  const port = 43000 + Math.floor(Math.random() * 2000);
+  const port = await pickFreePort(43000, 2000);
   const project = await mkdtemp(path.join(tmpdir(), 'ds-service-'));
   await mkdir(path.join(project, 'design'), { recursive: true });
   await writeFile(
@@ -158,7 +183,7 @@ test('service requires the bearer token and reports live-window state', async ()
 });
 
 test('/open answers ok:false for an unreachable loopback url without opening a window', async () => {
-  const port = 46000 + Math.floor(Math.random() * 1500);
+  const port = await pickFreePort(46000, 1500);
   const child = spawn(process.execPath, [path.join(root, 'service', 'main.js')], {
     env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN },
     stdio: 'ignore',
@@ -186,7 +211,7 @@ test('/open answers ok:false for an unreachable loopback url without opening a w
 // process carrying a `ds-chrome-` temp profile, even one this service instance
 // never tracked (e.g. launched by a previous service that then restarted).
 test('/close kills an orphan ds-chrome- process the service does not track', { timeout: 30_000 }, async () => {
-  const port = 48000 + Math.floor(Math.random() * 1500);
+  const port = await pickFreePort(48000, 1500);
   const profile = await mkdtemp(path.join(tmpdir(), 'ds-chrome-test-'));
   const child = spawn(process.execPath, [path.join(root, 'service', 'main.js')], {
     env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN },
@@ -240,7 +265,7 @@ test('/close kills an orphan ds-chrome- process the service does not track', { t
 // that already exists. The hermetic cases here never reach npm install or a dev
 // server (refusal and validation happen first), so this stays network-free.
 test('POST /scaffold requires the bearer token, validates dir/type, and refuses an existing project', async () => {
-  const port = 52000 + Math.floor(Math.random() * 1500);
+  const port = await pickFreePort(52000, 1500);
   const existing = await mkdtemp(path.join(tmpdir(), 'ds-scaffold-existing-'));
   await writeFile(
     path.join(existing, '.design-studio.json'),
@@ -294,7 +319,7 @@ test('POST /scaffold requires the bearer token, validates dir/type, and refuses 
 // Design Mode turning ON posts to /harness; the service drops the in-session
 // OpenCode plugin into the project and answers the write result. Idempotent.
 test('POST /harness writes the generated plugin and is idempotent', async () => {
-  const port = 50000 + Math.floor(Math.random() * 1500);
+  const port = await pickFreePort(50000, 1500);
   const project = await mkdtemp(path.join(tmpdir(), 'ds-harness-route-'));
   const child = spawn(process.execPath, [path.join(root, 'service', 'main.js')], {
     env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN },
@@ -348,7 +373,7 @@ test('POST /harness writes the generated plugin and is idempotent', async () => 
 // attach a FILE reference. Validation of dir/limit is a 400; the listing itself
 // is a 200 with the sorted relative paths.
 test('POST /files requires the bearer token, validates dir/limit, and lists files', async () => {
-  const port = 54000 + Math.floor(Math.random() * 1500);
+  const port = await pickFreePort(54000, 1500);
   const project = await mkdtemp(path.join(tmpdir(), 'ds-files-route-'));
   await mkdir(path.join(project, 'src'), { recursive: true });
   await writeFile(path.join(project, 'src', 'app.ts'), 'export const x = 1;\n');
@@ -404,15 +429,17 @@ test('POST /files requires the bearer token, validates dir/limit, and lists file
 // for an unknown dir is a safe no-op (`stopped:false`), never a kill of a group
 // the service did not record; `GET /server/status` reports a down server.
 test('POST /server/stop requires the bearer token, validates dir, and no-ops an unknown dir', async () => {
-  const port = 56000 + Math.floor(Math.random() * 1500);
+  const port = await pickFreePort(56000, 1500);
   const unknown = await mkdtemp(path.join(tmpdir(), 'ds-server-stop-'));
   const child = spawn(process.execPath, [path.join(root, 'service', 'main.js')], {
     env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN },
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
+  let childErr = '';
+  child.stderr?.on('data', (d) => { childErr += String(d); });
 
   try {
-    await waitForHealth(port, child);
+    await waitForHealth(port, child, () => childErr);
 
     const noAuth = await fetch(`http://127.0.0.1:${port}/server/stop`, {
       method: 'POST',
@@ -463,7 +490,7 @@ test('POST /server/stop requires the bearer token, validates dir, and no-ops an 
 // so started:true plus the config-port record here can only come from the
 // config url.
 test('POST /server/start uses the configured url, not the request url', { timeout: 60_000 }, async () => {
-  const port = 60000 + Math.floor(Math.random() * 1500);
+  const port = await pickFreePort(60000, 1500);
   const devPort = await freePort();
   const decoyPort = await freePort();
   const project = await mkdtemp(path.join(tmpdir(), 'ds-server-start-'));
@@ -555,7 +582,7 @@ test('POST /server/start uses the configured url, not the request url', { timeou
 // exists), the route must refuse with the port-in-use error instead of
 // reporting ok:true/up:true for someone else's server.
 test('POST /server/start refuses a foreign holder on the configured port', { timeout: 60_000 }, async () => {
-  const port = 62000 + Math.floor(Math.random() * 1500);
+  const port = await pickFreePort(62000, 1500);
   const devPort = await freePort();
   const project = await mkdtemp(path.join(tmpdir(), 'ds-server-foreign-'));
   await writeFile(
@@ -765,7 +792,7 @@ test('lastWorkspace echo updates in memory', () => {
 // ---------------------------------------------------------------------------
 
 async function startServiceTs(extraEnv: Record<string, string>): Promise<{ port: number; child: ChildProcess }> {
-  const port = 64000 + Math.floor(Math.random() * 1400); // above the other suites' bands, below 65536
+  const port = await pickFreePort(64000, 1400); // above the other suites' bands, below 65536
   const child = spawn(process.execPath, [path.join(root, 'service', 'main.ts')], {
     env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN, ...extraEnv },
     stdio: 'ignore',
@@ -781,6 +808,10 @@ async function startServiceTs(extraEnv: Record<string, string>): Promise<{ port:
 
 test('GET/PUT /screens: 400 validation, silent read normalization, clamped write', { timeout: 60_000 }, async () => {
   const ws = await mkdtemp(path.join(tmpdir(), 'ds-screens-route-'));
+  // V4-14 fixture (integrator): PUT /screens only acts on a marked design
+  // workspace; this route-BEHAVIOR pin predates the marker, so the dir gains
+  // one. The no-marker 400 direction is pinned in tests/v4-service.test.ts.
+  await writeFile(path.join(ws, '.design-studio.json'), JSON.stringify({ version: 1 }));
   const { port, child } = await startServiceTs({});
   try {
     const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
@@ -957,7 +988,7 @@ async function startServiceTsP2(extraEnv: Record<string, string>): Promise<{ por
   // NOTE: the orchestrator suggested 66000–66999, but TCP ports cap at 65535;
   // this band (65400–65535) sits above the screens suite's 64000–65399 band
   // and stays inside the valid port space.
-  const port = 65400 + Math.floor(Math.random() * 136);
+  const port = await pickFreePort(65400, 136);
   const child = spawn(process.execPath, [path.join(root, 'service', 'main.ts')], {
     env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN, ...extraEnv },
     stdio: 'ignore',
@@ -973,6 +1004,9 @@ async function startServiceTsP2(extraEnv: Record<string, string>): Promise<{ por
 
 test('GET/PATCH /view: default read, strict validation, per-key merge, no PUT', { timeout: 60_000 }, async () => {
   const ws = await mkdtemp(path.join(tmpdir(), 'ds-view-route-'));
+  // V4-14 fixture (integrator): PATCH /view requires the workspace marker;
+  // the plain-dir 400 direction lives in tests/v4-service.test.ts.
+  await writeFile(path.join(ws, '.design-studio.json'), JSON.stringify({ version: 1 }));
   const { port, child } = await startServiceTsP2({});
   try {
     const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
@@ -1043,6 +1077,12 @@ test('GET/PATCH /view: default read, strict validation, per-key merge, no PUT', 
 });
 
 test('POST /export preconditions answer 200 ok:false; malformed input is 400', { timeout: 60_000 }, async () => {
+  // V4-14 fixture (integrator): the marker guard precedes D4's window
+  // precondition, so the no-window probe dir must be a MARKED workspace to
+  // still answer the 200 'window not open' order this pin checks. The
+  // no-marker 400 direction lives in tests/v4-service.test.ts.
+  const marked = await mkdtemp(path.join(tmpdir(), 'ds-export-probe-'));
+  await writeFile(path.join(marked, '.design-studio.json'), JSON.stringify({ version: 1 }));
   const { port, child } = await startServiceTsP2({});
   try {
     const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
@@ -1054,12 +1094,13 @@ test('POST /export preconditions answer 200 ok:false; malformed input is 400', {
     const noWindow = await fetch(`http://127.0.0.1:${port}/export`, {
       method: 'POST',
       headers: bearer,
-      body: JSON.stringify({ dir: 'C:\\no-such-workspace' }),
+      body: JSON.stringify({ dir: marked }),
     });
     assert.equal(noWindow.status, 200);
     assert.deepEqual(await noWindow.json(), { ok: false, error: 'the live canvas window is not open' });
   } finally {
     child.kill('SIGKILL');
+    await rm(marked, { recursive: true, force: true }).catch(() => undefined);
   }
 });
 
@@ -1078,6 +1119,10 @@ test('GET /export/status: missing params → 400, unknown job → 200 ok:false',
 });
 
 test('POST /critique: malformed input is 400, no window is a 200 ok:false', { timeout: 60_000 }, async () => {
+  // V4-14 fixture (integrator): same marker-guard order as /export above —
+  // the no-window probe needs a marked workspace dir to reach the 200 check.
+  const marked = await mkdtemp(path.join(tmpdir(), 'ds-critique-probe-'));
+  await writeFile(path.join(marked, '.design-studio.json'), JSON.stringify({ version: 1 }));
   const { port, child } = await startServiceTsP2({});
   try {
     const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
@@ -1088,11 +1133,12 @@ test('POST /critique: malformed input is 400, no window is a 200 ok:false', { ti
     const noWindow = await fetch(`http://127.0.0.1:${port}/critique`, {
       method: 'POST',
       headers: bearer,
-      body: JSON.stringify({ dir: 'C:\\no-such-workspace' }),
+      body: JSON.stringify({ dir: marked }),
     });
     assert.equal(noWindow.status, 200);
     assert.deepEqual(await noWindow.json(), { ok: false, error: 'the live canvas window is not open' });
   } finally {
     child.kill('SIGKILL');
+    await rm(marked, { recursive: true, force: true }).catch(() => undefined);
   }
 });

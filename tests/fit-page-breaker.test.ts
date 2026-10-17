@@ -12,7 +12,7 @@ const original=process.env.FIT_BREAKER_ORIGINAL;
 const sourceRoot=original||root;
 const scratch=await mkdtemp(path.join(tmpdir(),'fit-page-breaker-'));
 await mkdir(path.join(scratch,'service'));await mkdir(path.join(scratch,'viewer-client/src'),{recursive:true});
-for(const file of ['browser','artifact-context','viewer-server','viewer-ui','view-state','screens'])await cp(path.join(sourceRoot,'service',file+'.ts'),path.join(scratch,'service',file+'.ts'));
+for(const file of ['browser','artifact-context','viewer-server','viewer-ui','view-state','screens','last-workspace','pick-queue'])await cp(path.join(sourceRoot,'service',file+'.ts'),path.join(scratch,'service',file+'.ts'));
 await cp(path.join(sourceRoot,'shared'),path.join(scratch,'shared'),{recursive:true});
 // The stock controller and the compiled asset module are real imports of
 // viewer-ui.ts; copy both so the scratch tree resolves (assets are inert
@@ -30,7 +30,7 @@ function replaceOnce(from:string,to:string){assert.equal(browserSource.split(fro
 if(mutant==='height-growth')replaceOnce('second.extent>candidate+1','false');
 else if(mutant==='stale-first-width')replaceOnce('const first=await measure();if(!first)return;',"const first=await measure();if(!first)return;if(preset==='mobile')first.width=1280; /* scratch: stale old-width measurement */");
 else if(mutant==='numeric-mode-suspension')replaceOnce("if(supportsLayout)await this.applyLayout({mode:'viewport',preset:'custom',nominalHeight:height},width,height,", "if(supportsLayout)await this.applyLayout({mode:'page',preset:'desktop',nominalHeight:height},width,height,");
-else if(mutant==='capture-renderer-finally')replaceOnce('await this.shellEvalSettled(`__dsCanvas.endCapture(${JSON.stringify(token)})`);','/* scratch functional fault: renderer transaction remains frozen */');
+else if(mutant==='capture-renderer-finally')replaceOnce('if(!overrideApplied){\n        try{await this.shellEvalSettled(`__dsCanvas.endCapture(${JSON.stringify(token)})`);}','if(!overrideApplied){\n        try{ /* scratch functional fault: renderer transaction remains frozen */ }');
 else assert.equal(mutant,undefined,'known functional mutant');
 await writeFile(path.join(scratch,'service/browser.ts'),browserSource);
 const {Browser}=await import(pathToFileURL(path.join(scratch,'service/browser.ts')).href) as typeof import('../service/browser.ts');

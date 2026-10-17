@@ -24,6 +24,26 @@ const rootDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const TOKEN = 'v4-live-token-123';
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Integrator: probe-bind candidate ports so blind random draws can never
+ *  land in a Windows OS-excluded port range (EACCES at child bind). See
+ *  tests/service.test.ts pickFreePort for the full rationale. */
+function pickFreePort(min: number, span: number, attempts = 48): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const start = Math.floor(Math.random() * span);
+    let i = 0;
+    const tryNext = (): void => {
+      if (i >= attempts) { reject(new Error(`no bindable port in ${min}..${min + span - 1}`)); return; }
+      const candidate = (start + i * 37) % span + min;
+      i += 1;
+      const probe = createServer();
+      probe.once('error', () => { probe.removeAllListeners('listening'); setTimeout(tryNext, 10); });
+      probe.once('listening', () => probe.close(() => resolve(candidate)));
+      probe.listen(candidate, '127.0.0.1');
+    };
+    tryNext();
+  });
+}
+
 const page = (title: string, bg: string, extra = '') =>
   `<!doctype html><title>${title}</title><style>body{margin:0;background:${bg}}#b{display:block;width:200px;height:80px;margin:40px}</style><button id=b>${title}</button>${extra}`;
 
@@ -412,6 +432,57 @@ test('V4-15 E17 pin: 15 consecutive camera-changed pushes ALL persist to view.js
   await import('node:fs/promises').then(({ rm }) => rm(dir, { recursive: true, force: true }).catch(() => undefined));
 });
 
+// V4-15 / E17 — INTEGRATOR owed (SPEC-V4 §4 "Integrator … E17 20× loop"; A's
+// MUST 5). Twenty rounds of the user flow — WARM re-open (the exact path a
+// `{dir}` `/open` runs: pushShellScreens + setMode + waitScreen +
+// refreshUnsettled) followed by a real shell `camera-changed` pan — each round
+// must land its exact panX in view.json within 5 s. The E17 defect class (a
+// whole session losing every camera write through the shell-authority lease
+// race) would show up as misses; both the miss list and the persist latencies
+// are printed for the CHANGELOG numbers. focus:false only skips the
+// bringToFront raise — the persistence pipeline under test is identical.
+test('V4-15/E17 integrator loop: 20× warm open + pan — camera persists EVERY time (numbers reported)', { timeout: 420_000 }, async (t) => {
+  if (!(await liveTest(t))) return;
+  const dir = await mkdtemp(path.join(tmpdir(), 'v4-e17-20x-'));
+  const misses: number[] = [];
+  const latencies: number[] = [];
+  try {
+    await liveCanvas(async (browser, base) => {
+      const wsScreens = () => [{ id: 'home', url: base + 'home.html', width: 1280, height: 800, title: 'Home' }];
+      await browser.openWorkspace({ dir, screens: wsScreens(), baseUrl: base, mode: 'edit' });
+      for (let i = 1; i <= 20; i += 1) {
+        await browser.openWorkspace({ dir, screens: wsScreens(), baseUrl: base, mode: 'edit', focus: false }); // the warm re-open half of /open
+        const panX = 4000 + i * 137; // distinct every round — a stale file can never false-match
+        const started = Date.now();
+        await shell(browser, `__dsCanvasSend(JSON.stringify({type:"camera-changed",camera:{mode:"manual",scale:1,panX:${panX},panY:0}}))`);
+        let saved = -1;
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          try {
+            saved = (JSON.parse(await readFile(path.join(dir, '.design-studio', 'view.json'), 'utf8')) as { camera?: { panX?: number } }).camera?.panX ?? -1;
+          } catch { saved = -1; }
+          if (saved === panX) break;
+          await pause(25);
+        }
+        latencies.push(Date.now() - started);
+        if (saved !== panX) misses.push(i);
+      }
+      const sorted = [...latencies].sort((a, b) => a - b);
+      console.info(JSON.stringify({
+        e17: '20x warm-open + pan',
+        iterations: 20,
+        misses,
+        persistMs: { min: sorted[0], median: sorted[Math.floor(sorted.length / 2)], max: sorted[sorted.length - 1], total: sorted.reduce((a, b) => a + b, 0) },
+      }));
+      assert.deepEqual(misses, [], `every open/pan pair persisted its camera (missed rounds: ${misses.join(',') || 'none'})`);
+      const state = browser.getState();
+      assert.ok(state.shellBridge.lastCommandAt !== null, 'the shell bridge heartbeat stayed alive across all 20 rounds');
+    });
+  } finally {
+    await import('node:fs/promises').then(({ rm }) => rm(dir, { recursive: true, force: true }).catch(() => undefined));
+  }
+});
+
 // ---- V4-4 route-level live: watcher pushes into a REAL window --------------------------
 
 test('V4-4 route-live: agent screens appear within ~3s, corrupt registry is LOUD, recovery clears it; /screens/sync backstops', { timeout: 240_000 }, async (t) => {
@@ -426,7 +497,7 @@ test('V4-4 route-live: agent screens appear within ~3s, corrupt registry is LOUD
   await writeFile(path.join(ws, '.design-studio.json'), JSON.stringify({ version: 1, name: 'watch', type: 'hi-fi', url: base, command: 'npm run dev', entry: 'index.html', pagesRoot: '.' }), 'utf8');
   await writeFile(path.join(ws, 'home.html'), page('Home', '#eef'), 'utf8');
   await writeFile(path.join(ws, 'screens.json'), JSON.stringify({ version: 1, screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }] }), 'utf8');
-  const port = 45000 + Math.floor(Math.random() * 1200);
+  const port = await pickFreePort(45000, 1200);
   const child: ChildProcess = spawn(process.execPath, [path.join(rootDir, 'service', 'main.ts')], {
     env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', DS_WORKSPACE_ROOT: ws, OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN, DS_WINDOW: '-2400,-2400,1400,900' },
     stdio: 'ignore',
@@ -460,7 +531,13 @@ test('V4-4 route-live: agent screens appear within ~3s, corrupt registry is LOUD
     const openRes = await (await api('/open', { method: 'POST', body: JSON.stringify({ dir: ws, focus: false }) })).json() as { ok: boolean; error?: string; windowOpen?: boolean };
     assert.equal(openRes.ok, true, `cold /open succeeded (${openRes.error ?? ''})`);
 
-    const s0 = await poll((s) => s.windowOpen && s.shellBridge.lastCommandAt !== null, 15_000, 'window + shell heartbeat');
+    // Heartbeat acceptance doubles as the boot-handshake pin: 'ready' used to
+    // race the binding registration (page load beating attach silently dropped
+    // it — found by this very step failing 2/4 suite runs). Fixed at the root
+    // in service/browser.ts shellBridgeSettled (re-invoke the guarded
+    // __dsToolbarMounted once the binding is proven live); the 30 s window is
+    // kept for cold Chrome launches on a busy Windows host.
+    const s0 = await poll((s) => s.windowOpen && s.shellBridge.lastCommandAt !== null, 30_000, 'window + shell heartbeat');
     assert.deepEqual(s0.screens.map((x) => x.id), ['home']);
     assert.equal(s0.registryError, null);
 

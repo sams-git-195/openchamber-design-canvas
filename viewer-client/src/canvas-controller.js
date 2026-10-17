@@ -17,8 +17,16 @@ export function initCanvas(initialConfig) {
   let pages = [], currentUrl = '', currentTitle = 'Preview';
   let screens = [], active = '', shellMode = 'edit', cellCenters = new Map();
   const boards = new Map();
-  const view = {width:0,height:0,nominalHeight:Number.isInteger(bootConfig.viewport&&bootConfig.viewport.height)?bootConfig.viewport.height:800,layoutMode:'viewport',reason:'',preset:'desktop',mode:'fit-all',scale:1,panX:0,panY:0,pan:false,space:false,agentInput:false,ready:false};
-  let openMenu = null, drag = null, slowTimer = null, statusState = 'loading', message = '';
+  // Integrator correction (V4-1/V4-9 seam): the fit-all boot default is the
+  // WORKSPACE pose. A legacy single-frame launch (baked workspace:false) must
+  // boot in 'fit' exactly like v1 — the page-requalification tail changes the
+  // frame HEIGHT, and only the height-invariant fit pose keeps the artboard's
+  // on-screen rect (and thus native-input landing) stable across it; under
+  // fit-all the centered re-pose raced agent clicks (E-rebaseline of the
+  // legacy fit-page pins). Absent flag = fit-all, so every pre-flag config
+  // (tests, old bakes) keeps the V4 behavior.
+  const view = {width:0,height:0,nominalHeight:Number.isInteger(bootConfig.viewport&&bootConfig.viewport.height)?bootConfig.viewport.height:800,layoutMode:'viewport',reason:'',preset:'desktop',mode:bootConfig.workspace===false?'fit':'fit-all',scale:1,panX:0,panY:0,pan:false,space:false,agentInput:false,ready:false};
+  let openMenu = null, drag = null, slowTimer = null, statusState = 'loading', message = '', fitSizeQueued = false;
   let captureState = null, captureSequence = 0, repaintPending = false, lastTap = null, boardDrag = null, boardDragSquelch = false;
   let cameraTimer = null, applyingCamera = false, lastCameraSent = null, lastPositions = new Map();
   // V4 shell surface (SPEC-V4 §3): notices, toast, agent status/input, mode
@@ -233,6 +241,9 @@ export function initCanvas(initialConfig) {
     camera.style.width=view.width+'px';camera.style.height=view.height+'px';
     const x=(box.width-view.width*view.scale)/2+view.panX,y=view.mode==='fit-all'?(box.height-view.height*view.scale)/2+view.panY:numToken('--s7')+view.panY;
     camera.style.transform='translate('+x+'px,'+y+'px) scale('+view.scale+')';
+    // Integrator restore: the v1 paint line, guarded — the #layout-reason band
+    // only exists on legacy bakes (workspace:false); workspaces never had it.
+    const reasonBand=$('layout-reason');if(reasonBand){reasonBand.hidden=!(view.layoutMode==='viewport'&&view.reason);reasonBand.textContent=view.reason?'Viewport fallback: '+view.reason:'';}
     // V4-9 art-wall polish: --cam-scale drives the header counter-scale (CSS
     // scales headers by 1/--cam-scale, so labels stay ~13px readable at every
     // zoom); the dot grid translates with the camera and hides below 0.3.
@@ -808,10 +819,15 @@ export function initCanvas(initialConfig) {
     if(!view.ready||view.layoutMode==='fit'||e.target.closest('.state'))return;e.preventDefault();wheelInput(e.deltaX,e.deltaY,e.clientX-b.left,e.clientY-b.top,false);
   },{passive:false});
   document.addEventListener('wheel',e=>{if(e.defaultPrevented||!(e.ctrlKey||e.metaKey)||view.agentInput)return;e.preventDefault();e.stopPropagation();const b=canvas.getBoundingClientRect();zoomCamera({action:'wheel',deltaY:e.deltaY,x:e.clientX-b.left,y:e.clientY-b.top});},{passive:false});
-  // The observer keeps the camera/grid repainted on window resize. The legacy
-  // fit-size qualification emit is gone (V4-1): the canvas never asks the
-  // service to resize an artboard.
-  new ResizeObserver(()=>{paint();}).observe(canvas);
+  // The observer keeps the camera/grid repainted on window resize. V4-1 killed
+  // the fit-size qualification emit for WORKSPACE launches (artboards are
+  // registry-fixed, §3: no layout/fit-size/viewport emission). Integrator
+  // correction: the legacy single-frame contract (baked workspace:false) keeps
+  // the v1 auto-refit channel byte-identical — the service's fit-size branch
+  // (browser.ts, non-workspace) still answers it, and the pinned legacy
+  // behavior needs it after a window resize. In workspaces the emit is dead by
+  // BOTH guards: the flag, and pinWorkspaceLayout keeping layoutMode off 'fit'.
+  new ResizeObserver(()=>{paint();if(bootConfig.workspace===false&&view.layoutMode==='fit'&&!captureState&&!fitSizeQueued){fitSizeQueued=true;requestAnimationFrame(()=>{fitSizeQueued=false;if(bootConfig.workspace===false&&view.layoutMode==='fit'&&!captureState)send({type:'fit-size',screen:active});});}}).observe(canvas);
   function retry(){if(captureState)return;setStatus({state:'loading'});const command={type:'retry'};if(active)command.screen=active;send(command);}
   function retryScreen(id){if(captureState||!boards.get(id))return;setScreenStateCore(id,{state:'loading'});send({type:'retry',screen:id});}
   $('state-action').onclick=()=>transaction(retry);

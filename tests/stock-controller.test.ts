@@ -274,7 +274,14 @@ test('V4-1 E1 shell-side: activation NEVER resizes an artboard and no shell path
   // The toolbar bridge exposes no preset machinery at all, and the shipped
   // toolbar/controller source has no resize-to-desktop path left to reach.
   assert.equal((e.bridge as any).selectPreset, undefined, '__dsToolbarBridge.selectPreset is gone');
-  assert.doesNotMatch(source, /choosePreset|selectViewport|type:\s*'layout'|type:\s*'fit-size'|type:\s*'viewport'/);
+  // Integrator re-pin: the toolbar preset machinery is gone, and workspace
+  // paths emit no layout machinery (§3). The ONE surviving `fit-size` site is
+  // the legacy single-frame auto-refit channel (bootConfig.workspace===false
+  // gated ResizeObserver), which keeps v1's pinned behavior byte-identical.
+  assert.doesNotMatch(source, /choosePreset|selectViewport|type:\s*'layout'|type:\s*'viewport'/);
+  assert.equal((source.match(/type:\s*'fit-size'/g) ?? []).length, 1, 'exactly one legacy fit-size emit site may survive');
+  assert.match(source, /bootConfig\.workspace===false&&view\.layoutMode==='fit'&&!captureState&&!fitSizeQueued/, 'the fit-size emit is welded to the legacy launch gate');
+  assert.match(source, /mode:bootConfig\.workspace===false\?'fit':'fit-all'/, 'legacy boots in the v1 fit pose; workspaces in V4 fit-all');
   assert.doesNotMatch(toolbarSource, /selectViewport|PRESETS\b|selectPreset|Design viewport|Fit width/);
   // setLayout/setViewport stay ONLY as service-compatibility APIs.
   assert.equal(typeof e.api.setLayout, 'function'); assert.equal(typeof e.api.getFitBounds, 'function');

@@ -47,6 +47,9 @@ of 2026-10-14".
   progress toasts — "Setting up the canvas… installing (12 s)"), so a slow cold
   cache can never time out the chat's request cap, and the workspace binding is
   stored the moment the files exist: a second `/canvas` never builds a twin.
+  User-initiated opens auto-dock the canvas beside the chat — Chrome takes the
+  right-hand side of the screen when that still leaves ≥640 px, and your own
+  window placement is left untouched when it does not.
 - **One canvas, N artboards.** The window lays the workspace's screens out as
   artboards in a grid; pan both axes, Ctrl/⌘+wheel zooms, fit-all frames
   everything. Agent-written screens appear live — the service watches
