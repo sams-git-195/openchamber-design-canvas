@@ -1,0 +1,41 @@
+== f5 run 1
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":14,"min":9,"max":30}
+== f5 run 2
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":13,"min":9,"max":19}
+== f5 run 3
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":13,"min":10,"max":24}
+== f5 run 4
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":16,"min":10,"max":22}
+== f5 run 5
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":16,"min":11,"max":34}
+== f5 run 6
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":15,"min":11,"max":27}
+== f5 run 7
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":13,"min":10,"max":24}
+== f5 run 8
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":15,"min":10,"max":22}
+== f5 run 9
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":15,"min":10,"max":29}
+== f5 run 10
+F5 RESULT {"clicks":30,"delivered":20,"lost":[],"wrong":[{"i":0,"id":"home","got":["home","html > body > main"]},{"i":3,"id":"home","got":["home","html > body > main"]},{"i":6,"id":"home","got":["home","html > body > main"]},{"i":9,"id":"home","got":["home","html > body > main"]},{"i":12,"id":"home","got":["home","html > body > main"]},{"i":15,"id":"home","got":["home","html > body > main"]},{"i":18,"id":"home","got":["home","html > body > main"]},{"i":21,"id":"home","got":["home","html > body > main"]},{"i":24,"id":"home","got":["home","html > body > main"]},{"i":27,"id":"home","got":["home","html > body > main"]}],"p50":14,"min":11,"max":26}
+== v11 run 1
+r1 delay=0 readyAt=2144ms delivered=8/8 res=[18,13,13,12,12,11,12,14] bridge={"authority":true,"lastCommandAt":1792279884043} states=ready,ready,ready
+== v11 run 2
+r2 delay=0 readyAt=2142ms delivered=8/8 res=[17,13,13,11,13,11,15,14] bridge={"authority":true,"lastCommandAt":1792279889577} states=ready,ready,ready
+== v11 run 3
+r3 delay=0 readyAt=2179ms delivered=8/8 res=[21,14,10,10,12,10,15,10] bridge={"authority":true,"lastCommandAt":1792279895256} states=ready,ready,ready
+== v11 run 4
+r4 delay=0 readyAt=7122ms delivered=8/8 res=[55,18,18,13,26,15,14,22] bridge={"authority":true,"lastCommandAt":1792279905746} states=ready,ready,ready
+== v11 run 5
+r5 delay=0 readyAt=2226ms delivered=8/8 res=[18,12,12,12,10,12,13,14] bridge={"authority":true,"lastCommandAt":1792279911538} states=ready,ready,ready
+== v11 run 6
+r6 delay=0 readyAt=1784ms delivered=8/8 res=[24,13,12,12,13,9,16,11] bridge={"authority":true,"lastCommandAt":1792279916589} states=ready,ready,ready
+== v11 run 7
+r7 delay=0 readyAt=2054ms delivered=8/8 res=[22,17,10,14,11,13,14,13] bridge={"authority":true,"lastCommandAt":1792279921879} states=ready,ready,ready
+== v11 run 8
+r8 delay=0 readyAt=2258ms delivered=8/8 res=[18,17,13,14,13,11,11,13] bridge={"authority":true,"lastCommandAt":1792279927552} states=ready,ready,ready
+== v11 run 9
+r9 delay=0 readyAt=2277ms delivered=8/8 res=[19,15,16,15,12,10,10,14] bridge={"authority":true,"lastCommandAt":1792279933031} states=ready,ready,ready
+== v11 run 10
+r10 delay=0 readyAt=1852ms delivered=8/8 res=[21,16,15,15,11,10,14,13] bridge={"authority":true,"lastCommandAt":1792279938224} states=ready,ready,ready
+ALLDONE
