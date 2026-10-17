@@ -112,3 +112,15 @@ keep them in phase order.
   `setProjectDirectory` falls back to the chat dir when no workspace is bound,
   so `requestDevServerStop`/`refreshServerStatus`/`clickServerControl`
   behave as before for those fixtures except the create-canvas first-use path).
+## P3 — review gate (2026-10-17, claude-opus-5-5) — APPROVED-FOR-V4
+
+- Reviewed `canvas-fork` @ `b21378f`. Re-verified: typecheck 0 errors; full suite 481 = 477 pass + 4
+  documented skips, 0 fail (with `DS_CHROME_PATH` set). Mutant sweep not re-run.
+- Live probes (real Chrome, Windows) CONFIRMED: activating a non-1280×800 artboard re-qualifies it at the
+  `desktop` preset (390×844 → 1280×800; export PNG then 1280×800); Fit preset disables zoom/pan/picks; pick
+  outline leaks into exported PNGs; agent wheel in edit mode pans the user's camera. Code-CONFIRMED: preset
+  token-vocabulary mismatch (all 22 presets render unstyled), no live screens.json sync, last-pick-only 900 ms
+  pick poll that pauses while hidden, `vite --host` LAN exposure, DEP0190 spawn, live tests skip on Windows
+  without `DS_CHROME_PATH` (16/17).
+- Authored `docs/SPEC-V4-CARBON-PARITY.md` (V4-1…V4-17, 4 file-disjoint workstreams, fence). V4 P0+P1 land
+  before P2.5. No code changed by this gate.
