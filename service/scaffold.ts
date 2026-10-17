@@ -232,6 +232,27 @@ function indexRedirectHtml(name: string): string {
 }
 
 /**
+ * D14 risk 5: the service persists the user's canvas state (view.json:
+ * camera/positions/mode) into `.design-studio/` at the workspace root while
+ * Vite watches the tree. Without an ignore rule those writes could surface as
+ * watched-file events; canvas-state churn must never look like a source edit
+ * to HMR. The dev script in package.json stays `npm run dev`.
+ */
+function viteConfig(): string {
+  return `// Design Canvas: .design-studio/ holds runtime view state (view.json), written
+// by the extension service while the dev server watches this tree. Keep the
+// state dir out of the watcher so saving canvas state never reloads the page.
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  server: {
+    watch: { ignored: ['**/.design-studio/**'] },
+  },
+});
+`;
+}
+
+/**
  * The shared bottom nav every screen includes. Deliberately dead simple (fork
  * rule): it renders the SCREENS array baked in at scaffold time — NO runtime
  * screens.json fetch. THE AGENT OWNS BOTH FILES: when a screen is added,
@@ -580,6 +601,7 @@ export async function scaffoldProject(options: ScaffoldOptions): Promise<Scaffol
     ['package.json', packageJson(name, port)],
     ['home.html', homeHtml(name, brief)],
     ['index.html', indexRedirectHtml(name)],
+    ['vite.config.mjs', viteConfig()],
     ['tokens.css', preset ? presetTokensCss(preset) : TOKENS_CSS],
     ['styles.css', STYLES_CSS],
     ['DESIGN.md', preset ? presetDesignMd(preset) : DESIGN_MD],

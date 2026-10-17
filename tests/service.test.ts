@@ -750,7 +750,7 @@ test('isInsideOrEqual is lexical and sibling-safe', () => {
 });
 
 test('lastWorkspace echo updates in memory', () => {
-  setLastWorkspace({ dir: '/ws/demo', screens: [], mode: 'edit', activeScreen: null });
+  setLastWorkspace({ dir: '/ws/demo', screens: [], mode: 'edit', activeScreen: null, view: null });
   assert.equal(getLastWorkspace()?.mode, 'edit');
   updateLastWorkspaceMode('play');
   assert.equal(getLastWorkspace()?.mode, 'play');
@@ -943,6 +943,155 @@ test('POST /open extension validates {dir, screen?} and refuses deterministicall
     const unknown = await post({ dir: ext, screen: 'nope' });
     assert.equal(unknown.status, 400);
     assert.deepEqual(await unknown.json(), { error: 'unknown screen id' });
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Design Canvas P2 routes (SPEC-V3-P2-SCOPE.md D4–D7). Spawn the TS entry on a
+// dedicated port band (65400–65535 — the screens spawn tests own 64000–65535).
+// ---------------------------------------------------------------------------
+
+async function startServiceTsP2(extraEnv: Record<string, string>): Promise<{ port: number; child: ChildProcess }> {
+  // NOTE: the orchestrator suggested 66000–66999, but TCP ports cap at 65535;
+  // this band (65400–65535) sits above the screens suite's 64000–65399 band
+  // and stays inside the valid port space.
+  const port = 65400 + Math.floor(Math.random() * 136);
+  const child = spawn(process.execPath, [path.join(root, 'service', 'main.ts')], {
+    env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN, ...extraEnv },
+    stdio: 'ignore',
+  });
+  try {
+    await waitForHealth(port, child);
+  } catch (error) {
+    child.kill('SIGKILL');
+    throw error;
+  }
+  return { port, child };
+}
+
+test('GET/PATCH /view: default read, strict validation, per-key merge, no PUT', { timeout: 60_000 }, async () => {
+  const ws = await mkdtemp(path.join(tmpdir(), 'ds-view-route-'));
+  const { port, child } = await startServiceTsP2({});
+  try {
+    const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    assert.equal((await fetch(`http://127.0.0.1:${port}/view?dir=relative`, { headers: { authorization: `Bearer ${TOKEN}` } })).status, 400, 'relative dir → 400');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`)).status, 401, 'bearer token required');
+
+    // The default view is the empty schema (never-persisted camera is null).
+    const empty = await (await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`, { headers: { authorization: `Bearer ${TOKEN}` } })).json();
+    assert.deepEqual(empty, { version: 1, camera: null, positions: {}, mode: 'edit' });
+
+    // Malformed patches → 400 with an actionable error.
+    const badPatches = [
+      'not json',
+      JSON.stringify(null),
+      JSON.stringify({}),
+      JSON.stringify({ camera: { mode: 'warp', scale: 1, panX: 0, panY: 0 } }),
+      JSON.stringify({ camera: { mode: 'manual', scale: NaN, panX: 0, panY: 0 } }),
+      JSON.stringify({ positions: 'nope' }),
+      JSON.stringify({ positions: { BAD: { x: 1, y: 2 } } }),
+      JSON.stringify({ positions: { home: { x: Infinity, y: 2 } } }),
+      JSON.stringify({ mode: 'sideways' }),
+    ];
+    for (const body of badPatches) {
+      const res = await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`, { method: 'PATCH', headers: bearer, body });
+      assert.equal(res.status, 400, `patch ${body.slice(0, 40)}… is refused`);
+      assert.equal(typeof ((await res.json()) as { error?: string }).error, 'string');
+    }
+
+    // A valid per-key merge under a missing file creates it; positions clamp.
+    const patch = await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`, {
+      method: 'PATCH',
+      headers: bearer,
+      body: JSON.stringify({
+        camera: { mode: 'manual', scale: 0.001, panX: -120, panY: 40 },
+        positions: { home: { x: 1e9, y: -1e9 }, checkout: null },
+        mode: 'play',
+      }),
+    });
+    assert.equal(patch.status, 200);
+    assert.deepEqual(await patch.json(), { ok: true });
+    const got = await (await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`, { headers: { authorization: `Bearer ${TOKEN}` } })).json() as {
+      version: number;
+      camera: { mode: string; scale: number };
+      positions: Record<string, unknown>;
+      mode: string;
+    };
+    assert.equal(got.camera.scale, 0.1, 'camera scale clamps to the 0.1–3 zoom range');
+    assert.deepEqual(got.positions, { home: { x: 32768, y: -32768 }, checkout: null }, 'positions clamp to ±32768');
+    assert.equal(got.mode, 'play');
+
+    // Per-key merge: a later patch leaves untouched keys alone.
+    await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`, {
+      method: 'PATCH',
+      headers: bearer,
+      body: JSON.stringify({ positions: { pay: { x: 5, y: 5 } } }),
+    });
+    const merged = await (await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`, { headers: { authorization: `Bearer ${TOKEN}` } })).json() as { positions: Record<string, unknown>; mode: string };
+    assert.deepEqual(merged.positions, { home: { x: 32768, y: -32768 }, checkout: null, pay: { x: 5, y: 5 } });
+    assert.equal(merged.mode, 'play', 'the second merge leaves the persisted mode alone');
+
+    // D6: nothing may full-overwrite view.json — PUT is refused.
+    const put = await fetch(`http://127.0.0.1:${port}/view?dir=${encodeURIComponent(ws)}`, { method: 'PUT', headers: bearer, body: '{}' });
+    assert.equal(put.status, 405);
+  } finally {
+    child.kill('SIGKILL');
+    await rm(ws, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('POST /export preconditions answer 200 ok:false; malformed input is 400', { timeout: 60_000 }, async () => {
+  const { port, child } = await startServiceTsP2({});
+  try {
+    const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    assert.equal((await fetch(`http://127.0.0.1:${port}/export`, { method: 'POST', headers: bearer, body: JSON.stringify({}) })).status, 400, 'missing dir → 400');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/export`, { method: 'POST', headers: bearer, body: JSON.stringify({ dir: 'relative' }) })).status, 400, 'relative dir → 400');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/export`, { method: 'POST', headers: bearer, body: JSON.stringify({ dir: '/tmp', formats: ['webp'] }) })).status, 400, 'unknown format → 400');
+
+    // No window opened yet: the FIRST precondition fails (D4 order).
+    const noWindow = await fetch(`http://127.0.0.1:${port}/export`, {
+      method: 'POST',
+      headers: bearer,
+      body: JSON.stringify({ dir: 'C:\\no-such-workspace' }),
+    });
+    assert.equal(noWindow.status, 200);
+    assert.deepEqual(await noWindow.json(), { ok: false, error: 'the live canvas window is not open' });
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
+test('GET /export/status: missing params → 400, unknown job → 200 ok:false', { timeout: 60_000 }, async () => {
+  const { port, child } = await startServiceTsP2({});
+  try {
+    const headers = { authorization: `Bearer ${TOKEN}` };
+    assert.equal((await fetch(`http://127.0.0.1:${port}/export/status`, { headers })).status, 400, 'missing dir/job → 400');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/export/status?dir=relative&job=x`, { headers })).status, 400, 'relative dir → 400');
+    const unknown = await fetch(`http://127.0.0.1:${port}/export/status?dir=${encodeURIComponent('C:\\no-such')}&job=export-9`, { headers });
+    assert.equal(unknown.status, 200);
+    assert.deepEqual(await unknown.json(), { ok: false, error: 'unknown export job' });
+  } finally {
+    child.kill('SIGKILL');
+  }
+});
+
+test('POST /critique: malformed input is 400, no window is a 200 ok:false', { timeout: 60_000 }, async () => {
+  const { port, child } = await startServiceTsP2({});
+  try {
+    const bearer = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+    assert.equal((await fetch(`http://127.0.0.1:${port}/critique`, { method: 'POST', headers: bearer, body: JSON.stringify({}) })).status, 400, 'missing dir → 400');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/critique`, { method: 'POST', headers: bearer, body: JSON.stringify({ dir: 'relative' }) })).status, 400, 'relative dir → 400');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/critique`, { method: 'POST', headers: bearer, body: 'nope' })).status, 400, 'non-JSON → 400');
+    assert.equal((await fetch(`http://127.0.0.1:${port}/critique`, { method: 'GET', headers: { authorization: `Bearer ${TOKEN}` } })).status, 405, 'GET → 405');
+    const noWindow = await fetch(`http://127.0.0.1:${port}/critique`, {
+      method: 'POST',
+      headers: bearer,
+      body: JSON.stringify({ dir: 'C:\\no-such-workspace' }),
+    });
+    assert.equal(noWindow.status, 200);
+    assert.deepEqual(await noWindow.json(), { ok: false, error: 'the live canvas window is not open' });
   } finally {
     child.kill('SIGKILL');
   }

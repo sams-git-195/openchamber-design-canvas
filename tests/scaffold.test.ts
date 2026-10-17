@@ -139,6 +139,16 @@ test('scaffolds a runnable multi-page Vite skeleton with a pinned loopback URL',
 
   // The skeleton carries the design-system authority stub.
   assert.match(await readFile(path.join(dir, 'DESIGN.md'), 'utf8'), /authoritative/);
+
+  // D14 risk 5: vite.config.mjs keeps the service's runtime state dir
+  // (.design-studio/ — view.json positions/camera) out of the watcher so
+  // persisting canvas state never looks like a source edit to HMR.
+  const expectedFiles = ['package.json', 'home.html', 'index.html', 'tokens.css', 'styles.css', 'DESIGN.md', 'app.js', 'screens.json', '.design-studio.json', 'vite.config.mjs'];
+  for (const rel of expectedFiles) {
+    assert.ok(result.files.includes(rel), `${rel} is reported in files[]`);
+  }
+  const viteConfig = await readFile(path.join(dir, 'vite.config.mjs'), 'utf8');
+  assert.match(viteConfig, /\.design-studio/, 'the vite watcher ignores the state dir');
 });
 
 test('a second scaffold in the same directory is refused and clobbers nothing', async () => {

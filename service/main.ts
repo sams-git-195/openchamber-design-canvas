@@ -26,7 +26,13 @@ import { listProjectFiles, resolveReferencePath } from './project-files.ts';
 import { scaffoldProject } from './scaffold.ts';
 import { hasScreensFile, readScreens, screenUrl, writeScreens, type CanvasMode } from './screens.ts';
 import { resolveWorkspaceRoot } from './workspace-root.ts';
-import { getLastWorkspace, setLastWorkspace, updateLastWorkspaceMode } from './last-workspace.ts';
+import { getLastWorkspace, setLastWorkspace, updateLastWorkspaceMode, updateLastWorkspaceView } from './last-workspace.ts';
+import { mergeView, readView, validateViewPatch, ViewPatchError } from './view-state.ts';
+import { getExportStatus, resolveFormats, startExportJob } from './export.ts';
+import type { ExportScreen } from './export.ts';
+import { runGateReport } from './gates/index.ts';
+import { gatherGateContext } from './verify.ts';
+import type { Browser } from './browser.ts';
 import { BROWSER_PROVIDER_PATH } from '@openchamber/sdk';
 
 const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT ?? 0);
@@ -38,25 +44,23 @@ if (!PORT || !TOKEN) {
 }
 
 // ---- Design Canvas browser contract (spec §B) ----
-// P1-browser adds these to service/browser.ts:
-//
-//   openWorkspace(cfg: { screens: Screen[]; baseUrl: string; mode: 'edit'|'play' }): Promise<void>
-//   setScreens(screens: Screen[]): Promise<void>
-//   setMode(m: 'edit'|'play'): Promise<void>
-//   setActive(id: string): Promise<void>
-//   getMode(): 'edit'|'play'
-//
-// Until that lands (it is being added CONCURRENTLY per spec), main.ts codes
-// against the contract through this shim so typecheck stays green against
-// today's Browser class; P2 drops the cast when the real methods exist.
-/** View form of a screen: the registry entry with `file` joined into `url`. */
-type CanvasScreen = { id: string; url: string; width: number; height: number; title: string };
-interface CanvasBrowser {
-  openWorkspace(cfg: { screens: CanvasScreen[]; baseUrl: string; mode: CanvasMode }): Promise<void>;
-  setMode(mode: CanvasMode): Promise<void>;
-  setActive(id: string): Promise<void>;
-}
-const asCanvas = (browser: unknown): CanvasBrowser => browser as CanvasBrowser;
+// The real Browser class (service/browser.ts, P1-browser) carries the
+// §B surface: openWorkspace(cfg)/setScreens/setMode/setActive/getMode/getState.
+// main.ts calls those methods DIRECTLY — the P1 shim (asCanvas/CanvasBrowser)
+// is gone.
+
+/** View form of a screen: the registry entry with `file` joined into `url`
+ *  plus optional view.json position fields (D6: merged in service-side;
+ *  null = back to auto-grid, absent = the shell's inherit rule). */
+type CanvasScreen = {
+  id: string;
+  url: string;
+  width: number;
+  height: number;
+  title: string;
+  x?: number | null;
+  y?: number | null;
+};
 
 type Json = Record<string, unknown>;
 
@@ -460,7 +464,10 @@ const server = http.createServer(async (req, res) => {
     // Canvas mode (decision 8): validate 'edit'|'play', push into the live
     // shell when a browser is running and always echo in memory (so the next
     // /open starts in the chosen mode). With no browser yet this is a warm
-    // no-op: ok:true.
+    // no-op: ok:true. D5: the mode is workspace-persisted — through view.json
+    // when the workspace dir is known (the browser records it on /open, the
+    // echo carries it for the cold/no-browser case). R1: a shell refusal
+    // still echoes the REQUESTED mode; /state.modeApplied flags it.
     if (url.pathname === '/mode') {
       if (req.method !== 'POST') {
         sendJson(res, 405, { error: 'POST required' });
@@ -480,8 +487,225 @@ const server = http.createServer(async (req, res) => {
       }
       updateLastWorkspaceMode(mode);
       const target = getBrowser();
-      if (target) await asCanvas(target).setMode(mode);
+      if (target) {
+        // The browser persists through its own workspaceDir when it has one.
+        await target.setMode(mode);
+      } else {
+        const echo = getLastWorkspace();
+        if (echo?.dir) {
+          try {
+            updateLastWorkspaceView(await mergeView(echo.dir, { mode }));
+          } catch {
+            /* view.json persistence is best effort; the echo still holds */
+          }
+        }
+      }
       sendJson(res, 200, { ok: true, mode });
+      return;
+    }
+
+    // D5/D6: the user's canvas view state. GET answers view.json-or-default
+    // (absolute-dir gate like /stat); PATCH merges per key (camera/positions/
+    // mode) through view-state.ts and answers {ok:true}. There is NO PUT:
+    // nothing may full-overwrite view.json except the service's own merge.
+    if (url.pathname === '/view') {
+      const dir = params.get('dir') ?? '';
+      if (!path.isAbsolute(dir)) {
+        sendJson(res, 400, { error: 'dir must be absolute' });
+        return;
+      }
+      if (req.method === 'PUT') {
+        sendJson(res, 405, { error: 'PUT is not supported on /view; PATCH merges per key' });
+        return;
+      }
+      if (req.method === 'PATCH') {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(await readBody(req));
+        } catch {
+          sendJson(res, 400, { error: 'body must be JSON' });
+          return;
+        }
+        try {
+          const patch = validateViewPatch(parsed);
+          const merged = await mergeView(dir, patch);
+          if (getLastWorkspace()?.dir === dir) updateLastWorkspaceView(merged);
+          sendJson(res, 200, { ok: true });
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof ViewPatchError ? error.message : 'invalid view patch' });
+        }
+        return;
+      }
+      sendJson(res, 200, (await readView(dir)) as unknown as Json);
+      return;
+    }
+
+    // D4: start (or join) the single-slot async export job. Business failures
+    // are 200 {ok:false,error}; only malformed input is a 400. The job walks
+    // screens → PNG (shell capture trio) → PDF (hidden throwaway target) and
+    // writes <workspace>/exports/<id>.<fmt>; the panel polls /export/status.
+    if (url.pathname === '/export') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'POST required' });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'body must be JSON' });
+        return;
+      }
+      const body = parsed as { dir?: unknown; screens?: unknown; formats?: unknown } | null;
+      const dir = body?.dir;
+      if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
+        sendJson(res, 400, { error: 'dir must be an absolute workspace path' });
+        return;
+      }
+      let requested: string[] | null = null;
+      if (body?.screens !== undefined) {
+        if (!Array.isArray(body.screens) || body.screens.some((s) => typeof s !== 'string')) {
+          sendJson(res, 400, { error: 'screens must be an array of screen ids' });
+          return;
+        }
+        requested = body.screens as string[];
+      }
+      const formats = resolveFormats(body?.formats);
+      if ('error' in formats) {
+        sendJson(res, 400, { error: formats.error });
+        return;
+      }
+      try {
+        // Preconditions, in D4's order: a live window, the dev server (same
+        // probe as /open: loopback configs only), then the screens resolve.
+        const browser = getBrowser();
+        if (!browser || !(await browser.state()).windowOpen) {
+          sendJson(res, 200, { ok: false, error: 'the live canvas window is not open' });
+          return;
+        }
+        const { config } = await readStudioConfig(dir);
+        const configUrl =
+          typeof config?.url === 'string' && config.url.trim() !== '' ? config.url.trim() : null;
+        if (!configUrl) {
+          sendJson(res, 200, { ok: false, error: 'no .design-studio.json url found' });
+          return;
+        }
+        if (isLoopbackUrl(configUrl)) {
+          const dev = await ensureDevServer(configUrl, { dir });
+          if (!dev.up) {
+            sendJson(res, 200, { ok: false, error: dev.error ?? 'the dev server is not available' });
+            return;
+          }
+        }
+        const registry = await readScreens(dir);
+        if (registry.screens.length === 0) {
+          sendJson(res, 200, { ok: false, error: 'the workspace has no screens to export' });
+          return;
+        }
+        const wanted = requested ?? registry.screens.map((s) => s.id);
+        const unknown = wanted.find((id) => !registry.screens.some((s) => s.id === id));
+        if (unknown !== undefined) {
+          sendJson(res, 400, { error: `unknown screen id: ${unknown}` });
+          return;
+        }
+        // Per-screen readiness from the live browser state (R2); the exported
+        // artboard is the DESIGN source, so the registry-joined URL is printed
+        // (not a drifted in-frame liveUrl from play-mode navigation).
+        const live = (await browser.state()).screens;
+        const screens: ExportScreen[] = registry.screens
+          .filter((s) => wanted.includes(s.id))
+          .map((s) => {
+            const liveScreen = live.find((entry) => entry.id === s.id);
+            return {
+              id: s.id,
+              url: screenUrl(configUrl, s.file),
+              width: s.width,
+              height: s.height,
+              state: liveScreen?.state ?? 'loading',
+              ...(liveScreen?.message ? { message: liveScreen.message } : {}),
+            };
+          });
+        const started = startExportJob({ dir, screens, formats: formats.formats, browser });
+        sendJson(res, 200, started as unknown as Json);
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'export could not start' });
+      }
+      return;
+    }
+
+    // D4 status poll. `dir` and `job` are required query params (400 when
+    // malformed); an unknown job id answers 200 {ok:false,error} — business
+    // failures never ride the transport.
+    if (url.pathname === '/export/status') {
+      const dir = params.get('dir') ?? '';
+      const jobParam = params.get('job') ?? '';
+      if (!path.isAbsolute(dir) || jobParam === '') {
+        sendJson(res, 400, { error: 'dir must be absolute and job is required' });
+        return;
+      }
+      const status = getExportStatus(dir, jobParam);
+      sendJson(res, 200, status as unknown as Json);
+      return;
+    }
+
+    // D7-C: the gate-backed critique digest. A bounded walk over the canvas's
+    // screens (≤12): per-screen probe (no camera move, no resize — the frame's
+    // own inner size is its artboard size), runGateReport, and a bounded
+    // digest the panel composes into the chat as a review REQUEST. 200 always,
+    // except malformed input.
+    if (url.pathname === '/critique') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'POST required' });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'body must be JSON' });
+        return;
+      }
+      const dir = (parsed as { dir?: unknown } | null)?.dir;
+      if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
+        sendJson(res, 400, { error: 'dir must be an absolute workspace path' });
+        return;
+      }
+      const browser = getBrowser();
+      if (!browser || !(await browser.state()).windowOpen) {
+        sendJson(res, 200, { ok: false, error: 'the live canvas window is not open' });
+        return;
+      }
+      const screens = browser.getState().screens;
+      const MAX_CRITIQUE_SCREENS = 12;
+      const taken = screens.slice(0, MAX_CRITIQUE_SCREENS);
+      const ctx = await gatherGateContext(dir).catch(() => ({ files: [], tokens: {} }));
+      const digestScreens: Json[] = [];
+      for (const screen of taken) {
+        const entry: Json = {
+          screen: screen.id,
+          state: screen.state,
+          url: screen.url,
+          width: screen.width,
+          height: screen.height,
+        };
+        try {
+          const probe = await browser.getProbe(screen.id);
+          const gates = runGateReport(probe, ctx);
+          entry.gates = gates.map((gate) => ({
+            id: gate.gate,
+            status: gate.status,
+            findings: gate.findings.slice(0, 3),
+          }));
+          entry.probeCounts = { selectors: probe.selectors.length, cls: probe.cls };
+        } catch {
+          // A mid-navigation world: this screen contributes no gates, but the
+          // digest still names it (the 0–10 critique is advisory anyway).
+          entry.gates = [];
+          entry.probeCounts = { selectors: 0, cls: 0 };
+        }
+        digestScreens.push(entry);
+      }
+      sendJson(res, 200, { screens: digestScreens, truncated: screens.length > MAX_CRITIQUE_SCREENS });
       return;
     }
 
@@ -633,14 +857,28 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'unknown screen id' });
         return;
       }
-      const mode = getLastWorkspace()?.mode ?? 'edit';
-      const viewScreens: CanvasScreen[] = registry.screens.map((s) => ({
-        id: s.id,
-        title: s.title,
-        width: s.width,
-        height: s.height,
-        url: screenUrl(configUrl, s.file),
-      }));
+      // D5 restore sources: view.json is the workspace-persisted authority
+      // (mode/positions/camera); the in-memory echo only fills what view.json
+      // never recorded. Positions merge into the pushed list service-side
+      // (D6: screens.json stays pure design content — x/y never enter it).
+      const view = await readView(dirValue);
+      const mode: CanvasMode = view.mode ?? getLastWorkspace()?.mode ?? 'edit';
+      const viewScreens: CanvasScreen[] = registry.screens.map((s) => {
+        const hasPosition = Object.prototype.hasOwnProperty.call(view.positions, s.id);
+        const position = view.positions[s.id];
+        return {
+          id: s.id,
+          title: s.title,
+          width: s.width,
+          height: s.height,
+          url: screenUrl(configUrl, s.file),
+          // D6/P2-B handoff: positions ride BOTH the cold bake and the warm
+          // setScreens. A stored null = back to auto-grid; an absent key =
+          // omit the pair, which the shell reads as "inherit the live
+          // position" on warm re-pushes (drag-vs-reopen never fights).
+          ...(hasPosition ? { x: position ? position.x : null, y: position ? position.y : null } : {}),
+        };
+      });
 
       try {
         if (viewScreens.length === 0) {
@@ -649,20 +887,28 @@ const server = http.createServer(async (req, res) => {
           // browser-control has its dir fallback.
           const browser = await ensureBrowser(configUrl);
           const nav = await browser.open(configUrl);
-          setLastWorkspace({ dir: dirValue, screens: [], mode, activeScreen: null });
+          setLastWorkspace({ dir: dirValue, screens: [], mode, activeScreen: null, view });
           sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
         } else {
           const active = screenParam ?? viewScreens[0]!.id;
-          const browser = await ensureBrowser();
+          const browser: Browser = await ensureBrowser();
           // Cold: openWorkspace bakes the screens into the ViewerConfig at
           // launch; warm: it pushes setScreens into the live shell (spec §B —
-          // the Browser implements the cold/warm split itself).
-          await asCanvas(browser).openWorkspace({ screens: viewScreens, baseUrl: configUrl, mode });
-          await asCanvas(browser).setActive(active);
-          setLastWorkspace({ dir: dirValue, screens: registry.screens, mode, activeScreen: active });
+          // the Browser implements the cold/warm split itself). The dir rides
+          // the cfg so currentWorkspaceDir() is non-null for browser-control's
+          // dir fallback (P1-browser seam 2).
+          await browser.openWorkspace({ dir: dirValue, screens: viewScreens, baseUrl: configUrl, mode });
+          await browser.setActive(active);
+          // R9/D5 restore, binding order in ONE transaction after ready:
+          // setScreens (view.json positions merged) → setMode → restoreCamera.
+          // A repeated /open is idempotent: §C setScreens replaces the whole
+          // list and the camera push is a no-op when nothing was persisted.
+          await browser.restoreWorkspaceView({ screens: viewScreens, mode, camera: view.camera });
+          setLastWorkspace({ dir: dirValue, screens: registry.screens, mode, activeScreen: active, view });
           // Same shape /state answers with: {ok, started} + BrowserState (which
-          // P1-browser extends with mode/screens/activeScreen).
-          const state = (await browser.state()) as Record<string, unknown>;
+          // P1-browser extends with mode/screens/activeScreen; R1/R2 add
+          // modeApplied and per-screen state/message).
+          const state = await browser.state();
           sendJson(res, 200, { ok: true, started, ...state });
         }
       } catch (error) {

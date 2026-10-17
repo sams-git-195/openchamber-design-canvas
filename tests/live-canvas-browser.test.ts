@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createConnection } from 'node:net';
-import { access, mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { inflateSync } from 'node:zlib';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { Browser } from '../service/browser.ts';
 import { ensureBrowser } from '../service/surface.ts';
 import { runVerification } from '../service/verify.ts';
@@ -399,5 +401,152 @@ test('setScreens rebuilds the grid warm without a second capability URL', { time
     assert.equal(browser.getState().screens.length, 2, 'the grid grew in place');
     assert.equal(await browser.pageTargetCount(), firstTargets, 'setScreens never launched a second window');
     assert.equal(await browser.evaluate('location.pathname', 'two'), '/two');
+  });
+});
+
+// ---- P2-A pins (SPEC-V3-P2-SCOPE.md R3/R5/R6, D5 write path) ---------------
+
+test('canvas workspace: capture(screen) reports natural size and viewport() tracks the active artboard (R5/R-CAP)', { timeout: 120000 }, async (t) => {
+  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  await owned(async (browser, url) => {
+    await browser.openWorkspace({
+      screens: [
+        { id: 'a', url: url + 'a', width: 1280, height: 800, title: 'A' },
+        { id: 'b', url: url + 'b', width: 640, height: 900, title: 'B' },
+      ],
+      baseUrl: url,
+      mode: 'play',
+    });
+    // R-CAP: capture('b') returns B's NATURAL registry size (not the window
+    // viewport) even while a is active.
+    const shot = await browser.capture('b');
+    assert.deepEqual([shot.width, shot.height], [640, 900], 'capture(screen) reports the artboard natural size');
+    // R5: viewport() answers what the shell actually renders for the ACTIVE
+    // artboard — the summary source that keeps capture reports truthful.
+    await until(async () => {
+      const shellScreens = JSON.parse(await shell(browser, "JSON.stringify(__dsCanvas.getScreens())")) as Array<{ id: string; width: number; height: number }>;
+      const active = shellScreens.find((s) => s.id === browser.getState().activeScreen);
+      const vp = browser.viewport();
+      return Boolean(active && vp.width === active.width && vp.height === active.height);
+    }, 'viewport() matches the shell-reported active artboard size');
+  });
+});
+
+test('retry(screen) reloads ONLY that artboard — sibling artboards are untouched (R3)', { timeout: 120000 }, async (t) => {
+  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  await owned(async (browser, url, nav) => {
+    await browser.openWorkspace({
+      screens: [
+        { id: 'a', url: url + 'a', width: 1280, height: 800, title: 'A' },
+        { id: 'b', url: url + 'b', width: 640, height: 900, title: 'B' },
+      ],
+      baseUrl: url,
+      mode: 'play',
+    });
+    await until(async () => Boolean((await boardStates(browser)).every((board) => board.state === 'ready')), 'both artboards ready');
+    const aIdentity = await browser.evaluate('fixtureIdentity', 'a');
+    const bIdentity = await browser.evaluate('fixtureIdentity', 'b');
+    assert.notEqual(aIdentity, bIdentity, 'each artboard got its own document');
+    const requestsBefore = nav.requests.filter((path) => path === '/b').length;
+    await shell(browser, "__dsCanvasSend(JSON.stringify({type:'retry',screen:'b'}))");
+    await until(async () => (await browser.evaluate('fixtureIdentity', 'b')) !== bIdentity, 'screen b reloaded on retry');
+    assert.equal(await browser.evaluate('fixtureIdentity', 'a'), aIdentity, 'retry(B) never reloads A');
+    assert.equal(await browser.evaluate('location.pathname', 'a'), '/a', "A's recorded URL is unchanged");
+    assert.equal(nav.requests.filter((path) => path === '/b').length, requestsBefore + 1, 'exactly one reload of B was issued');
+  });
+});
+
+test('shell camera-changed/screen-move persist into view.json (D5 write path, coalesced)', { timeout: 120000 }, async (t) => {
+  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  const workdir = await mkdtemp(path.join(tmpdir(), 'ds-view-shell-'));
+  try {
+    await owned(async (browser, url) => {
+      await browser.openWorkspace({
+        dir: workdir,
+        screens: [
+          { id: 'a', url: url + 'a', width: 1280, height: 800, title: 'A' },
+          { id: 'b', url: url + 'b', width: 640, height: 900, title: 'B' },
+        ],
+        baseUrl: url,
+        mode: 'play',
+      });
+      // The shell (P2-B) emits these debounced; the service side here is the
+      // inbound pipeline: camera-changed coalesces, screen-move merges per key.
+      await shell(browser, "__dsCanvasSend(JSON.stringify({type:'camera-changed',camera:{mode:'manual',scale:1.5,panX:-120,panY:-40}}))");
+      await shell(browser, "__dsCanvasSend(JSON.stringify({type:'camera-changed',camera:{mode:'manual',scale:1.75,panX:-120,panY:-40}}))");
+      await shell(browser, "__dsCanvasSend(JSON.stringify({type:'screen-move',screen:'b',x:1568,y:0}))");
+      const viewFile = path.join(workdir, '.design-studio', 'view.json');
+      await until(async () => {
+        try {
+          const view = JSON.parse(await readFile(viewFile, 'utf8')) as { camera?: { scale?: number; panX?: number; panY?: number }; positions?: Record<string, { x: number; y: number }> };
+          return view.camera?.scale === 1.75 && view.positions?.b?.x === 1568;
+        } catch {
+          return false;
+        }
+      }, 'view.json records the coalesced camera and the screen move');
+      const view = JSON.parse(await readFile(viewFile, 'utf8')) as { camera: { scale: number; panX: number; panY: number }; positions: Record<string, { x: number; y: number }> };
+      assert.equal(view.camera.panX, -120);
+      assert.deepEqual(view.positions.b, { x: 1568, y: 0 }, 'the drag persisted that artboard only');
+      assert.equal('a' in view.positions, false, 'screens without a drag have no position entry');
+      // The default mode (edit) rides along: no mode was sent, none persisted.
+    });
+  } finally {
+    await rm(workdir, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('restoreCamera accepts the §C grid extents (64–65536) and rejects below (R6)', { timeout: 120000 }, async (t) => {
+  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  await owned(async (browser, url) => {
+    await browser.openWorkspace({ screens: [{ id: 'a', url: url + 'a', width: 1280, height: 800, title: 'A' }], baseUrl: url, mode: 'play' });
+    await until(async () => (await boardStates(browser)).every((board) => board.state === 'ready'), 'the artboard is ready');
+    const before = await browser.getCamera();
+    // The widened grid-bbox extent: 64 is accepted (applyLayout + shell push).
+    await browser.restoreCamera({ layoutMode: 'page', preset: 'desktop', width: 64, height: 64, nominalHeight: 64, reason: '', mode: 'manual', scale: 1, panX: 0, panY: 0 });
+    const restored = await browser.getCamera();
+    assert.equal(restored?.scale, 1, 'the 64px grid extent camera was accepted');
+    assert.notEqual(restored?.scale ?? null, null);
+    // Below the 64 grid extent is refused by both validators: no crash, no move.
+    await browser.restoreCamera({ layoutMode: 'page', preset: 'desktop', width: 63, height: 63, nominalHeight: 63, reason: '', mode: 'manual', scale: 0.7, panX: 5, panY: 6 });
+    const after = await browser.getCamera();
+    assert.equal(after?.scale ?? null, 1, 'a 63px extent is refused — the previous camera survives');
+    await browser.restoreCamera(before);
+  });
+});
+
+test('positioned screens ride the cold bake and warm setScreens; null=auto, absent=inherit (D6/R9)', { timeout: 120000 }, async (t) => {
+  try { await access(chrome); } catch { t.skip('Chrome unavailable'); return; }
+  await owned(async (browser, url) => {
+    const screenList = () => shell(browser, "JSON.stringify(__dsCanvas.getScreens())").then((raw: unknown) => JSON.parse(String(raw)) as Array<{ id: string; x?: number | null; y?: number | null }>);
+    // Cold open: the positioned pair is baked INTO the ViewerConfig (P2-B
+    // handoff: both the bake and the warm push carry view.json x/y).
+    await browser.openWorkspace({
+      screens: [
+        { id: 'a', url: url + 'posa', width: 1280, height: 800, title: 'A', x: 0, y: 0 },
+        { id: 'b', url: url + 'posb', width: 640, height: 900, title: 'B', x: 1568, y: 48 },
+      ],
+      baseUrl: url,
+      mode: 'play',
+    });
+    await until(async () => {
+      const screens = await screenList();
+      const b = screens.find((s) => s.id === 'b');
+      return b?.x === 1568 && b?.y === 48;
+    }, 'the cold bake carries the view.json positions');
+    // Warm re-push WITHOUT x/y: the shell inherits the live position (race
+    // tolerance — a service push cannot snap a screen back to the auto-grid).
+    await browser.setScreens([
+      { id: 'a', url: url + 'posa', width: 1280, height: 800, title: 'A' },
+      { id: 'b', url: url + 'posb', width: 640, height: 900, title: 'B' },
+    ]);
+    await pause(200);
+    const inherited = (await screenList()).find((s) => s.id === 'b');
+    assert.equal(inherited?.x, 1568, 'an x/y-less warm push inherits the live position');
+    // An explicit null pair = "back to the auto-grid" (view.json null).
+    await browser.setScreens([
+      { id: 'a', url: url + 'posa', width: 1280, height: 800, title: 'A', x: 0, y: 0 },
+      { id: 'b', url: url + 'posb', width: 640, height: 900, title: 'B', x: null, y: null },
+    ]);
+    await until(async () => (await screenList()).find((s) => s.id === 'b')?.x === null, 'a null pair returns that screen to auto-grid');
   });
 });

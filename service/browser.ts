@@ -24,6 +24,7 @@ import { startViewerServer } from './viewer-server.ts';
 import { ArtifactContexts } from './artifact-context.ts';
 import type { ShellAuthority, DefaultContext } from './artifact-context.ts';
 import type { ViewerPage } from './viewer-ui.ts';
+import { mergeView, mergeViewCoalesced, sanitizeCamera } from './view-state.ts';
 
 // FORK-WIN: `DS_CHROME_PATH` always wins; without it, standard Windows install
 // locations are probed, macOS keeps its bundle default, and Linux falls back to
@@ -166,7 +167,8 @@ export type PickedElement = {
 /** A pick always names the artboard it came from (spec §B/D). */
 export type ScreenPick = PickedElement & { screen: string };
 
-/** One canvas artboard as /state reports it (spec §B GET /state extension). */
+/** One canvas artboard as /state reports it (spec §B GET /state extension;
+ *  R2 extends each entry with the per-screen readiness state and message). */
 export type ScreenState = {
   id: string;
   title: string;
@@ -174,6 +176,10 @@ export type ScreenState = {
   width: number;
   height: number;
   active: boolean;
+  /** Per-artboard readiness (spec §D, R2): export/critique consume this. */
+  state: 'loading' | 'ready' | 'error';
+  /** Present with the specific reason when state is 'error'. */
+  message?: string;
 };
 
 /**
@@ -181,6 +187,11 @@ export type ScreenState = {
  * (joined against `baseUrl` here); the service routes join URLs at their own
  * caller (spec §B: "screens urls = baseUrl-joined by the CALLER"), so entries
  * may also arrive with a ready-made `url` — the browser accepts either.
+ *
+ * D6 + P2-B handoff: entries may carry view.json positions as `x,y`
+ * (number|null; null = "back to auto-grid" like view.json; one-sided/junk
+ * pairs are dropped here so a push can never poison the shell's all-or-nothing
+ * setScreens; ABSENT = the shell's inherit semantics for warm re-pushes).
  */
 export type CanvasScreenInput = {
   id: string;
@@ -189,6 +200,8 @@ export type CanvasScreenInput = {
   title?: string;
   width?: number;
   height?: number;
+  x?: number | null;
+  y?: number | null;
 };
 
 export type BrowserState = {
@@ -199,8 +212,12 @@ export type BrowserState = {
   /** True while the live Chrome window process is up; false once it has exited. */
   windowOpen: boolean;
   mode: 'edit' | 'play';
+  /** R1: false when the shell refused the last setMode push (twice). */
+  modeApplied: boolean;
   screens: ScreenState[];
   activeScreen: string | null;
+  /** The screen the LAST pick landed on (panel contract: /state.lastPickScreen). */
+  lastPickScreen: string | null;
   dir: string | null;
 };
 
@@ -210,6 +227,21 @@ export type BrowserState = {
 /** CSS that freezes animations/transitions and hides the text caret for a shot. */
 const STABLE_STYLE =
   '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
+
+/**
+ * The PDF freeze evaluated raw on the hidden print target after its load event
+ * (spec D3 step 6 — same freeze approach as applyStableMode, but no
+ * ArtifactContexts involvement: fonts-ready + double-rAF + the STABLE_STYLE
+ * injection run directly through the throwaway flattened session).
+ */
+const PRINT_FREEZE = `(async()=>{
+  if(document.fonts&&document.fonts.ready){try{await document.fonts.ready;}catch{}}
+  await new Promise(resolve=>{requestAnimationFrame(()=>requestAnimationFrame(resolve));});
+  const style=document.createElement('style');
+  style.textContent=${JSON.stringify(STABLE_STYLE)};
+  (document.head||document.documentElement).appendChild(style);
+  return true;
+})()`;
 
 function emptyProbeReport(): ProbeReport {
   return {
@@ -364,6 +396,31 @@ function once(cdp: CdpClient, method: string, timeoutMs: number): Promise<boolea
   return new Promise((resolve) => {
     let done = false;
     const off = cdp.on(method, () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      off();
+      resolve(true);
+    });
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      off();
+      resolve(false);
+    }, timeoutMs);
+  });
+}
+
+/**
+ * Like `once()`, but only counts events that name one flattened session — the
+ * hidden PDF target's `Page.loadEventFired` must not be confused with the app
+ * window's (spec D3 step 5). One-shot, self-removing on event or timeout.
+ */
+function onceInSession(cdp: CdpClient, method: string, sessionId: string, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    const off = cdp.on(method, (_params, eventSession) => {
+      if (eventSession !== sessionId) return;
       if (done) return;
       done = true;
       clearTimeout(timer);
@@ -847,7 +904,13 @@ const SHELL_BRIDGE = `(() => {
   if(!window.__dsCanvas||typeof window.__dsShellState!=='function')return false;
   if(window.__dsShellBridgeInstalled)return true;window.__dsShellBridgeInstalled=true;
   let prior='';
-  const update=()=>{const panLayer=document.getElementById('pan-layer');const value=JSON.stringify({menu:!!document.querySelector('[aria-expanded="true"]'),pan:!!(panLayer&&!panLayer.hidden)});if(value!==prior){prior=value;window.__dsShellState(value);}};
+  // The toolbar publishes openMenu/pan through __dsToolbarBridge's snapshot; the
+  // DOM scan is the fallback for shells whose menu still expresses state via
+  // aria-expanded. P2-B's toolbar renders menus as popovers (no attribute
+  // mutation fires), so BOTH an observer and a snapshot subscription drive the
+  // same update — whichever signals first wins.
+  const update=()=>{const panLayer=document.getElementById('pan-layer');const bridge=window.__dsToolbarBridge;const snapshot=(bridge&&typeof bridge.getSnapshot==='function')?bridge.getSnapshot():null;const value=JSON.stringify({menu:!!(snapshot?snapshot.openMenu:document.querySelector('[aria-expanded="true"]')),pan:!!(snapshot?snapshot.pan:panLayer&&!panLayer.hidden)});if(value!==prior){prior=value;window.__dsShellState(value);}};
+  if(typeof window.__dsToolbarBridge==='object'&&window.__dsToolbarBridge&&typeof window.__dsToolbarBridge.subscribe==='function')window.__dsToolbarBridge.subscribe(update);
   new MutationObserver(update).observe(document.body,{subtree:true,attributes:true,attributeFilter:['hidden','aria-expanded','aria-pressed']});update();
   document.addEventListener('keydown',e=>{if(window.__dsCaptureActive){e.preventDefault();e.stopImmediatePropagation();}},true);
   const layer=document.getElementById('pan-layer');
@@ -907,9 +970,32 @@ function clampScreenSize(value: unknown, fallback: number): number {
   return Math.max(200, Math.min(8192, n));
 }
 
+/** View.json positions clamp to ±32768 (D5/D6; the shell clamps identically). */
+function clampPosition(value: number): number {
+  return Math.max(-32768, Math.min(32768, Math.round(value)));
+}
+
+/**
+ * Normalize an incoming x/y pair (D6): both numbers → clamped; both null →
+ * auto; anything one-sided or junk → undefined (the push omits the pair and
+ * the shell inherits the live position — a malformed pair must never trigger
+ * the shell's all-or-nothing setScreens refusal).
+ */
+function normalizePositionPair(
+  raw: { x?: unknown; y?: unknown },
+): { x?: number | null; y?: number | null } {
+  if (raw.x === null && raw.y === null) return { x: null, y: null };
+  if (typeof raw.x === 'number' && Number.isFinite(raw.x) && typeof raw.y === 'number' && Number.isFinite(raw.y)) {
+    return { x: clampPosition(raw.x), y: clampPosition(raw.y) };
+  }
+  return {};
+}
+
 /** One tracked artboard: registry config (`url`), what the frame currently
- *  shows (`liveUrl`/`liveTitle`) and the per-screen readiness state (spec §D:
- *  chrome-error detection is per screen, never a global blank). */
+ *  shows (`liveUrl`/`liveTitle`), the per-screen readiness state (spec §D:
+ *  chrome-error detection is per screen, never a global blank), and the
+ *  CONFIGURED position pair (D6 — view.json-merged x/y from the last
+ *  applyScreenRegistry call; the shell owns the LIVE position). */
 type ScreenRecord = {
   id: string;
   url: string;
@@ -918,6 +1004,9 @@ type ScreenRecord = {
   liveTitle: string;
   width: number;
   height: number;
+  /** undefined = absent from the push (shell inherits); number = placed; null = auto. */
+  x?: number | null;
+  y?: number | null;
   state: 'loading' | 'ready' | 'error';
   message: string;
 };
@@ -1073,6 +1162,14 @@ export class Browser {
   private operationTail: Promise<unknown> = Promise.resolve();
   // ---- Design Canvas state (spec §B/§D): the multi-screen workspace model.
   private mode: 'edit' | 'play' = 'edit';
+  /** R1: whether the shell actually accepted the last setMode push. */
+  private modeApplied = true;
+  /**
+   * True once a workspace opened through openWorkspace() (not the legacy
+   * url-only launch). Gates R5's natural-size viewport reporting so the v1
+   * single-`preview` launch keeps its byte-identical behavior.
+   */
+  private workspaceMode = false;
   private screenOrder: string[] = [];
   private screens = new Map<string, ScreenRecord>();
   private activeScreenId: string | null = null;
@@ -1126,6 +1223,7 @@ export class Browser {
     if (typeof cfg.dir === 'string' && cfg.dir) this.workspaceDir = cfg.dir;
     if (typeof cfg.baseUrl === 'string' && cfg.baseUrl) this.baseUrl = cfg.baseUrl;
     if (cfg.mode === 'edit' || cfg.mode === 'play') this.mode = cfg.mode;
+    this.workspaceMode = true;
     this.applyScreenRegistry(cfg.screens ?? []);
     if (!this.screenOrder.length) throw new Error('a canvas workspace needs at least one valid screen');
     if (this.cdp) {
@@ -1159,10 +1257,65 @@ export class Browser {
     await this.refreshUnsettled();
   }
 
+  /**
+   * R9 (SPEC-V3-P2-SCOPE.md D5): the warm `/open` restore push, in ONE
+   * transaction and in the binding order — setScreens (with view.json
+   * positions merged in) → setMode → restoreCamera. A repeated `/open` is
+   * idempotent: §C `setScreens` replaces the whole artboard list, so no
+   * double artboards. `camera` null means "never persisted" — restore nothing.
+   */
+  async restoreWorkspaceView(input: {
+    screens?: CanvasScreenInput[];
+    mode?: 'edit' | 'play';
+    camera?: Record<string, unknown> | null;
+  }): Promise<void> {
+    if (!this.cdp) return; // a window mid-launch settles these pushes via `ready`
+    await this.transaction(async () => {
+      if (input.screens) {
+        await this.shellEvalSettled(`__dsCanvas.setScreens(${JSON.stringify(input.screens)})`);
+      }
+      if (input.mode === 'edit' || input.mode === 'play') {
+        this.modeApplied = await this.applyModePush(input.mode);
+      }
+      if (input.camera) {
+        await this.shellEvalSettled(`__dsCanvas.restoreCamera(${JSON.stringify(input.camera)})`);
+      }
+    });
+  }
+
   async setMode(mode: 'edit' | 'play'): Promise<void> {
     if (mode !== 'edit' && mode !== 'play') throw new Error('Unsupported canvas mode');
+    // R1: echo the REQUESTED mode even when the shell refuses, but flag the
+    // refusal on /state.modeApplied so the panel/agent can tell them apart.
     this.mode = mode;
-    if (this.cdp) await this.shellEvalSettled(`__dsCanvas.setMode(${JSON.stringify(mode)})`);
+    this.modeApplied = this.cdp ? await this.applyModePush(mode) : true;
+    // D5: the canvas toolbar's mode toggle persists through the same view.json
+    // funnel as camera/positions. The REQUESTED mode is what persists (user
+    // intent, like the echo); modeApplied separately marks shell acceptance.
+    if (this.workspaceDir) {
+      void mergeView(this.workspaceDir, { mode }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * R1: await the shell's `__dsCanvas.setMode` answer and treat it strictly —
+   * only an explicit `true` counts. A refusal (or the P1 shell returning
+   * nothing) is retried exactly once; a second refusal returns false (the
+   * caller keeps the requested echo and flags modeApplied:false). A dead
+   * shell lease counts as a refusal, never a thrown error: /mode must keep
+   * answering 200.
+   */
+  private async applyModePush(mode: 'edit' | 'play'): Promise<boolean> {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        if ((await this.shellEvalSettled(`__dsCanvas.setMode(${JSON.stringify(mode)})`, 4000, false)) === true) {
+          return true;
+        }
+      } catch {
+        /* lease storm or a dead world; the retry below or the refusal path */
+      }
+    }
+    return false;
   }
 
   /** Focus one artboard: the service is the authority, the shell is echoed. */
@@ -1170,6 +1323,13 @@ export class Browser {
     if (!SCREEN_ID_RE.test(id) || !this.screens.has(id)) throw new Error(`unknown screen: ${id}`);
     this.activeScreenId = id;
     if (this.contexts) this.contexts.activeScreenId = id;
+    // R5: the emulated viewport tracks the ACTIVE screen's natural size
+    // during a canvas session (the shell's normalizeCapture frames the active
+    // artboard at its tracked size), so capture/verification summaries stay
+    // truthful from the moment of activation. Later layout quals legitimately
+    // rewrite it (they restyle the artboard away from natural — then the
+    // viewport reports the qualified size, which is the truth again).
+    this.syncViewportToActive();
     if (this.cdp) {
       await this.pushShellActive();
       // Re-arm the layout transaction for the newly focused artboard: its
@@ -1186,7 +1346,9 @@ export class Browser {
   /** The pick, tagged with the screen it came from (spec §B). */
   pick(): ScreenPick | null { return this.lastPick; }
 
-  /** Spec §B: existing BrowserState plus mode/screens/activeScreen/dir. */
+  /** Spec §B: existing BrowserState plus mode/screens/activeScreen/dir; R1/R2
+   *  add modeApplied, per-screen state/message, and the panel's
+   *  lastPickScreen field. */
   getState(): BrowserState {
     const active = this.activeScreenId ? this.screens.get(this.activeScreenId) ?? null : null;
     return {
@@ -1199,8 +1361,10 @@ export class Browser {
       // document facts.
       windowOpen: this.closedAt === null && (this.chrome !== null || this.cdp !== null),
       mode: this.mode,
+      modeApplied: this.modeApplied,
       screens: this.screenOrder.map((id) => this.screenState(id)),
       activeScreen: this.activeScreenId,
+      lastPickScreen: this.lastPick?.screen ?? null,
       dir: this.workspaceDir,
     };
   }
@@ -1214,6 +1378,8 @@ export class Browser {
       width: record?.width ?? VIEWPORT_WIDTH,
       height: record?.height ?? VIEWPORT_HEIGHT,
       active: id === this.activeScreenId,
+      state: record?.state ?? 'loading',
+      ...(record?.message ? { message: record.message } : {}),
     };
   }
 
@@ -1232,6 +1398,7 @@ export class Browser {
       const width = clampScreenSize(raw.width, previous?.width ?? this.viewportWidth);
       const height = clampScreenSize(raw.height, previous?.height ?? this.viewportHeight);
       const moved = previous !== undefined && previous.url !== url;
+      const position = normalizePositionPair(raw);
       next.set(id, {
         id,
         url,
@@ -1240,6 +1407,7 @@ export class Browser {
         liveTitle: moved ? '' : previous?.liveTitle ?? '',
         width,
         height,
+        ...(position.x !== undefined ? { x: position.x, y: position.y } : {}),
         state: moved ? 'loading' : previous?.state ?? 'loading',
         message: moved ? '' : previous?.message ?? '',
       });
@@ -1254,13 +1422,39 @@ export class Browser {
       this.layoutContext = null;
     }
     if (this.contexts) this.contexts.activeScreenId = this.activeScreenId;
+    this.syncViewportToActive();
   }
 
-  /** The baked/pushed ViewerConfig screen list: {id,url,width,height,title} (§C). */
-  private viewerScreens(): Array<{ id: string; url: string; width: number; height: number; title: string }> {
+  /**
+   * R5: in a canvas session the emulated viewport tracks the ACTIVE screen's
+   * natural size — the shell's normalizeCapture frames the active artboard at
+   * its tracked size, so `viewport()` (and everything that summarizes from it)
+   * answers the size a capture actually has. Later layout qualifications/
+   * resizes legitimately rewrite it (they restyle the artboard away from
+   * natural — then the viewport reports that size, which is the truth again).
+   */
+  private syncViewportToActive(): void {
+    if (!this.workspaceMode) return;
+    const record = this.activeScreenId ? this.screens.get(this.activeScreenId) : undefined;
+    if (!record) return;
+    this.viewportWidth = record.width;
+    this.viewportHeight = record.height;
+  }
+
+  /** The baked/pushed ViewerConfig screen list: {id,url,width,height,title[,x,y]}
+   *  (§C; D6 positions ride the push — absent pair = the shell's inherit rule,
+   *  null pair = back to auto-grid). */
+  private viewerScreens(): Array<{ id: string; url: string; width: number; height: number; title: string; x?: number | null; y?: number | null }> {
     return this.screenOrder.map((id) => {
       const record = this.screens.get(id)!;
-      return { id, url: record.url, width: record.width, height: record.height, title: record.title };
+      return {
+        id,
+        url: record.url,
+        width: record.width,
+        height: record.height,
+        title: record.title,
+        ...(record.x !== undefined ? { x: record.x, y: record.y } : {}),
+      };
     });
   }
 
@@ -1734,7 +1928,7 @@ export class Browser {
   private async canvasCommand(command:unknown,authority:ShellAuthority):Promise<void>{
     if(!command||typeof command!=='object')return;
     if(!this.contexts?.shellAuthorityCurrent(authority))return;
-    const value=command as {type?:string;width?:number;height?:number;id?:string;mode?:string;preset?:string;screen?:string;x?:number;y?:number};
+    const value=command as {type?:string;width?:number;height?:number;id?:string;mode?:string;preset?:string;screen?:string;x?:number;y?:number;camera?:unknown};
     // Per-screen layout machinery is active-screen-only in v1 (spec §C): a
     // message naming another screen is accepted but applied only when it is
     // the active artboard.
@@ -1779,6 +1973,24 @@ export class Browser {
     // with the shell build at P2.
     else if(value.type==='mode-request'&&(value.mode==='edit'||value.mode==='play')){
       await this.setMode(value.mode);
+    }
+    // ---- D5/D6: shell-driven view-state persistence -------------------------
+    else if(value.type==='camera-changed'){
+      // The shell debounces ≥400 ms after the last paint; the service
+      // coalesces writes further on a 300 ms per-dir queue. Validated
+      // §C-style server-side: a payload that cannot become a {mode, scale,
+      // panX, panY} camera is dropped, never persisted. No dir recorded (no
+      // workspace opened yet) → the camera cannot be persisted either.
+      const camera=sanitizeCamera(value.camera);
+      const dir=this.workspaceDir;
+      if(camera&&dir)void mergeViewCoalesced(dir,{camera}).catch(()=>undefined);
+    }
+    else if(value.type==='screen-move'&&typeof screen==='string'&&this.screens.has(screen)&&[value.x,value.y].every(n=>typeof n==='number'&&Number.isFinite(n))){
+      // Drag pointerup (live drag is in-memory in the shell): per-key merge of
+      // that artboard's camera-space natural-px position. Last-write-wins on
+      // the same key is documented, not defended (D6).
+      const dir=this.workspaceDir;
+      if(dir)void mergeView(dir,{positions:{[screen]:{x:Number(value.x),y:Number(value.y)}}}).catch(()=>undefined);
     }
   }
   /**
@@ -1999,6 +2211,10 @@ export class Browser {
   async input(screen: string | undefined, events: SurfaceInputEvent[]): Promise<void>;
   async input(a: SurfaceInputEvent[] | string | undefined, b?: SurfaceInputEvent[]): Promise<void> {
     const events = Array.isArray(a) ? a : b ?? [];
+    // FORK-MERGE (P1-browser seam 7): edit-mode artboards freeze native input
+    // (decision 8). Input-heavy browser-control actions could temporarily
+    // restore play around THIS dispatch and re-apply edit afterwards; shipped
+    // semantics are left untouched — P2-D owns that decision.
     const requestedScreen = Array.isArray(a) ? undefined : a;
     return this.transaction(async()=>{
     const cdp = this.requireCdp();
@@ -2249,8 +2465,10 @@ export class Browser {
     if (!screen) throw new Error('no canvas screen is active; open a workspace first');
     const token=await this.shellEvalSettled(`__dsCanvas.beginCapture(${requestedScreen!==undefined?JSON.stringify(requestedScreen):''})`);
     this.captureInFlight=true;
+    let overrideApplied=false;
     try{
     await cdp.send('Emulation.setDeviceMetricsOverride',{width:Math.max(1000,this.viewportWidth+48),height:this.viewportHeight+256,deviceScaleFactor:1,mobile:false},session);
+    overrideApplied=true;
     const bounds=await this.shellEvalSettled(`__dsCanvas.normalizeCapture(${JSON.stringify(token)})`,4000,true) as {x:number;y:number;width:number;height:number};
     const isActive=screen===this.activeScreenId;
     if(isActive&&(bounds.width!==this.viewportWidth||bounds.height!==this.viewportHeight))throw new Error('Canvas capture geometry did not match the artifact viewport');
@@ -2266,9 +2484,126 @@ export class Browser {
       height: isActive ? this.viewportHeight : bounds.height,
     };
     }finally{
-      try{await cdp.send('Emulation.clearDeviceMetricsOverride',{},session);}
-      finally{try{await this.shellEvalSettled(`__dsCanvas.endCapture(${JSON.stringify(token)})`);}finally{this.captureInFlight=false;}}
+      // The override must end CLEARED on every path, including when the SET
+      // itself failed. A bare clear after a rejected set leaves Chromium's
+      // input routing into the frames dead (native clicks stop landing), so a
+      // failed SET is repaired with a full set-then-clear cycle — and the
+      // renderer transaction ends FIRST, because the shell's capture guard
+      // swallows geometry ramps (its repaint would otherwise pin the camera
+      // at the emulated width instead of the window's).
+      if(!overrideApplied){
+        try{await this.shellEvalSettled(`__dsCanvas.endCapture(${JSON.stringify(token)})`);}
+        finally{
+          try{await cdp.send('Emulation.setDeviceMetricsOverride',{width:Math.max(1000,this.viewportWidth+48),height:this.viewportHeight+256,deviceScaleFactor:1,mobile:false},session);}
+          catch{/* still attempt the clear below */}
+          try{await cdp.send('Emulation.clearDeviceMetricsOverride',{},session);}catch{/* best effort */}
+          // The shell's resize observer repaints asynchronously after the
+          // emulation cycle; wait for the camera transform to stop moving so
+          // the canvas is AT REST when capture() rejects (a native click
+          // dispatched immediately after must land, never race the settle).
+          let prior='';let stable=0;
+          for(let attempt=0;attempt<20&&stable<2;attempt+=1){
+            const current=await this.shellEval("document.getElementById('camera').style.cssText").catch(()=>'');
+            if(current===prior)stable+=1;else{stable=0;prior=String(current);}
+            if(stable<2)await delay(30);
+          }
+          this.captureInFlight=false;
+        }
+      }else{
+        try{await cdp.send('Emulation.clearDeviceMetricsOverride',{},session);}
+        finally{try{await this.shellEvalSettled(`__dsCanvas.endCapture(${JSON.stringify(token)})`);}finally{this.captureInFlight=false;}}
+      }
     }
+    });
+  }
+
+  /**
+   * Print one screen URL to PDF in a hidden throwaway page target in the SAME
+   * Chrome (spec D3). Never mutates canvas state. Runs inside the operation
+   * transaction, so it serializes against captures/navigations; the injection
+   * world (bindings/scripts/setAutoAttach) deliberately does NOT exist on the
+   * throwaway session.
+   *
+   * The binding, EXACT call sequence (D3 steps 1–8): validate → createTarget →
+   * attach flattened → park off-screen BEFORE content → Page.enable + one-shot
+   * session-filtered load waiter (15 s, non-fatal) → navigate → fonts/stable
+   * freeze → printToPDF at the screen's physical size → finally closeTarget +
+   * listener cleanup. `Page.printToPDF` prints the top-level page of ITS
+   * session; the canvas shell prints the camera grid, so the screen URL loads
+   * top-level here (paperWidth/Height = natural px / 96 in).
+   */
+  async printScreenToPdf(url: string, widthPx: number, heightPx: number): Promise<Buffer> {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new Error('canvas pdf export requires an http(s) URL without credentials');
+    }
+    if (!isWebSafeUrl(url) || parsed.username || parsed.password) {
+      throw new Error('canvas pdf export requires an http(s) URL without credentials');
+    }
+    if (![widthPx, heightPx].every((n) => Number.isFinite(n) && Number.isInteger(n) && n >= 200 && n <= 8192)) {
+      throw new Error('canvas pdf export requires screen sizes from 200 to 8192');
+    }
+    return this.transaction(async () => {
+      const cdp = this.requireCdp();
+      let targetId = '';
+      let sessionId = '';
+      try {
+        // 2+3. A fresh page target, attached flattened (the hand-rolled CdpClient
+        // already addresses any flattened session by id).
+        const created = await cdp.send('Target.createTarget', { url: 'about:blank' });
+        targetId = String(created.targetId ?? '');
+        const attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+        sessionId = String(attached.sessionId ?? '');
+        // 4. Park it off-screen BEFORE any content exists (D14: no visible flash).
+        const windowRes = await cdp.send('Browser.getWindowForTarget', { targetId });
+        await cdp.send('Browser.setWindowBounds', {
+          windowId: windowRes.windowId,
+          bounds: { left: -32000, top: -32000, width: 1200, height: 900, windowState: 'normal' },
+        });
+        // 5. No Runtime.addBinding, no addScriptToEvaluateOnNewDocument, no
+        // Target.setAutoAttach on this session — the pick/probe world must not
+        // exist here. The load waiter matches ONLY this flattened session.
+        await cdp.send('Page.enable', {}, sessionId);
+        const loaded = onceInSession(cdp, 'Page.loadEventFired', sessionId, 15_000);
+        // 6. Navigate top-level; a slow document simply times the waiter out
+        // (non-fatal) and is frozen where it is.
+        await cdp.send('Page.navigate', { url }, sessionId);
+        await loaded;
+        await cdp.send('Runtime.evaluate', { expression: PRINT_FREEZE, awaitPromise: true, returnByValue: true }, sessionId);
+        // 7. Page.printToPDF prints the top-level page of this session. Paper is
+        // the screen's NATURAL size at 96 dpi; a screen taller than the page
+        // paginates at the same size (documented: overflow is a gate finding,
+        // not an export concern). The 30 s CdpClient timeout caps this per
+        // screen — a timeout becomes a per-screen {ok:false}, never job death.
+        const result = await cdp.send(
+          'Page.printToPDF',
+          {
+            printBackground: true,
+            preferCSSPageSize: false,
+            scale: 1,
+            paperWidth: widthPx / 96,
+            paperHeight: heightPx / 96,
+            marginTop: 0,
+            marginBottom: 0,
+            marginLeft: 0,
+            marginRight: 0,
+          },
+          sessionId,
+        );
+        const data = typeof result.data === 'string' ? result.data : '';
+        return Buffer.from(data, 'base64');
+      } finally {
+        // 8. Always close the throwaway target — including every failure path
+        // (R7 pin: a mid-print throw still ends with pageTargetCount()===1).
+        // onceInSession self-removes once it fires or times out.
+        try {
+          await cdp.send('Target.closeTarget', { targetId });
+        } catch {
+          /* the target was already gone; R7's invariant is still satisfied */
+        }
+      }
     });
   }
 

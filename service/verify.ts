@@ -297,6 +297,15 @@ export type RunVerificationOptions = {
   navigate?: boolean;
   maxIterations?: number;
   deadlineMs?: number;
+  /**
+   * R4 (SPEC-V3-P2-SCOPE.md D9): the artboard the matrix runs against.
+   * Omitted = the ACTIVE screen (decision 11 — zero-arg call sites keep
+   * compiling and behaving exactly as before). When named, that screen is
+   * activated for the run (browser.resize is its temporary frame override,
+   * never persisted into screens.json) and the previous active screen is
+   * restored in the finally together with viewport + camera.
+   */
+  screen?: string;
 };
 
 export async function runVerification(opts: RunVerificationOptions): Promise<VerifyReport> {
@@ -313,6 +322,8 @@ export async function runVerification(opts: RunVerificationOptions): Promise<Ver
   const started = Date.now();
 
   const browser = await ensureBrowser();
+  const previousActive = browser.getState().activeScreen;
+  if (opts.screen) await browser.setActive(opts.screen);
   const restore = browser.viewport();
   const camera = await browser.getCamera();
   try {
@@ -397,7 +408,13 @@ export async function runVerification(opts: RunVerificationOptions): Promise<Ver
   } finally {
     if (getController() !== 'user' && (await browser.state()).windowOpen) {
       try { await browser.resize(restore.width, restore.height); }
-      finally { await browser.restoreCamera(camera); }
+      finally {
+        await browser.restoreCamera(camera);
+        // R4: put the previous active artboard back on top of the restore.
+        if (previousActive !== null && previousActive !== opts.screen) {
+          await browser.setActive(previousActive).catch(() => undefined);
+        }
+      }
     }
   }
 }
