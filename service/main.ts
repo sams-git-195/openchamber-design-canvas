@@ -18,15 +18,31 @@ import { readStudioConfig, resolveConfigPath, writeStudioConfig } from './studio
 import { ensureDevServer, getDevServerStatus, isLoopbackUrl, stopDevServer } from './project-server.ts';
 import { ensureBrowser, getBrowser, stopBrowser } from './surface.ts';
 import { BridgeClaims } from './bridge-claim.ts';
-import { reapOrphanChrome } from './browser.ts';
+import { dockPlacement, reapOrphanChrome } from './browser.ts';
 import { handleBrowserControl } from './browser-control.ts';
 import { handleVerifyRequest } from './verify-routes.ts';
 import { writeHarnessPlugin } from './harness-plugin.ts';
 import { listProjectFiles, resolveReferencePath } from './project-files.ts';
 import { scaffoldProject } from './scaffold.ts';
-import { hasScreensFile, readScreens, screenUrl, writeScreens, type CanvasMode } from './screens.ts';
+import * as scaffoldModule from './scaffold.ts';
+import {
+  hasScreensFile,
+  readScreens,
+  readScreensStrict,
+  screenUrl,
+  writeScreens,
+  type DroppedScreenEntry,
+  type CanvasMode,
+} from './screens.ts';
+import { watchRegistry, type RegistryChange } from './screens-watch.ts';
 import { resolveWorkspaceRoot } from './workspace-root.ts';
-import { getLastWorkspace, setLastWorkspace, updateLastWorkspaceMode, updateLastWorkspaceView } from './last-workspace.ts';
+import {
+  getLastWorkspace,
+  setLastWorkspace,
+  updateLastWorkspaceAgentStatus,
+  updateLastWorkspaceMode,
+  updateLastWorkspaceView,
+} from './last-workspace.ts';
 import { mergeView, readView, validateViewPatch, ViewPatchError } from './view-state.ts';
 import { getExportStatus, resolveFormats, startExportJob } from './export.ts';
 import type { ExportScreen } from './export.ts';
@@ -51,13 +67,16 @@ if (!PORT || !TOKEN) {
 
 /** View form of a screen: the registry entry with `file` joined into `url`
  *  plus optional view.json position fields (D6: merged in service-side;
- *  null = back to auto-grid, absent = the shell's inherit rule). */
+ *  null = back to auto-grid, absent = the shell's inherit rule). `file`
+ *  rides the push so the Browser can answer V4-10 copy-path / send-to-chat
+ *  with the on-disk path. */
 type CanvasScreen = {
   id: string;
   url: string;
   width: number;
   height: number;
   title: string;
+  file?: string;
   x?: number | null;
   y?: number | null;
 };
@@ -119,6 +138,394 @@ async function newestMtime(dir: string, entryAbs: string): Promise<number> {
 
 // Exclusive pick-bridge ownership: one chat window at a time attaches picks.
 const bridge = new BridgeClaims();
+
+// ---- V4-14 (A): workspace-marker guard — defense in depth -------------------
+// PUT /screens, PATCH /view, POST /export, POST /critique and POST
+// /screens/sync may only ACT on a design workspace: the dir must carry a
+// `.design-studio.json` (the marker name stays un-renamed per decision 1).
+// A dir without it is a 400 {error:'not a design workspace'} — malformed by
+// the house rule, because the route was addressed at a non-workspace.
+//
+// FORK-MERGE (V4-14 / integrator): this FROZEN decision re-baselines four
+// PRE-V4 P2-A pins in tests/service.test.ts (NOT lane A's V4 file, so left
+// untouched here) that addressed those routes with BARE mkdtemp dirs:
+//   · 'GET/PUT /screens …'         — PUT now 400 unless the dir has the marker
+//   · 'GET/PATCH /view …'          — PATCH now 400 unless the dir has the marker
+//   · 'POST /export preconditions' — its `{dir:'C:\no-such-workspace'}` →
+//       200 'window not open' NOW returns 400 not-a-design-workspace (the
+//       marker guard runs before D4's window precondition, per V4-14)
+//   · 'POST /critique …'           — same: no-window probe dir must be a marker
+//       workspace to still reach the 200 ok:false window check
+// Fix for each: create `.design-studio.json` in the test dir (the spec's OWN
+// acceptance is "PATCH /view on a PLAIN temp dir → 400", so the guard must
+// stay; only the fixtures change). Lane A's tests/v4-service.test.ts already
+// pins BOTH directions (marker→200, no-marker→400) green.
+async function isDesignWorkspace(dir: string): Promise<boolean> {
+  return (await resolveConfigPath(dir)) !== null;
+}
+
+function sendNotAWorkspace(res: http.ServerResponse): void {
+  sendJson(res, 400, { error: 'not a design workspace' });
+}
+
+// ---- V4-4: live registry watch (one watched dir at a time) -------------------
+let watchStop: (() => void) | null = null;
+let watchedDir: string | null = null;
+/** JSON of the normalized registry last pushed into the shell (dedupe per V4-4). */
+let lastPushedRegistry = '';
+
+/** The notice text for silently-dropped registry entries (≤300 chars, V4-4). */
+function droppedNoticeText(dropped: DroppedScreenEntry[]): string {
+  const parts = dropped.map((d) => `screens.json entry ${d.index} dropped: ${d.reason}`);
+  return parts.join(' · ').slice(0, 300);
+}
+
+/**
+ * One registry tick: errors surface as a shell notice + /state.registryError
+ * while the last good registry STAYS pushed; a good parse clears the error,
+ * reports drops as a warn notice, and warm-pushes only when the normalized
+ * registry actually differs from what the shell already has.
+ */
+async function applyRegistryChange(dir: string, change: RegistryChange): Promise<{ pushed: boolean }> {
+  const browser = getBrowser();
+  if (!browser || !(await browser.state()).windowOpen) return { pushed: false };
+  if (!change.ok) {
+    browser.setRegistryError(change.error);
+    await browser.setNotice({ id: 'registry', kind: 'error', text: change.error });
+    return { pushed: false };
+  }
+  browser.setRegistryError(null);
+  if (change.dropped.length > 0) {
+    await browser.setNotice({ id: 'registry', kind: 'warn', text: droppedNoticeText(change.dropped) });
+  } else {
+    await browser.setNotice({ id: 'registry', kind: 'info', text: '' }); // empty text removes the notice
+  }
+  const key = JSON.stringify(change.registry);
+  if (key === lastPushedRegistry) return { pushed: false };
+  lastPushedRegistry = key;
+  const pushed = await pushWorkspace(dir, { focus: false });
+  return { pushed };
+}
+
+/** Start (or move) the watcher for a successfully opened workspace dir. */
+function startRegistryWatch(dir: string): void {
+  if (watchedDir === dir && watchStop) return;
+  watchStop?.();
+  watchedDir = dir;
+  lastPushedRegistry = '';
+  watchStop = watchRegistry(dir, (change) => {
+    if (watchedDir !== dir) return;
+    void applyRegistryChange(dir, change).catch(() => undefined); // V4-15: a push failure never escapes the watcher
+  });
+}
+
+function stopRegistryWatch(): void {
+  watchStop?.();
+  watchStop = null;
+  watchedDir = null;
+  lastPushedRegistry = '';
+}
+
+/**
+ * The WARM half of `/open {dir}` extracted (V4-4): view.json positions merged,
+ * `openWorkspace` warm push, NO setActive change, NO camera restore, NO
+ * bringToFront. Returns false when there is nothing live to push into.
+ */
+async function pushWorkspace(dir: string, opts: { focus: boolean }): Promise<boolean> {
+  const browser = getBrowser();
+  if (!browser || !(await browser.state()).windowOpen) return false;
+  const { config } = await readStudioConfig(dir);
+  const configUrl = typeof config?.url === 'string' && config.url.trim() !== '' ? config.url.trim() : null;
+  if (!configUrl) return false;
+  // A dead loopback dev server should come up for the new artboards, but the
+  // push itself never depends on it (a down server = per-artboard error cards,
+  // which V4-15's Retry then recovers).
+  if (isLoopbackUrl(configUrl)) void ensureDevServer(configUrl, { dir }).catch(() => undefined);
+  const registry = await readScreens(dir);
+  if (registry.screens.length === 0) return false;
+  const view = await readView(dir);
+  const mode: CanvasMode = view.mode ?? getLastWorkspace()?.mode ?? 'edit';
+  const viewScreens = mergeRegistryWithView(registry, view, configUrl);
+  wireBrowserHooks(browser);
+  await browser.openWorkspace({ dir, screens: viewScreens, baseUrl: configUrl, mode, focus: opts.focus });
+  setLastWorkspace({
+    dir,
+    screens: registry.screens,
+    mode,
+    activeScreen: browser.getState().activeScreen,
+    view,
+  });
+  return true;
+}
+
+/**
+ * Registry entries + view.json positions → the pushed screen list (§C shape;
+ * D6: a stored null = auto-grid, an absent key = omit the pair so the shell
+ * inherits its live position). `file` rides along for V4-10 copy-path /
+ * send-to-chat resolution.
+ */
+function mergeRegistryWithView(
+  registry: { screens: { id: string; file: string; title: string; width: number; height: number }[] },
+  view: Awaited<ReturnType<typeof readView>>,
+  configUrl: string,
+): CanvasScreen[] {
+  return registry.screens.map((s) => {
+    const hasPosition = Object.prototype.hasOwnProperty.call(view.positions, s.id);
+    const position = view.positions[s.id];
+    return {
+      id: s.id,
+      title: s.title,
+      width: s.width,
+      height: s.height,
+      file: s.file,
+      url: screenUrl(configUrl, s.file),
+      ...(hasPosition ? { x: position ? position.x : null, y: position ? position.y : null } : {}),
+    };
+  });
+}
+
+/**
+ * Wire the Browser's V4 hooks to the route layer (dev-server ensure behind
+ * Retry V4-15; single-screen menu export V4-10). Idempotent — safe per open.
+ */
+function wireBrowserHooks(browser: Browser): void {
+  browser.setDevServerEnsure(async (dir) => {
+    try {
+      const { config } = await readStudioConfig(dir);
+      const url = typeof config?.url === 'string' && config.url.trim() !== '' ? config.url.trim() : null;
+      if (!url) return { up: false, error: 'no .design-studio.json url found' };
+      if (!isLoopbackUrl(url)) return { up: true }; // externally served: nothing to ensure
+      const dev = await ensureDevServer(url, { dir });
+      return { up: dev.up, ...(dev.error ? { error: dev.error } : {}) };
+    } catch (error) {
+      return { up: false, error: error instanceof Error ? error.message : 'dev-server check failed' };
+    }
+  });
+  browser.setMenuExportHandler((screen, format) => {
+    void runMenuExport(browser, screen, format).catch(() => undefined);
+  });
+}
+
+/**
+ * V4-10 export-png / export-pdf: the existing single-slot D4 job with
+ * screens:[id] and one format; the shell toast arrives when the job settles.
+ */
+async function runMenuExport(browser: Browser, screen: string, format: 'png' | 'pdf'): Promise<void> {
+  const dir = browser.currentWorkspaceDir();
+  if (!dir) return;
+  const { config } = await readStudioConfig(dir);
+  const configUrl = typeof config?.url === 'string' && config.url.trim() !== '' ? config.url.trim() : null;
+  if (!configUrl) {
+    await browser.pushToast('warn', 'No dev-server url is configured for this workspace');
+    return;
+  }
+  const registry = await readScreens(dir);
+  const entry = registry.screens.find((s) => s.id === screen);
+  if (!entry) {
+    await browser.pushToast('warn', `screens.json has no "${screen}" entry to export`);
+    return;
+  }
+  const live = (await browser.state()).screens.find((s) => s.id === screen);
+  const started = startExportJob({
+    dir,
+    screens: [
+      {
+        id: entry.id,
+        url: screenUrl(configUrl, entry.file),
+        width: entry.width,
+        height: entry.height,
+        state: live?.state ?? 'loading',
+        ...(live?.message ? { message: live.message } : {}),
+      },
+    ],
+    formats: [format],
+    browser,
+  });
+  // Poll the D4 status the same way the panel's /canvas export does (700 ms),
+  // bounded at 120 s; the toast closes the loop in the canvas (V4-10).
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    const status = getExportStatus(dir, started.jobId);
+    if ('state' in status) {
+      if (status.state === 'done') {
+        const result = status.results.find((r) => r.screen === screen)?.[format];
+        if (result && result.ok) await browser.pushToast('ok', `Exported ${result.file}`);
+        else await browser.pushToast('warn', `Export failed: ${result && !result.ok ? result.error : status.error ?? 'no result'}`);
+        return;
+      }
+      if (status.state === 'failed') {
+        await browser.pushToast('warn', `Export failed: ${status.error ?? 'job failed'}`);
+        return;
+      }
+    }
+    if (Date.now() >= deadline) {
+      await browser.pushToast('warn', 'Export is taking unusually long — check /export/status');
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
+}
+
+/**
+ * V4-13 (P2): dock the canvas beside the host window. availWidth comes from
+ * the shell page itself (window.screen.availWidth — the only honest source;
+ * the §3 dock payload carries just the host rect). Null = no window or no
+ * number: leave the user's placement exactly as it is.
+ */
+async function applyDock(browser: Browser, host: { x: number; y: number; width: number; height: number }): Promise<void> {
+  try {
+    const availWidth = await browser.screenAvailWidth();
+    if (availWidth === null) return;
+    const spec = dockPlacement(host, availWidth);
+    if (!spec) return;
+    await browser.placeWindow(spec.x, spec.y, spec.width, spec.height);
+  } catch {
+    /* window placement is best effort — never fails an open */
+  }
+}
+
+// ---- V4-11: the async scaffold job (E15: first-run cannot time out) ----------
+type ScaffoldJobState = 'installing' | 'booting' | 'done' | 'failed';
+type ScaffoldJob = {
+  id: string;
+  dir: string;
+  state: ScaffoldJobState;
+  startedAt: number;
+  url: string;
+  error?: string;
+};
+let scaffoldJob: ScaffoldJob | null = null;
+let scaffoldCounter = 0;
+
+/**
+ * D's split of scaffold.ts into `writeScaffoldFiles` + `installAndBoot`
+ * (V4-11) upgrades the job to precise two-stage progress with the real url in
+ * the immediate response. Detection is by export name — main.ts never edits
+ * scaffold.ts. Until both land, the WHOLE scaffoldProject runs inside the
+ * job: the 20 s host cap is off the response path either way, which is what
+ * E15 actually breaks.
+ * FORK-MERGE(V4-11/integrator): the split path assumes
+ * `writeScaffoldFiles(options) -> {ok,url,files}|{ok,error}` and
+ * `installAndBoot(options & {url}) -> {ok}|{ok,error}` — align to D's shipped
+ * signatures at integration.
+ */
+type ScaffoldSplit = {
+  writeScaffoldFiles: (options: Record<string, unknown>) => Promise<{ ok: boolean; url?: string; error?: string }>;
+  installAndBoot: (options: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
+};
+
+function scaffoldSplit(): ScaffoldSplit | null {
+  const mod = scaffoldModule as unknown as Record<string, unknown>;
+  const writeFiles = mod['writeScaffoldFiles'];
+  const installBoot = mod['installAndBoot'];
+  if (typeof writeFiles === 'function' && typeof installBoot === 'function') {
+    return {
+      writeScaffoldFiles: writeFiles as ScaffoldSplit['writeScaffoldFiles'],
+      installAndBoot: installBoot as ScaffoldSplit['installAndBoot'],
+    };
+  }
+  return null;
+}
+
+export type ScaffoldAsyncOutcome =
+  | { ok: true; jobId: string; dir: string; url: string }
+  | { ok: false; error: string };
+
+/**
+ * POST /scaffold {async:true}: answer right after the workspace files exist;
+ * npm install + dev boot continue in the single-slot job. A second concurrent
+ * async POST for the SAME dir joins the running job (mirrors D4's export
+ * slot); a different dir replaces a finished job and runs too.
+ */
+async function startAsyncScaffold(options: {
+  dir: string;
+  type: string;
+  direction?: string;
+  fidelity?: string;
+  brief?: string;
+  designSystemId?: string;
+  install?: boolean;
+  boot?: boolean;
+}): Promise<ScaffoldAsyncOutcome> {
+  const split = scaffoldSplit();
+  if (split) {
+    let files: { ok: boolean; url?: string; error?: string };
+    try {
+      files = await split.writeScaffoldFiles({ ...options });
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'scaffold could not write its files' };
+    }
+    if (!files.ok) return { ok: false, error: files.error ?? 'scaffold could not write its files' };
+    const job: ScaffoldJob = {
+      id: `scaffold-${++scaffoldCounter}`,
+      dir: options.dir,
+      state: 'installing',
+      startedAt: Date.now(),
+      url: files.url ?? '',
+    };
+    scaffoldJob = job;
+    void (async () => {
+      try {
+        const booted = await split.installAndBoot({ ...options, url: files.url });
+        if (scaffoldJob === job) {
+          job.state = booted.ok ? 'done' : 'failed';
+          if (!booted.ok) job.error = booted.error ?? 'install/boot failed';
+        }
+      } catch (error) {
+        if (scaffoldJob === job) {
+          job.state = 'failed';
+          job.error = error instanceof Error ? error.message : 'install/boot failed';
+        }
+      }
+    })();
+    return { ok: true, jobId: job.id, dir: job.dir, url: job.url };
+  }
+  // Legacy path: join a still-running job for the same dir, else run the whole
+  // scaffold in the background; the url lands with the job result.
+  if (scaffoldJob && scaffoldJob.dir === options.dir && (scaffoldJob.state === 'installing' || scaffoldJob.state === 'booting')) {
+    return { ok: true, jobId: scaffoldJob.id, dir: scaffoldJob.dir, url: scaffoldJob.url };
+  }
+  const job: ScaffoldJob = {
+    id: `scaffold-${++scaffoldCounter}`,
+    dir: options.dir,
+    state: 'installing',
+    startedAt: Date.now(),
+    url: '',
+  };
+  scaffoldJob = job;
+  void (async () => {
+    try {
+      const result = await scaffoldProject(options);
+      if (scaffoldJob === job) {
+        if (result.ok) {
+          job.state = 'done';
+          job.url = result.url;
+        } else {
+          job.state = 'failed';
+          job.error = result.error;
+        }
+      }
+    } catch (error) {
+      if (scaffoldJob === job) {
+        job.state = 'failed';
+        job.error = error instanceof Error ? error.message : 'scaffold failed';
+      }
+    }
+  })();
+  return { ok: true, jobId: job.id, dir: job.dir, url: job.url };
+}
+
+/** GET /scaffold/status body (unknown job = 200 business failure, house rule). */
+function scaffoldStatus(id: string): Json {
+  if (!scaffoldJob || scaffoldJob.id !== id) return { ok: false, error: 'unknown scaffold job' };
+  const job = scaffoldJob;
+  return {
+    state: job.state,
+    elapsedMs: Date.now() - job.startedAt,
+    ...(job.error ? { error: job.error } : {}),
+    ...(job.url ? { url: job.url } : {}),
+  };
+}
 
 const server = http.createServer(async (req, res) => {
   const auth = req.headers['authorization'];
@@ -256,7 +663,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const body = parsed as
-        | { dir?: unknown; type?: unknown; direction?: unknown; fidelity?: unknown; brief?: unknown; designSystemId?: unknown }
+        | { dir?: unknown; type?: unknown; direction?: unknown; fidelity?: unknown; brief?: unknown; designSystemId?: unknown; async?: unknown; install?: unknown; boot?: unknown }
         | null;
       const dir = body?.dir;
       const type = body?.type;
@@ -273,19 +680,56 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'designSystemId must be a string' });
         return;
       }
+      // V4-14 hygiene: `async` must be a boolean when present (else 400).
+      if (body?.async !== undefined && typeof body.async !== 'boolean') {
+        sendJson(res, 400, { error: 'async must be a boolean' });
+        return;
+      }
+      // install/boot pass through as booleans only (the V4-11 job's hermetic
+      // seam — an injected install FUNCTION stays a module-level test seam, it
+      // cannot cross JSON); anything non-boolean is malformed → 400.
+      if (body?.install !== undefined && typeof body.install !== 'boolean') {
+        sendJson(res, 400, { error: 'install must be a boolean' });
+        return;
+      }
+      if (body?.boot !== undefined && typeof body.boot !== 'boolean') {
+        sendJson(res, 400, { error: 'boot must be a boolean' });
+        return;
+      }
       const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
-      sendJson(
-        res,
-        200,
-        (await scaffoldProject({
-          dir,
-          type,
-          direction: str(body?.direction),
-          fidelity: str(body?.fidelity),
-          brief: str(body?.brief),
-          designSystemId: str(body?.designSystemId),
-        })) as unknown as Json,
-      );
+      const options = {
+        dir,
+        type,
+        direction: str(body?.direction),
+        fidelity: str(body?.fidelity),
+        brief: str(body?.brief),
+        designSystemId: str(body?.designSystemId),
+        ...(typeof body?.install === 'boolean' ? { install: body.install } : {}),
+        ...(typeof body?.boot === 'boolean' ? { boot: body.boot } : {}),
+      };
+      if (body?.async === true) {
+        // V4-11 (E15): npm install + dev boot continue in a single-slot job;
+        // the response leaves the 20 s host cap the moment the files exist.
+        // Precondition failures stay {ok:false,error} at 200 like the sync path.
+        const outcome = await startAsyncScaffold(options);
+        sendJson(res, 200, outcome as unknown as Json);
+        return;
+      }
+      sendJson(res, 200, (await scaffoldProject(options)) as unknown as Json);
+      return;
+    }
+
+    // V4-11 status poll for the async scaffold job. `dir` and `job` are
+    // required query params (400 when malformed); an unknown job answers
+    // 200 {ok:false,error} — business failures never ride the transport.
+    if (url.pathname === '/scaffold/status') {
+      const dir = params.get('dir') ?? '';
+      const jobParam = params.get('job') ?? '';
+      if (!path.isAbsolute(dir) || jobParam === '') {
+        sendJson(res, 400, { error: 'dir must be absolute and job is required' });
+        return;
+      }
+      sendJson(res, 200, scaffoldStatus(jobParam));
       return;
     }
 
@@ -411,6 +855,11 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'PUT') {
+        // V4-14 defense in depth: only a design workspace's registry is writable.
+        if (!(await isDesignWorkspace(dir))) {
+          sendNotAWorkspace(res);
+          return;
+        }
         let parsed: unknown;
         try {
           parsed = JSON.parse(await readBody(req));
@@ -426,6 +875,145 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       sendJson(res, 200, (await readScreens(dir)) as unknown as Json);
+      return;
+    }
+
+    // V4-4 backstop: the panel posts this on session `completed` so a missed
+    // watcher tick (sleep, sync-tool hiccup) still converges the canvas. Same
+    // semantics as a watch tick: strict re-read, notice/error surfacing, and a
+    // warm push only when the normalized registry differs. V4-14 marker guard.
+    if (url.pathname === '/screens/sync') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'POST required' });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'body must be JSON' });
+        return;
+      }
+      const dir = (parsed as { dir?: unknown } | null)?.dir;
+      if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
+        sendJson(res, 400, { error: 'dir must be an absolute workspace path' });
+        return;
+      }
+      if (!(await isDesignWorkspace(dir))) {
+        sendNotAWorkspace(res);
+        return;
+      }
+      try {
+        const browser = getBrowser();
+        if (!browser || !(await browser.state()).windowOpen) {
+          sendJson(res, 200, { ok: true, pushed: false });
+          return;
+        }
+        // A sync for a dir the canvas is not showing must not hijack the live
+        // workspace — the response says so plainly (no push happened).
+        const current = getLastWorkspace()?.dir ?? watchedDir ?? browser.currentWorkspaceDir();
+        if (current && path.resolve(current) !== path.resolve(dir)) {
+          sendJson(res, 200, { ok: true, pushed: false, reason: 'this workspace is not the one open on the canvas' });
+          return;
+        }
+        const change = await readScreensStrict(dir);
+        const result = await applyRegistryChange(dir, change);
+        sendJson(res, 200, { ok: true, pushed: result.pushed });
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'registry sync failed' });
+      }
+      return;
+    }
+
+    // V4-5: the ordered pick queue the panel drains (GET /picks?since&wait).
+    // `since` is a seq floor (default 0); `wait` long-polls 0..12000 ms — the
+    // response resolves immediately when picks are pending, at the first push
+    // otherwise, and at the deadline with whatever exists. No browser: empty.
+    if (url.pathname === '/picks') {
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'GET required' });
+        return;
+      }
+      const sinceRaw = params.get('since') ?? '0';
+      const waitRaw = params.get('wait') ?? '0';
+      const since = Number(sinceRaw);
+      const wait = Number(waitRaw);
+      if (!Number.isInteger(since) || since < 0) {
+        sendJson(res, 400, { error: 'since must be a non-negative integer' });
+        return;
+      }
+      if (!Number.isFinite(wait) || wait < 0) {
+        sendJson(res, 400, { error: 'wait must be a non-negative number of milliseconds' });
+        return;
+      }
+      const browser = getBrowser();
+      if (!browser) {
+        sendJson(res, 200, { seq: 0, picks: [] });
+        return;
+      }
+      const page = await browser.getPicks(since, Math.min(wait, 12_000));
+      sendJson(res, 200, page as unknown as Json);
+      return;
+    }
+
+    // V4-5: the panel confirms consumption (`{seq:int≤latest, label≤80}`); the
+    // service answers the shell with the "Added to chat" toast and clears the
+    // unacked watchdog when the seq covers the newest push.
+    if (url.pathname === '/picks/ack') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'POST required' });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'body must be JSON' });
+        return;
+      }
+      const body = parsed as { seq?: unknown; label?: unknown } | null;
+      if (typeof body?.seq !== 'number' || !Number.isInteger(body.seq) || body.seq < 0) {
+        sendJson(res, 400, { error: 'seq must be a non-negative integer' });
+        return;
+      }
+      if (typeof body.label !== 'string' || body.label === '' || body.label.length > 80) {
+        sendJson(res, 400, { error: 'label must be a string of 1–80 characters' });
+        return;
+      }
+      getBrowser()?.ackPicks(body.seq, body.label);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // V4-12: the chat↔canvas loop is visible in the canvas. The panel posts
+    // busy transitions; the service forwards to `__dsCanvas.setAgentStatus`
+    // and echoes the status into lastWorkspace. Display-only (fence).
+    if (url.pathname === '/agent-status') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'POST required' });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'body must be JSON' });
+        return;
+      }
+      const body = parsed as { busy?: unknown; label?: unknown } | null;
+      if (typeof body?.busy !== 'boolean') {
+        sendJson(res, 400, { error: 'busy must be a boolean' });
+        return;
+      }
+      if (body.label !== undefined && (typeof body.label !== 'string' || body.label.length > 60)) {
+        sendJson(res, 400, { error: 'label must be a string of at most 60 characters' });
+        return;
+      }
+      const label = typeof body.label === 'string' && body.label !== '' ? body.label : undefined;
+      updateLastWorkspaceAgentStatus(label ? { busy: body.busy, label } : { busy: body.busy });
+      const browser = getBrowser();
+      if (browser) await browser.setAgentStatus(label ? { busy: body.busy, label } : { busy: body.busy });
+      sendJson(res, 200, { ok: true });
       return;
     }
 
@@ -519,6 +1107,11 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (req.method === 'PATCH') {
+        // V4-14: only a design workspace owns a view.json.
+        if (!(await isDesignWorkspace(dir))) {
+          sendNotAWorkspace(res);
+          return;
+        }
         let parsed: unknown;
         try {
           parsed = JSON.parse(await readBody(req));
@@ -560,6 +1153,11 @@ const server = http.createServer(async (req, res) => {
       const dir = body?.dir;
       if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
         sendJson(res, 400, { error: 'dir must be an absolute workspace path' });
+        return;
+      }
+      // V4-14: exports only run on a design workspace.
+      if (!(await isDesignWorkspace(dir))) {
+        sendNotAWorkspace(res);
         return;
       }
       let requested: string[] | null = null;
@@ -668,6 +1266,11 @@ const server = http.createServer(async (req, res) => {
       const dir = (parsed as { dir?: unknown } | null)?.dir;
       if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
         sendJson(res, 400, { error: 'dir must be an absolute workspace path' });
+        return;
+      }
+      // V4-14: a critique digests a design workspace, nothing else.
+      if (!(await isDesignWorkspace(dir))) {
+        sendNotAWorkspace(res);
         return;
       }
       const browser = getBrowser();
@@ -786,7 +1389,12 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'body must be JSON' });
         return;
       }
-      const body = parsed as { url?: unknown; dir?: unknown; screen?: unknown } | null;
+      const body = parsed as { url?: unknown; dir?: unknown; screen?: unknown; focus?: unknown; dock?: unknown } | null;
+      // V4-8: /open is the USER-initiated route — focus defaults to true. The
+      // panel sends focus:false for the screen dropdown; an agent NEVER
+      // reaches /open through browser.* (those go to /browser-control and the
+      // navigate path no longer raises the window).
+      const focusRequested = body?.focus !== false;
       // { url } — the original single-page flow, kept unchanged (byte-for-byte
       // behavior for existing callers).
       const target = body?.url;
@@ -811,6 +1419,10 @@ const server = http.createServer(async (req, res) => {
         try {
           const browser = await ensureBrowser(target);
           const nav = await browser.open(target);
+          // navigateGuarded dropped its bringToFront (V4-8); the user-facing
+          // legacy open still raises on a settled navigation, exactly the old
+          // observable behavior, now routed through the explicit focus seam.
+          if (nav.settled && focusRequested) await browser.focus();
           sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
         } catch (error) {
           sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'open failed' });
@@ -829,7 +1441,27 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'dir must be absolute' });
         return;
       }
+      // V4-15: a folder that no longer exists is its own actionable business
+      // failure (the panel offers "Create a new canvas" and clears its ws/ key)
+      // — distinct from "exists but is not scaffolded".
+      const dirExists = await fs.stat(dirValue).then((s) => s.isDirectory(), () => false);
+      if (!dirExists) {
+        sendJson(res, 200, {
+          ok: false,
+          code: 'WORKSPACE_MISSING',
+          error: `The canvas folder ${dirValue} no longer exists.`,
+        });
+        return;
+      }
       const screenParam = typeof body?.screen === 'string' && body.screen !== '' ? body.screen : null;
+      // V4-13 (P2): dock = the host window rect the panel wants to sit beside.
+      let dock: { x: number; y: number; width: number; height: number } | null = null;
+      if (body?.dock && typeof body.dock === 'object' && !Array.isArray(body.dock)) {
+        const d = body.dock as { x?: unknown; y?: unknown; width?: unknown; height?: unknown };
+        if ([d.x, d.y, d.width, d.height].every((n) => typeof n === 'number' && Number.isFinite(n))) {
+          dock = { x: d.x as number, y: d.y as number, width: d.width as number, height: d.height as number };
+        }
+      }
 
       const { config } = await readStudioConfig(dirValue);
       const configUrl =
@@ -863,31 +1495,21 @@ const server = http.createServer(async (req, res) => {
       // (D6: screens.json stays pure design content — x/y never enter it).
       const view = await readView(dirValue);
       const mode: CanvasMode = view.mode ?? getLastWorkspace()?.mode ?? 'edit';
-      const viewScreens: CanvasScreen[] = registry.screens.map((s) => {
-        const hasPosition = Object.prototype.hasOwnProperty.call(view.positions, s.id);
-        const position = view.positions[s.id];
-        return {
-          id: s.id,
-          title: s.title,
-          width: s.width,
-          height: s.height,
-          url: screenUrl(configUrl, s.file),
-          // D6/P2-B handoff: positions ride BOTH the cold bake and the warm
-          // setScreens. A stored null = back to auto-grid; an absent key =
-          // omit the pair, which the shell reads as "inherit the live
-          // position" on warm re-pushes (drag-vs-reopen never fights).
-          ...(hasPosition ? { x: position ? position.x : null, y: position ? position.y : null } : {}),
-        };
-      });
+      const viewScreens = mergeRegistryWithView(registry, view, configUrl);
 
       try {
         if (viewScreens.length === 0) {
           // No screens registered: fall back to the config url alone, exactly
           // like the { url } flow. The workspace echo still records the dir so
-          // browser-control has its dir fallback.
+          // browser-control has its dir fallback. (V4-4 watch STILL starts
+          // below: the first screen an agent writes then lands live instead of
+          // waiting for a manual reopen.)
           const browser = await ensureBrowser(configUrl);
           const nav = await browser.open(configUrl);
+          if (nav.settled && focusRequested) await browser.focus();
           setLastWorkspace({ dir: dirValue, screens: [], mode, activeScreen: null, view });
+          startRegistryWatch(dirValue);
+          wireBrowserHooks(browser);
           sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
         } else {
           const active = screenParam ?? viewScreens[0]!.id;
@@ -896,8 +1518,10 @@ const server = http.createServer(async (req, res) => {
           // launch; warm: it pushes setScreens into the live shell (spec §B —
           // the Browser implements the cold/warm split itself). The dir rides
           // the cfg so currentWorkspaceDir() is non-null for browser-control's
-          // dir fallback (P1-browser seam 2).
-          await browser.openWorkspace({ dir: dirValue, screens: viewScreens, baseUrl: configUrl, mode });
+          // dir fallback (P1-browser seam 2). V4-1: the workspace pins fixed
+          // artboard sizes; V4-8: only this user-initiated call may focus:true.
+          wireBrowserHooks(browser);
+          await browser.openWorkspace({ dir: dirValue, screens: viewScreens, baseUrl: configUrl, mode, focus: focusRequested });
           await browser.setActive(active);
           // R9/D5 restore, binding order in ONE transaction after ready:
           // setScreens (view.json positions merged) → setMode → restoreCamera.
@@ -905,9 +1529,17 @@ const server = http.createServer(async (req, res) => {
           // list and the camera push is a no-op when nothing was persisted.
           await browser.restoreWorkspaceView({ screens: viewScreens, mode, camera: view.camera });
           setLastWorkspace({ dir: dirValue, screens: registry.screens, mode, activeScreen: active, view });
+          // V4-4: the watcher owns THIS workspace now (replacing any other
+          // dir's watch); the dedupe key seeds with what we just pushed.
+          lastPushedRegistry = JSON.stringify(registry);
+          startRegistryWatch(dirValue);
+          // V4-13 (P2): dock only on user-initiated opens (focus flag), and
+          // only when the screen really has room beside the host window.
+          if (focusRequested && dock) await applyDock(browser, dock);
           // Same shape /state answers with: {ok, started} + BrowserState (which
           // P1-browser extends with mode/screens/activeScreen; R1/R2 add
-          // modeApplied and per-screen state/message).
+          // modeApplied and per-screen state/message; V4 adds registryError
+          // and shellBridge).
           const state = await browser.state();
           sendJson(res, 200, { ok: true, started, ...state });
         }
@@ -926,8 +1558,13 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 405, { error: 'POST required' });
         return;
       }
+      // V4-4: the watch follows the window — OFF stops it (no orphan fs.watch).
+      stopRegistryWatch();
       const browser = getBrowser();
-      if (browser) await browser.close();
+      if (browser) {
+        browser.setRegistryError(null);
+        await browser.close();
+      }
       try {
         await reapOrphanChrome();
       } catch {

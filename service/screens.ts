@@ -178,6 +178,135 @@ export async function readScreens(root: string): Promise<ScreensRegistry> {
   }
 }
 
+// ---- V4-4: loud registry reads (SPEC-V4-CARBON-PARITY.md V4-4, E6/E11) ------
+
+/** One entry the silent normalize dropped, with the actionable reason. */
+export type DroppedScreenEntry = { index: number; reason: string };
+
+/** Strict read outcome: a parsed registry + visible drops, or the parse error. */
+export type StrictRegistryRead =
+  | { ok: true; registry: ScreensRegistry; dropped: DroppedScreenEntry[] }
+  | { ok: false; error: string };
+
+/** `normalizeScreenEntry` with a reason attached to each rejection. */
+function screenEntryRejection(raw: unknown, root: string): string | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return 'entry must be an object';
+  const item = raw as Record<string, unknown>;
+  const id = typeof item.id === 'string' ? item.id : '';
+  if (!SCREEN_ID_PATTERN.test(id)) return `id must match ${SCREEN_ID_PATTERN.source}`;
+  if (!resolveScreenFile(root, item.file)) {
+    return 'file must be a relative .html file inside the workspace (no "..", no absolute paths)';
+  }
+  for (const key of ['width', 'height'] as const) {
+    const value = item[key];
+    if (!isFiniteNumber(value)) return `${key} must be a number (${SCREEN_MIN_SIZE}–${SCREEN_MAX_SIZE})`;
+  }
+  return null;
+}
+
+/**
+ * Read the registry LOUDLY (V4-4): invalid JSON answers `{ok:false, error:
+ * 'screens.json: <parse message>'}` instead of the silent empty registry, and
+ * every entry the normalize drops is reported with its index and reason.
+ * `readScreens` keeps its silent contract for every other caller. A missing
+ * file is not an error — it reads as the empty registry, exactly like §A.
+ */
+export async function readScreensStrict(root: string): Promise<StrictRegistryRead> {
+  let text: string;
+  try {
+    text = await fs.readFile(path.join(root, SCREENS_FILENAME), 'utf8');
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    if (code === 'ENOENT') return { ok: true, registry: emptyRegistry(), dropped: [] };
+    return { ok: false, error: `${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch (error) {
+    return { ok: false, error: `${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const registry = normalizeScreens(parsed, root);
+  const dropped: DroppedScreenEntry[] = [];
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const list = (parsed as { screens?: unknown }).screens;
+    if (Array.isArray(list)) {
+      // Mirror normalizeScreens' walk exactly, but say WHY each entry is lost:
+      // the same rejection order, the same first-wins dedupe. Clamped sizes are
+      // silent (§A clamp semantics) — only genuine drops are reported.
+      const seen = new Set<string>();
+      for (let index = 0; index < list.length; index += 1) {
+        const entry = list[index];
+        const rejection = screenEntryRejection(entry, root);
+        if (rejection) {
+          dropped.push({ index, reason: rejection });
+          continue;
+        }
+        const id = (entry as { id: string }).id;
+        if (seen.has(id)) {
+          dropped.push({ index, reason: `duplicate id "${id}" (the first entry wins)` });
+          continue;
+        }
+        seen.add(id);
+      }
+    }
+  }
+  return { ok: true, registry, dropped };
+}
+
+/** Errors renameScreen throws; the route/menu answers them as toasts, never crashes. */
+export class ScreenRenameError extends Error {}
+
+/**
+ * Rename one registry entry IN PLACE (V4-17): a single-entry read-modify-write
+ * of screens.json — re-read immediately before the write, mutate only that
+ * entry's `title`, keep everything else byte-verbatim when possible, and write
+ * atomically (tmp+rename). Documented race (spec): an agent write landing in
+ * the same ~5 ms window wins; the V4-4 watcher converges both directions.
+ * The title must be a non-empty string of at most 120 characters (the §3
+ * screen-rename message caps it too).
+ */
+export async function renameScreen(root: string, id: string, title: string): Promise<ScreensRegistry> {
+  if (!SCREEN_ID_PATTERN.test(id)) throw new ScreenRenameError(`id must match ${SCREEN_ID_PATTERN.source}`);
+  const clean = title.trim();
+  if (clean === '' || clean.length > 120) throw new ScreenRenameError('title must be 1–120 characters');
+  const abs = path.join(path.resolve(root), SCREENS_FILENAME);
+  let text: string;
+  try {
+    text = await fs.readFile(abs, 'utf8');
+  } catch {
+    throw new ScreenRenameError(`${SCREENS_FILENAME} not found`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new ScreenRenameError(`${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ScreenRenameError(`${SCREENS_FILENAME} is not an object`);
+  const list = (parsed as { screens?: unknown }).screens;
+  if (!Array.isArray(list)) throw new ScreenRenameError(`${SCREENS_FILENAME} has no "screens" array`);
+  let found = false;
+  const next = list.map((entry) => {
+    if (entry && typeof entry === 'object' && !Array.isArray(entry) && (entry as { id?: unknown }).id === id) {
+      found = true;
+      return { ...(entry as Record<string, unknown>), title: clean };
+    }
+    return entry;
+  });
+  if (!found) throw new ScreenRenameError(`screen "${id}" is not in ${SCREENS_FILENAME}`);
+  const registry = validateRegistry({ ...(parsed as object), screens: next }, root);
+  const tmp = path.join(path.resolve(root), `.${SCREENS_FILENAME}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  try {
+    await fs.writeFile(tmp, `${JSON.stringify(registry, null, 2)}\n`, 'utf8');
+    await fs.rename(tmp, abs);
+  } catch (error) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw new ScreenRenameError(`could not write ${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return registry;
+}
+
 /** True when a screens.json file exists at the workspace root. */
 export async function hasScreensFile(root: string): Promise<boolean> {
   try {

@@ -23,6 +23,8 @@ export type LastWorkspace = {
   activeScreen: string | null;
   /** The view.json snapshot /open restored from (camera/positions/mode). */
   view: ViewState | null;
+  /** V4-12 echo: the last agent status the panel reported (display-only). */
+  agentStatus?: { busy: boolean; label?: string } | null;
 };
 
 let last: LastWorkspace | null = null;
@@ -43,4 +45,9 @@ export function updateLastWorkspaceMode(mode: CanvasMode): void {
 /** Update the echo's view snapshot after a merge (drag/camera persist). */
 export function updateLastWorkspaceView(view: ViewState): void {
   if (last) last.view = view;
+}
+
+/** V4-12: echo the POST /agent-status payload into the single workspace home. */
+export function updateLastWorkspaceAgentStatus(status: { busy: boolean; label?: string } | null): void {
+  if (last) last.agentStatus = status;
 }

@@ -25,12 +25,18 @@ import { ArtifactContexts } from './artifact-context.ts';
 import type { ShellAuthority, DefaultContext } from './artifact-context.ts';
 import type { ViewerPage } from './viewer-ui.ts';
 import { mergeView, mergeViewCoalesced, sanitizeCamera } from './view-state.ts';
+import { renameScreen, SCREENS_FILENAME } from './screens.ts';
+import { updateLastWorkspaceView } from './last-workspace.ts';
+import { PickQueue } from './pick-queue.ts';
+import type { QueuedPick } from './pick-queue.ts';
 
 // FORK-WIN: `DS_CHROME_PATH` always wins; without it, standard Windows install
 // locations are probed, macOS keeps its bundle default, and Linux falls back to
 // `chrome` on PATH. (A later multi-frame phase rewrites this file — keep
 // FORK-WIN changes surgical and clearly commented for that pass.)
-function resolveChromePath(): string {
+// V4-16: exported so tests/helpers/chrome.ts reuses the PRODUCT resolver
+// instead of restating per-OS paths (E14: silent live-test skips on Windows).
+export function resolveChromePath(): string {
   const envOverride = process.env.DS_CHROME_PATH;
   if (envOverride) return envOverride;
   if (process.platform === 'win32') {
@@ -88,6 +94,31 @@ function parseWindowSpec(raw: string | undefined): WindowSpec | null {
   if (parts.length !== 4 || parts.some((n) => !Number.isFinite(n))) return null;
   const [x, y, width, height] = parts;
   return { x: x ?? 0, y: y ?? 0, width: width ?? 0, height: height ?? 0 };
+}
+
+/**
+ * V4-13 (P2): the pure placement math behind `/open {dock}`. The panel sends
+ * the host window's rect; the canvas docks BESIDE it on the right when that
+ * leaves at least MIN_DOCK_WIDTH px of usable screen, and otherwise answers
+ * null = "leave placement alone" (a half-offscreen canvas is worse than the
+ * user's own placement). Width mirrors the host window up to DOCK_MAX_WIDTH;
+ * the docked window never shrinks below the 640 floor.
+ */
+export const MIN_DOCK_WIDTH = 640;
+export const DOCK_MAX_WIDTH = 1440;
+
+export function dockPlacement(
+  host: WindowSpec,
+  availWidth: number,
+): WindowSpec | null {
+  if (![host.x, host.y, host.width, host.height, availWidth].every((n) => Number.isFinite(n))) return null;
+  if (host.width <= 0 || host.height <= 0 || availWidth <= 0) return null;
+  const left = Math.round(host.x + host.width);
+  const remaining = Math.round(availWidth) - left;
+  if (remaining < MIN_DOCK_WIDTH) return null;
+  const width = Math.max(MIN_DOCK_WIDTH, Math.min(Math.round(host.width), DOCK_MAX_WIDTH, remaining));
+  const height = Math.max(MIN_WINDOW_EDGE, Math.round(host.height));
+  return { x: left, y: Math.round(host.y), width, height };
 }
 
 // Kept only so browser-control.ts's wheel helper can size its scroll steps; the
@@ -219,6 +250,10 @@ export type BrowserState = {
   /** The screen the LAST pick landed on (panel contract: /state.lastPickScreen). */
   lastPickScreen: string | null;
   dir: string | null;
+  /** V4-4 (E11): the screens.json parse error the watcher saw, or null. */
+  registryError: string | null;
+  /** V4-15 (E17 instrumentation): shell↔service bridge health. */
+  shellBridge: { authority: boolean; lastCommandAt: number | null };
 };
 
 // ProbeElement / ProbeReport are single-sourced in shared/verify-types.ts; the
@@ -663,9 +698,165 @@ export const PICK_SCRIPT = `(() => {
 
   function hideOutline() {
     hideTopLayer();
-    if (outline) outline.style.display = 'none';
+    if (outline) {
+      outline.style.display = 'none';
+      // V4-2: a pick that faded (or a modifier that was released) must STAY
+      // hidden — a later __dsOverlays(true) restore can no longer resurrect it.
+      outline.__dsOverlayHid = false;
+    }
     setCursor(false);
   }
+
+  // A completed pick keeps the green outline briefly, then it fades: the green
+  // state persists 1500 ms and hides (V4-2 — no permanent mark, so nothing of
+  // the pick loop can leak into a later export beyond that window).
+  var pickFadeTimer = 0;
+  function fadePickedOutline() {
+    if (pickFadeTimer) clearTimeout(pickFadeTimer);
+    pickFadeTimer = setTimeout(function () {
+      pickFadeTimer = 0;
+      hideOutline();
+    }, 1500);
+  }
+
+  // ---- V4-6 edit-mode element hover (service-driven) ------------------------
+  // A SECOND overlay the service positions through __dsHoverAt(x,y) while the
+  // user's pointer is over an artboard in edit mode (the shell relays
+  // screen-hover messages into THIS frame's context). Blue like the modifier
+  // hover, its own id so it never fights the pick outline, same fixed +
+  // pointer-events-none + top-layer + data-ds-overlay guarantees, and the
+  // label form 'tag#id.class W/H' the parity spec asks for. Hovering NEVER
+  // picks: nothing goes through __dsPick here.
+  var hoverOutline = null;
+  var hoverLabel = null;
+
+  function ensureHoverOutline() {
+    if (hoverOutline && hoverOutline.isConnected) return hoverOutline;
+    var stale = document.querySelectorAll('#__ds-hover-outline,[data-ds-overlay="hover"]');
+    for (var i = 0; i < stale.length; i++) {
+      if (stale[i] !== hoverOutline && stale[i].parentNode) stale[i].parentNode.removeChild(stale[i]);
+    }
+    hoverOutline = document.createElement('div');
+    hoverOutline.id = '__ds-hover-outline';
+    hoverOutline.setAttribute('data-ds-overlay', 'hover');
+    hoverOutline.setAttribute('aria-hidden', 'true');
+    hoverOutline.setAttribute('popover', 'manual');
+    var s = hoverOutline.style;
+    s.position = 'fixed';
+    s.pointerEvents = 'none';
+    s.boxSizing = 'border-box';
+    s.border = '2px solid #3b82f6';
+    s.background = 'rgba(59,130,246,0.10)';
+    s.borderRadius = '2px';
+    s.zIndex = '2147483646';
+    s.top = '0px';
+    s.left = '0px';
+    s.width = '0px';
+    s.height = '0px';
+    s.display = 'none';
+    s.right = 'auto';
+    s.bottom = 'auto';
+    s.margin = '0';
+    s.padding = '0';
+    s.overflow = 'visible';
+    hoverLabel = document.createElement('div');
+    var ls = hoverLabel.style;
+    ls.position = 'absolute';
+    ls.top = '-18px';
+    ls.left = '-2px';
+    ls.maxWidth = '60vw';
+    ls.overflow = 'hidden';
+    ls.textOverflow = 'ellipsis';
+    ls.whiteSpace = 'nowrap';
+    ls.padding = '0 4px';
+    ls.borderRadius = '2px';
+    ls.background = '#3b82f6';
+    ls.color = '#ffffff';
+    ls.font = '11px/16px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hoverOutline.appendChild(hoverLabel);
+    (document.body || document.documentElement).appendChild(hoverOutline);
+    return hoverOutline;
+  }
+
+  function hoverLabelFor(el, rect) {
+    var name = el.tagName.toLowerCase();
+    if (el.id) name += '#' + el.id;
+    if (typeof el.className === 'string' && el.className.trim()) {
+      var classes = el.className.trim().split(/\\s+/).slice(0, 3);
+      for (var i = 0; i < classes.length; i++) name += '.' + classes[i];
+    }
+    name += ' ' + Math.round(rect.width) + '\\u00d7' + Math.round(rect.height);
+    return name;
+  }
+
+  window.__dsHoverAt = function (x, y) {
+    var el = document.elementFromPoint(x, y);
+    if (!el || el.nodeType !== 1 || inOverlay(el)) {
+      window.__dsHoverEnd();
+      return false;
+    }
+    ensureHoverOutline();
+    var rect = el.getBoundingClientRect();
+    try {
+      if (hoverOutline.showPopover && !hoverOutline.matches(':popover-open')) hoverOutline.showPopover();
+    } catch (e) { /* fixed + z-index fallback */ }
+    var s = hoverOutline.style;
+    s.display = 'block';
+    s.top = rect.top + 'px';
+    s.left = rect.left + 'px';
+    s.width = rect.width + 'px';
+    s.height = rect.height + 'px';
+    if (hoverLabel) hoverLabel.textContent = hoverLabelFor(el, rect);
+    return true;
+  };
+
+  window.__dsHoverEnd = function () {
+    if (!hoverOutline) return true;
+    try {
+      if (hoverOutline.hidePopover && hoverOutline.matches(':popover-open')) hoverOutline.hidePopover();
+    } catch (e) { /* already out of the top layer */ }
+    hoverOutline.style.display = 'none';
+    // Same stay-hidden rule as the pick outline (V4-2 restore must not
+    // resurrect a hover box the shell already retired).
+    hoverOutline.__dsOverlayHid = false;
+    return true;
+  };
+
+  // ---- V4-2 export purity: the capture-time overlay kill switch -------------
+  // The service calls __dsOverlays(false) in a frame's context right before
+  // its capture, and __dsOverlays(true) in the finally. Every [data-ds-overlay]
+  // element (pick outline, hover outline — anything the tool owns) is hidden
+  // with display:none + hidePopover and restored exactly: elements already
+  // hidden keep their hidden state (a restore must not resurrect a faded pick).
+  window.__dsOverlays = function (visible) {
+    var nodes = document.querySelectorAll('[data-ds-overlay]');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (!visible) {
+        if (el.style.display !== 'none') {
+          el.__dsOverlayPrior = el.style.display || '';
+          el.__dsOverlayHid = true;
+          el.style.display = 'none';
+        }
+        try {
+          if (el.hidePopover && el.matches(':popover-open')) {
+            el.__dsOverlayOpen = true;
+            el.hidePopover();
+          }
+        } catch (e) { /* not a popover */ }
+      } else if (el.__dsOverlayHid) {
+        el.style.display = el.__dsOverlayPrior || '';
+        el.__dsOverlayHid = false;
+        if (el.__dsOverlayOpen) {
+          try {
+            if (el.showPopover && !el.matches(':popover-open')) el.showPopover();
+          } catch (e) { /* keep the plain fixed fallback */ }
+        }
+        el.__dsOverlayOpen = false;
+      }
+    }
+    return true;
+  };
 
   // ---- highlight by selector (driven from outside the page) ----------------
   // The panel asks for a brief re-flash of an element it already knows (a
@@ -742,10 +933,13 @@ export const PICK_SCRIPT = `(() => {
     if (e.key === 'Meta' || e.key === 'Control') hideOutline();
   }, true);
   window.addEventListener('blur', hideOutline, true);
-  window.__dsPickAt = function(x,y) {
+  window.__dsPickAt = function(x,y,additive) {
     var el = document.elementFromPoint(x,y);
     if (!el || inOverlay(el)) return false;
-    el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,ctrlKey:true}));
+    // 'additive' (V4-5): the shell's shift-click is relayed through the
+    // service; re-emit it as shiftKey so the payload below records it. The
+    // flag is reserved — the panel treats both paths identically today.
+    el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,ctrlKey:true,shiftKey:!!additive}));
     return true;
   };
 
@@ -785,9 +979,12 @@ export const PICK_SCRIPT = `(() => {
     if (inOverlay(el)) return;
     e.preventDefault();
     e.stopPropagation();
-    // Keep the outline on the picked element so the choice stays visible.
+    // Keep the outline on the picked element so the choice stays visible —
+    // briefly: it fades after 1500 ms (V4-2), and __dsOverlays(false) hides it
+    // for any capture in flight.
     place(el);
     paint(true);
+    fadePickedOutline();
     var rect = el.getBoundingClientRect();
     var payload = {
       selector: selectorFor(el),
@@ -796,6 +993,7 @@ export const PICK_SCRIPT = `(() => {
       text: (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 200),
       outerHTML: el.outerHTML.slice(0, 4000),
       styles: stylesFor(el),
+      additive: !!e.shiftKey,
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
     };
     sendOrBuffer(JSON.stringify(payload));
@@ -1004,6 +1202,9 @@ type ScreenRecord = {
   liveTitle: string;
   width: number;
   height: number;
+  /** Registry file (relative, forward slashes) when the caller supplied one —
+   *  V4-10 copy-path / send-to-chat resolve the on-disk path from it. */
+  file?: string;
   /** undefined = absent from the push (shell inherits); number = placed; null = auto. */
   x?: number | null;
   y?: number | null;
@@ -1199,6 +1400,23 @@ export class Browser {
   private quitting = false;
   /** The in-flight teardown, so a second close (or stop) joins it instead of racing. */
   private quitPromise: Promise<void> | null = null;
+  // ---- V4 state ------------------------------------------------------------
+  /** V4-5: the ordered pick queue GET /picks drains (ring cap 50, own seq). */
+  private pickQueue: PickQueue = new PickQueue((kind, text) => {
+    void this.pushToast(kind, text);
+  });
+  /** V4-4: the LAST screens.json parse error the watcher surfaced (§3 registryError). */
+  private registryError: string | null = null;
+  /** V4-15/E17: when the last shell→service message arrived (bridge health probe). */
+  private lastShellCommandAt: number | null = null;
+  /** V4-6: latest-wins hover coalescing — one evaluate in flight, never more. */
+  private hoverInFlight = false;
+  private hoverPending: { screen: string; x: number; y: number } | 'end' | null = null;
+  private lastHoverScreen: string | null = null;
+  /** V4-10: main.ts wires single-screen export jobs (route preconditions live there). */
+  private menuExportHandler: ((screen: string, format: 'png' | 'pdf') => void) | null = null;
+  /** V4-15: main.ts wires the dev-server ensure for per-screen Retry (cycle-free). */
+  private devServerEnsure: ((dir: string) => Promise<{ up: boolean; error?: string }>) | null = null;
 
   constructor() {
     // Captured at construct time: tests pin DS_WINDOW before constructing, and
@@ -1218,14 +1436,31 @@ export class Browser {
    * `screens` entries carry either a ready-made `url` (joined by the caller)
    * or a `file` (joined here against `baseUrl`). `dir` feeds
    * `currentWorkspaceDir()`, browser-control's last-resort dir fallback.
+   *
+   * V4-8: `focus` (default true = user-initiated open) is the ONLY thing that
+   * may raise the window here; warm registry pushes pass focus:false so an
+   * agent edit never steals the user's foreground.
+   *
+   * V4-1: artboards are FIXED-SIZE. The workspace pins the layout state to a
+   * reasonless `viewport/custom` entry at the active screen's registry height
+   * — queueLayout's guard then never schedules a qualification, and the old
+   * fit/page/viewport machinery cannot resize any screen (E1/E2/E3 root).
    */
-  async openWorkspace(cfg: { dir?: string; screens: CanvasScreenInput[]; baseUrl: string; mode?: 'edit' | 'play' }): Promise<void> {
+  async openWorkspace(cfg: {
+    dir?: string;
+    screens: CanvasScreenInput[];
+    baseUrl: string;
+    mode?: 'edit' | 'play';
+    focus?: boolean;
+  }): Promise<void> {
+    const focus = cfg.focus !== false;
     if (typeof cfg.dir === 'string' && cfg.dir) this.workspaceDir = cfg.dir;
     if (typeof cfg.baseUrl === 'string' && cfg.baseUrl) this.baseUrl = cfg.baseUrl;
     if (cfg.mode === 'edit' || cfg.mode === 'play') this.mode = cfg.mode;
     this.workspaceMode = true;
     this.applyScreenRegistry(cfg.screens ?? []);
     if (!this.screenOrder.length) throw new Error('a canvas workspace needs at least one valid screen');
+    this.pinWorkspaceLayout();
     if (this.cdp) {
       // Warm path: push everything into the live shell, then settle the
       // (possibly new) active screen. No new capability URL is created.
@@ -1233,7 +1468,7 @@ export class Browser {
       await this.setMode(this.mode);
       if (this.activeScreenId) await this.waitScreen(this.activeScreenId);
       await this.refreshUnsettled();
-      await this.bringToFront();
+      if (focus) await this.bringToFront();
       return;
     }
     // Cold path: a running window is NOT reused for a different screen set —
@@ -1243,9 +1478,21 @@ export class Browser {
     await this.start(first.url);
     if (this.activeScreenId) {
       const settled = await this.waitScreen(this.activeScreenId);
-      if (settled) await this.bringToFront();
+      if (settled && focus) await this.bringToFront();
     }
     await this.refreshUnsettled();
+  }
+
+  /**
+   * V4-1: pin the layout bookkeeping to the ACTIVE screen's registry size with
+   * NO reason — the existing queueLayout guard (`viewport && !reason`) then
+   * never schedules, and `requestedLayout` is cleared so nothing can
+   * resurrect a fit/page pass. Every workspace open/push calls it.
+   */
+  private pinWorkspaceLayout(): void {
+    const active = this.activeScreenId ? this.screens.get(this.activeScreenId) : undefined;
+    this.layoutState = { mode: 'viewport', preset: 'custom', nominalHeight: active?.height ?? this.viewportHeight };
+    this.requestedLayout = null;
   }
 
   /** Replace the screen registry (warm push + state re-derivation). */
@@ -1318,7 +1565,9 @@ export class Browser {
     return false;
   }
 
-  /** Focus one artboard: the service is the authority, the shell is echoed. */
+  /** Focus one artboard: the service is the authority, the shell is echoed.
+   *  V4-1: activation does NOT requalify anything — syncViewportToActive +
+   *  pushShellActive + refreshScreen only; the fixed registry size survives. */
   async setActive(id: string): Promise<void> {
     if (!SCREEN_ID_RE.test(id) || !this.screens.has(id)) throw new Error(`unknown screen: ${id}`);
     this.activeScreenId = id;
@@ -1330,10 +1579,13 @@ export class Browser {
     // rewrite it (they restyle the artboard away from natural — then the
     // viewport reports the qualified size, which is the truth again).
     this.syncViewportToActive();
+    if (this.workspaceMode) this.pinWorkspaceLayout();
     if (this.cdp) {
       await this.pushShellActive();
       // Re-arm the layout transaction for the newly focused artboard: its
       // context differs from the stored one, so a refresh re-qualifies it.
+      // (V4-1: in workspace mode refreshScreen skips the qualification
+      // branch — this stays as the legacy single-frame behavior only.)
       await this.refreshScreen(id).catch(() => undefined);
     }
   }
@@ -1366,6 +1618,13 @@ export class Browser {
       activeScreen: this.activeScreenId,
       lastPickScreen: this.lastPick?.screen ?? null,
       dir: this.workspaceDir,
+      // V4-4: the watcher surfaces screens.json parse errors here (and through
+      // a shell notice); null once the file parses again.
+      registryError: this.registryError,
+      // V4-15 (E17 instrumentation): authority = the shell lease resolves right
+      // now; lastCommandAt = the last shell→service binding call we honoured —
+      // a camera-changed that never lands shows as a stale pair.
+      shellBridge: { authority: this.contexts ? this.contexts.shell() !== null : false, lastCommandAt: this.lastShellCommandAt },
     };
   }
 
@@ -1407,6 +1666,11 @@ export class Browser {
         liveTitle: moved ? '' : previous?.liveTitle ?? '',
         width,
         height,
+        ...(typeof raw.file === 'string' && raw.file
+          ? { file: raw.file }
+          : previous?.file && !moved
+            ? { file: previous.file }
+            : {}),
         ...(position.x !== undefined ? { x: position.x, y: position.y } : {}),
         state: moved ? 'loading' : previous?.state ?? 'loading',
         message: moved ? '' : previous?.message ?? '',
@@ -1660,7 +1924,7 @@ export class Browser {
         // executionContextId→screenId map, never from the payload itself.
         const screen=context.screenForContext(session,params.executionContextId);
         if(screen&&context.matches(context.artifact(screen),session,params.executionContextId)) {
-          if(params.name==='__dsPick'&&validPick(value)){this.lastPick={...value,screen};this.pickSeq+=1;}
+          if(params.name==='__dsPick'&&validPick(value)){this.lastPick={...value,screen};this.pickSeq+=1;/* V4-5: every honoured pick ALSO enters the ordered queue GET /picks drains (its own seq; lastPick/pickSeq stay back-compat). */this.enqueueElementPick(screen,value);}
           if(params.name==='__dsArtifactEvent'&&value&&['dismiss','changed','height-dirty','wheel','camera-zoom'].includes(value.type)){
             if(value.type==='dismiss'&&this.canvasFlags.menu)void this.shellEval('__dsCanvas.dismissMenu()').catch(()=>undefined);
             if(value.type==='changed')void this.refreshScreen(screen);
@@ -1804,6 +2068,26 @@ export class Browser {
     const generation=++this.layoutGeneration;
     await this.transaction(async()=>{
       if(generation!==this.layoutGeneration)return;
+      if(this.workspaceMode){
+        // V4-1: a workspace camera restore is CAMERA ONLY. The layout fields a
+        // getCamera() snapshot carries (layoutMode/preset/nominalWidth…) must
+        // never re-enter applyLayout — artboard geometry belongs to the
+        // registry — and the four persisted keys are pushed bare so the
+        // shell's own setLayout path is skipped (layoutMode undefined).
+        // FORK-MERGE (V4-1 / integrator): this retires the existing
+        // tests/live-canvas-browser.test.ts "restoreCamera accepts the §C grid
+        // extents (64–65536)" pin INSIDE a workspace — that pin drives
+        // restoreCamera({layoutMode:'page',…grid extents}) after openWorkspace
+        // and asserts applyLayout ran (the very artboard-resize V4-1 forbids).
+        // R6's 64–65536 validation stays byte-identical on the legacy single-
+        // frame path (the else branch below); the workspace pin must re-baseline
+        // to the legacy launch or to a pure-camera assertion. Not edited here:
+        // that file is P1-browser's, outside V4 lane A's owned files.
+        const { mode, scale, panX, panY } = camera as { mode?: unknown; scale?: unknown; panX?: unknown; panY?: unknown };
+        await this.shellEvalSettled(`__dsCanvas.restoreCamera(${JSON.stringify({ mode, scale, panX, panY })})`);
+        await this.restoreActiveScreenSize();
+        return;
+      }
       // Spec §C (audit #7): camera EXTENT clamps widened to 64–65536 because
       // view.width/height now measure the whole artboard grid; per-screen
       // sizes stay 200–8192 (screens.ts) and resize() keeps its own 100–8192.
@@ -1812,6 +2096,21 @@ export class Browser {
       }
       await this.shellEvalSettled(`__dsCanvas.restoreCamera(${JSON.stringify(camera)})`);
     });
+  }
+
+  /**
+   * V4-1: re-assert the registry geometry after a TEMPORARY override
+   * (Browser.resize / matrix verification). The records were never mutated,
+   * so this snaps the viewport bookkeeping and the live shell back to the
+   * registry sizes — a phone artboard cannot survive a verification walk at
+   * 1280 (E1/E2). Idempotent; safe without a window.
+   */
+  async restoreActiveScreenSize(): Promise<void> {
+    if (!this.workspaceMode) return;
+    this.syncViewportToActive();
+    this.pinWorkspaceLayout();
+    if (!this.cdp) return;
+    await this.pushShellScreens().catch(() => undefined);
   }
   async setLayout(mode:'fit'|'page',preset='desktop'):Promise<void>{
     if(mode!=='fit'&&mode!=='page')throw new Error('Unsupported layout mode');
@@ -1928,7 +2227,10 @@ export class Browser {
   private async canvasCommand(command:unknown,authority:ShellAuthority):Promise<void>{
     if(!command||typeof command!=='object')return;
     if(!this.contexts?.shellAuthorityCurrent(authority))return;
-    const value=command as {type?:string;width?:number;height?:number;id?:string;mode?:string;preset?:string;screen?:string;x?:number;y?:number;camera?:unknown};
+    // V4-15/E17 instrumentation: every honoured shell→service message stamps
+    // the bridge's heartbeat (/state.shellBridge.lastCommandAt).
+    this.lastShellCommandAt=Date.now();
+    const value=command as {type?:string;width?:number;height?:number;id?:string;mode?:string;preset?:string;screen?:string;x?:number;y?:number;camera?:unknown;additive?:unknown;action?:unknown;title?:unknown};
     // Per-screen layout machinery is active-screen-only in v1 (spec §C): a
     // message naming another screen is accepted but applied only when it is
     // the active artboard.
@@ -1944,15 +2246,29 @@ export class Browser {
       // list is current because every warm mutation pushes as it records).
       if(this.screenOrder.length&&this.activeScreenId&&this.activeScreenId!==this.screenOrder[0])await this.pushShellActive();
     }
+    // V4-1: in workspace mode the legacy layout machinery is RETIRED. The
+    // §3 contract removed layout/fit-size/viewport from shell emission; the
+    // service "keeps tolerating" them — accepted, answered, and DO NOTHING
+    // (no reply, no error). The legacy single-url launch keeps them working.
+    else if(this.workspaceMode&&(value.type==='layout'||value.type==='fit-size'||value.type==='viewport')){
+      /* fixed-size artboards: deliberately ignored */
+    }
     else if(value.type==='viewport'&&isActive(screen)&&[value.width,value.height].every(n=>typeof n==='number'&&Number.isInteger(n)&&n>=100&&n<=8192)){++this.layoutGeneration;await this.transaction(()=>this.resizeArtifact(value.width!,value.height!,authority));}
     else if(value.type==='page'&&typeof value.id==='string'&&value.id.length<=128){const page=this.pages.find(page=>page.id===value.id);if(page)await this.navigateGuarded(screen,page.url,authority);}
     else if(value.type==='retry'){
       const record=screen?this.screens.get(screen):this.activeScreenId?this.screens.get(this.activeScreenId):undefined;
+      // V4-15: a Retry against a dead dev server used to re-navigate into
+      // another chrome-error. When the workspace config url is loopback and
+      // unreachable, make sure the server is up FIRST (main.ts's hook starts
+      // it) and tell the user what's happening on the card meanwhile.
+      if(this.workspaceMode&&this.workspaceDir&&this.devServerEnsure){
+        await this.ensureWorkspaceDevServer(screen??this.activeScreenId??undefined);
+      }
       await this.navigateGuarded(screen,record?.url??this.requestedUrl,authority);
     }
-    else if(value.type==='layout'&&isActive(screen)&&(value.mode==='fit'&&value.preset==='fit'||value.mode==='page'&&typeof value.preset==='string'&&!!this.presetSize(value.preset))){
+    else if(!this.workspaceMode&&value.type==='layout'&&isActive(screen)&&(value.mode==='fit'&&value.preset==='fit'||value.mode==='page'&&typeof value.preset==='string'&&!!this.presetSize(value.preset))){
       const generation=++this.layoutGeneration;this.requestedLayout={mode:value.mode as 'fit'|'page',preset:value.preset!};await this.transaction(()=>this.reconcileLayout(value.mode as 'fit'|'page',value.preset!,generation,authority));
-    }else if(value.type==='fit-size'&&isActive(screen)&&this.layoutState.mode==='fit'&&!this.captureInFlight){
+    }else if(!this.workspaceMode&&value.type==='fit-size'&&isActive(screen)&&this.layoutState.mode==='fit'&&!this.captureInFlight){
       // Re-fit through the queue WITHOUT bumping the generation. v2's shell
       // fires fit-size from a ResizeObserver during every artboard change;
       // bumping the generation here cancelled queued/public setLayout calls
@@ -1962,10 +2278,34 @@ export class Browser {
     // ---- canvas-only inbound types (spec §C NEW) ----------------------------
     else if(value.type==='screen-pick'&&typeof screen==='string'&&[value.x,value.y].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=8192)){
       // Edit-mode artboard click: run the picker INSIDE that frame's context.
-      void this.evalIn(`window.__dsPickAt(${value.x},${value.y})`,false,screen).catch(()=>undefined);
+      // V4-5: `additive` (shift-click) rides through to the in-frame payload.
+      const additive=value.additive===true;
+      void this.evalIn(`window.__dsPickAt(${value.x},${value.y},${additive?'true':'false'})`,false,screen).catch(()=>undefined);
     }
     else if(value.type==='screen-activate'&&typeof screen==='string'&&this.screens.has(screen)){
       await this.setActive(screen);
+    }
+    // V4-6 (E8): edit-mode element hover, relayed into the frame's context.
+    // Latest-wins coalescing OUTSIDE the transaction: one evaluate in flight,
+    // newer coordinates REPLACE the queued one, everything drops while a
+    // capture owns the frame. A hover NEVER creates a pick.
+    else if(value.type==='screen-hover'&&typeof screen==='string'&&this.screens.has(screen)&&[value.x,value.y].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=8192)){
+      this.queueHover({screen,x:value.x!,y:value.y!});
+    }
+    else if(value.type==='screen-hover-end'){
+      this.queueHover('end');
+    }
+    // V4-10: the artboard context menu (B renders it; the service owns every
+    // action's meaning — the frozen §3 action list).
+    else if(value.type==='screen-menu'&&typeof screen==='string'&&this.screens.has(screen)&&typeof value.action==='string'){
+      await this.screenMenuAction(screen,value.action as 'send-to-chat'|'reload'|'reset-position'|'export-png'|'export-pdf'|'copy-path');
+    }
+    // V4-17 (P2): inline rename. The registry title is agent-owned; this is a
+    // single-entry read-modify-write of screens.json — the V4-4 watcher then
+    // pushes. Documented race: an agent write in the same ~5 ms window wins.
+    else if(value.type==='screen-rename'&&typeof screen==='string'&&this.screens.has(screen)&&typeof value.title==='string'&&value.title.trim()!==''&&value.title.length<=120){
+      const dir=this.workspaceDir;
+      if(dir)void renameScreen(dir,screen,value.title).catch(()=>undefined);
     }
     // FORK-MERGE (P2 seam): spec §C does not enumerate 'mode-request'; the
     // shell edit/play affordances need a way to ASK for a mode change, so the
@@ -1992,6 +2332,233 @@ export class Browser {
       const dir=this.workspaceDir;
       if(dir)void mergeView(dir,{positions:{[screen]:{x:Number(value.x),y:Number(value.y)}}}).catch(()=>undefined);
     }
+  }
+
+  // ---- V4-6 hover coalescing -------------------------------------------------
+
+  /**
+   * Latest-wins hover pump (spec V4-6): exactly one evaluate in flight per
+   * service, newer coordinates REPLACE the queued one, everything is dropped
+   * while a capture is in flight. 200 hover messages in one second therefore
+   * cost only as many evaluates as the frame can answer.
+   */
+  private queueHover(target: { screen: string; x: number; y: number } | 'end'): void {
+    if (this.captureInFlight || !this.cdp) return;
+    if (target === 'end' && !this.lastHoverScreen) return;
+    this.hoverPending = target;
+    if (this.hoverInFlight) return;
+    this.hoverInFlight = true;
+    void this.runHoverLoop().finally(() => {
+      this.hoverInFlight = false;
+    });
+  }
+
+  private async runHoverLoop(): Promise<void> {
+    while (this.hoverPending && !this.captureInFlight && this.cdp) {
+      const target = this.hoverPending;
+      this.hoverPending = null;
+      if (target === 'end') {
+        const screen = this.lastHoverScreen;
+        this.lastHoverScreen = null;
+        if (screen) await this.evalIn('window.__dsHoverEnd&&window.__dsHoverEnd()', false, screen).catch(() => undefined);
+      } else {
+        this.lastHoverScreen = target.screen;
+        await this.evalIn(
+          `window.__dsHoverAt&&window.__dsHoverAt(${target.x},${target.y})`,
+          false,
+          target.screen,
+        ).catch(() => undefined);
+      }
+    }
+  }
+
+  // ---- V4-10 artboard context-menu actions ------------------------------------
+
+  /** The frozen §3 action list; unknown strings are refused silently. */
+  private async screenMenuAction(
+    screen: string,
+    action: 'send-to-chat' | 'reload' | 'reset-position' | 'export-png' | 'export-pdf' | 'copy-path',
+  ): Promise<void> {
+    const record = this.screens.get(screen);
+    if (!record) return;
+    if (action === 'send-to-chat') {
+      // Rides the V4-5 queue as a kind:'screen' entry (no selector fields);
+      // the panel turns it into the "Screen: id (W×H) — path" chip.
+      this.enqueueScreenPick(screen);
+      return;
+    }
+    if (action === 'reload') {
+      if (this.workspaceMode && this.workspaceDir && this.devServerEnsure) await this.ensureWorkspaceDevServer(screen);
+      await this.navigateGuarded(screen, record.url ?? this.requestedUrl);
+      return;
+    }
+    if (action === 'reset-position') {
+      const dir = this.workspaceDir;
+      if (!dir) return;
+      // mergeView null = "back to auto" (D6); the warm push carries the null
+      // pair so the shell re-flows that artboard into its auto slot.
+      const merged = await mergeView(dir, { positions: { [screen]: null } }).catch(() => null);
+      if (merged) updateLastWorkspaceView(merged);
+      record.x = null;
+      record.y = null;
+      const list = this.viewerScreens().map((entry) => (entry.id === screen ? { ...entry, x: null, y: null } : entry));
+      await this.shellEvalSettled(`__dsCanvas.setScreens(${JSON.stringify(list)})`).catch(() => undefined);
+      return;
+    }
+    if (action === 'export-png' || action === 'export-pdf') {
+      // Single-screen export job (D4 preconditions live in main.ts's hook);
+      // the toast with the path arrives when the job settles.
+      this.menuExportHandler?.(screen, action === 'export-png' ? 'png' : 'pdf');
+      return;
+    }
+    if (action === 'copy-path') {
+      // The shell does not know file paths — resolve from the registry here
+      // and answer with a copy-able toast (V4-10).
+      const dir = this.workspaceDir;
+      let file = record.file ?? null;
+      if (!file && dir) {
+        file = await this.lookupRegistryFile(dir, screen);
+      }
+      if (dir && file) {
+        await this.pushToast('ok', path.join(dir, file), true);
+      } else {
+        await this.pushToast('warn', 'No file path is known for this screen');
+      }
+    }
+  }
+
+  /** Registry-file lookup fallback for copy-path when the push carried urls. */
+  private async lookupRegistryFile(dir: string, screen: string): Promise<string | null> {
+    try {
+      const text = await fs.readFile(path.join(dir, SCREENS_FILENAME), 'utf8');
+      const list = (JSON.parse(text) as { screens?: Array<{ id?: unknown; file?: unknown }> })?.screens;
+      if (!Array.isArray(list)) return null;
+      const entry = list.find((item) => item?.id === screen);
+      return typeof entry?.file === 'string' && entry.file ? entry.file : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- V4-15 dev-server ensure behind Retry -----------------------------------
+
+  /**
+   * main.ts injects the dev-server starter (config read + ensureDevServer) so
+   * browser.ts stays free of the project-server import cycle. While the server
+   * comes up, the artboard card says what is happening (V4-15 wording).
+   */
+  setDevServerEnsure(handler: ((dir: string) => Promise<{ up: boolean; error?: string }>) | null): void {
+    this.devServerEnsure = handler;
+  }
+
+  private async ensureWorkspaceDevServer(screen?: string): Promise<void> {
+    const handler = this.devServerEnsure;
+    const dir = this.workspaceDir;
+    if (!handler || !dir) return;
+    const pending = handler(dir);
+    if (screen) {
+      await this.shellEvalSettled(
+        `__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: 'loading', message: 'Starting the dev server…' })})`,
+        2000,
+      ).catch(() => undefined);
+    }
+    const result = await pending.catch(() => ({ up: false, error: 'dev-server check failed' }));
+    if (!result.up && screen) {
+      await this.shellEvalSettled(
+        `__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: 'error', message: result.error ?? 'The dev server is not reachable' })})`,
+        2000,
+      ).catch(() => undefined);
+    }
+  }
+
+  // ---- V4 shell pushes (§3: all return boolean) ---------------------------------
+
+  private async pushGuardedShell(expression: string, timeoutMs = 2500): Promise<unknown> {
+    if (!this.cdp) return false;
+    try {
+      return await this.shellEvalSettled(expression, timeoutMs, false);
+    } catch {
+      return false;
+    }
+  }
+
+  /** §3 `showToast({kind,text,copy?})` — bottom-center pill in the shell (B). */
+  async pushToast(kind: 'ok' | 'warn', text: string, copy = false): Promise<boolean> {
+    const payload = JSON.stringify({ kind, text: text.slice(0, 300), ...(copy ? { copy: true } : {}) });
+    return (await this.pushGuardedShell(`typeof __dsCanvas.showToast==='function'&&__dsCanvas.showToast(${payload})`)) === true;
+  }
+
+  /** §3 `setNotice({id,kind,text})` — stacked toolbar banners (B). Empty text removes. */
+  async setNotice(notice: { id: string; kind?: 'info' | 'warn' | 'error'; text: string }): Promise<boolean> {
+    const payload = JSON.stringify({
+      id: notice.id,
+      kind: notice.kind ?? 'info',
+      text: notice.text.slice(0, 300),
+    });
+    return (await this.pushGuardedShell(`typeof __dsCanvas.setNotice==='function'&&__dsCanvas.setNotice(${payload})`)) === true;
+  }
+
+  /** §3 `setAgentStatus({busy,label})` — toolbar chip while the agent works (B). */
+  async setAgentStatus(status: { busy: boolean; label?: string }): Promise<boolean> {
+    const payload = JSON.stringify({ busy: status.busy, ...(status.label ? { label: status.label.slice(0, 60) } : {}) });
+    return (await this.pushGuardedShell(`typeof __dsCanvas.setAgentStatus==='function'&&__dsCanvas.setAgentStatus(${payload})`)) === true;
+  }
+
+  /** V4-4: the watcher's parse error (or null once it parses again). */
+  setRegistryError(error: string | null): void {
+    this.registryError = error;
+  }
+
+  // ---- V4-5 pick queue surface ----------------------------------------------------
+
+  /** Drain view for GET /picks (long-poll; wait clamped inside the queue). */
+  getPicks(since: number, waitMs: number): Promise<{ seq: number; picks: QueuedPick[] }> {
+    return this.pickQueue.read(since, waitMs);
+  }
+
+  /** POST /picks/ack: records consumption and answers with the ok toast. */
+  ackPicks(seq: number, label: string): void {
+    this.pickQueue.ack(seq, label);
+  }
+
+  /** Queue an honoured in-frame pick (called from the binding authority path). */
+  private enqueueElementPick(screen: string, picked: PickedElement & { additive?: unknown }): void {
+    const record = this.screens.get(screen);
+    this.pickQueue.push({
+      kind: 'element',
+      screen,
+      screenUrl: record?.url ?? '',
+      at: Date.now(),
+      additive: picked.additive === true,
+      selector: picked.selector,
+      tag: picked.tag,
+      classes: picked.classes,
+      text: picked.text,
+      outerHTML: picked.outerHTML,
+      styles: picked.styles,
+      rect: picked.rect,
+    });
+  }
+
+  /** V4-10 send-to-chat: a kind:'screen' QueuedPick (no selector fields). */
+  private enqueueScreenPick(screen: string): void {
+    const record = this.screens.get(screen);
+    if (!record) return;
+    this.pickQueue.push({
+      kind: 'screen',
+      screen,
+      screenUrl: record.liveUrl || record.url || '',
+      at: Date.now(),
+      additive: false,
+      width: record.width,
+      height: record.height,
+      ...(record.file ? { file: record.file } : {}),
+    });
+  }
+
+  /** V4-11/main.ts: single-screen export jobs answer through this hook. */
+  setMenuExportHandler(handler: ((screen: string, format: 'png' | 'pdf') => void) | null): void {
+    this.menuExportHandler = handler;
   }
   /**
    * Per-screen URL/title tracking (spec §D). `changed` events name their
@@ -2053,7 +2620,10 @@ export class Browser {
         await this.shellEvalSettled(`__dsCanvas.setPage({url:${JSON.stringify(info.url)},title:${JSON.stringify(info.title)},pages:${JSON.stringify(this.pages)},navigate:false})`);
         await this.shellEvalSettled(`__dsCanvas.setStatus({state:'ready'})`);
         await this.evalIn(`window.__dsViewerFlags=${JSON.stringify(this.canvasFlags)}`,false,screen);
-        if(context!==this.layoutContext){this.layoutContext=context;this.queueLayout();}
+        // V4-1: workspace artboards are fixed-size — no requalification pass
+        // is ever armed for them (E1 root). Legacy single-frame launches keep
+        // the active-screen qualification machinery byte-identical.
+        if(!this.workspaceMode&&context!==this.layoutContext){this.layoutContext=context;this.queueLayout();}
       }
     }catch{/* navigation destroys worlds; the next frame/context event reacquires */}
     finally{this.refreshingScreens.delete(screen);}
@@ -2129,7 +2699,10 @@ export class Browser {
       this.requestedUrl=url;
       await this.start(url);
       return this.transaction(async()=>{
-        const settled=await this.waitScreen(target!);if(settled)await this.bringToFront();
+        // V4-8: an agent navigation NEVER raises the user's window — the
+        // settled path returns quietly (bringToFront belongs to /open {focus}
+        // and /focus only). E16 root removed.
+        const settled=await this.waitScreen(target!);
         const done=this.screens.get(target!);
         return {url:done?.liveUrl||this.requestedUrl,title:done?.liveTitle||done?.title||'',settled};
       });
@@ -2164,7 +2737,7 @@ export class Browser {
           if(target===this.activeScreenId)await this.shellEvalSettled(`__dsCanvas.setStatus({state:'error',message:${JSON.stringify(record.message)}})`).catch(()=>undefined);
           return {url:this.requestedUrl,title:'',settled:false};
         }
-        const settled=await this.waitScreen(target);if(settled)await this.bringToFront();
+        const settled=await this.waitScreen(target);
         return {url:record.liveUrl||this.requestedUrl,title:record.liveTitle||record.title,settled};
       }finally{if(this.pendingNavigations.get(target)===navigation)this.pendingNavigations.delete(target);}
     });
@@ -2211,17 +2784,54 @@ export class Browser {
   async input(screen: string | undefined, events: SurfaceInputEvent[]): Promise<void>;
   async input(a: SurfaceInputEvent[] | string | undefined, b?: SurfaceInputEvent[]): Promise<void> {
     const events = Array.isArray(a) ? a : b ?? [];
-    // FORK-MERGE (P1-browser seam 7): edit-mode artboards freeze native input
-    // (decision 8). Input-heavy browser-control actions could temporarily
-    // restore play around THIS dispatch and re-apply edit afterwards; shipped
-    // semantics are left untouched — P2-D owns that decision.
     const requestedScreen = Array.isArray(a) ? undefined : a;
-    return this.transaction(async()=>{
+    // V4-7 (E9): inside a canvas workspace, agent input NEVER touches the
+    // user's camera. Wheels become in-frame page scrolls; pointer/key batches
+    // reveal the artboard, flip the shell into agent-input mode (iframes take
+    // native input, canvas handlers stand down), and hand the events to the
+    // compositor — no camera pan, no camera-changed persist, no pick.
+    if (this.workspaceMode) {
+      return this.transaction(async () => {
+        const screen = requestedScreen ?? this.activeScreenId;
+        if (!screen || !SCREEN_ID_RE.test(screen)) throw new Error('no canvas screen is active; open a workspace first');
+        const wheels = events.filter((event) => event.type === 'wheel');
+        const rest = events.filter((event) => event.type !== 'wheel');
+        for (const wheel of wheels) {
+          // In-frame page scroll (the target frame's OWN scroll — the camera
+          // is never panned by an agent wheel). Invalid deltas are dropped.
+          if (![wheel.deltaX, wheel.deltaY].every((n) => typeof n === 'number' && Number.isFinite(n))) continue;
+          await this.evalIn(
+            `window.scrollBy(${JSON.stringify(wheel.deltaX)},${JSON.stringify(wheel.deltaY)});true`,
+            false,
+            screen,
+          ).catch(() => undefined);
+        }
+        if (!rest.length) return;
+        await this.pushGuardedShell(`typeof __dsCanvas.revealScreen==='function'&&__dsCanvas.revealScreen(${JSON.stringify(screen)})`);
+        try {
+          await this.pushGuardedShell(`typeof __dsCanvas.setAgentInput==='function'&&__dsCanvas.setAgentInput(true)`);
+          await this.dispatchCanvasInput(screen, rest);
+        } finally {
+          await this.pushGuardedShell(`typeof __dsCanvas.setAgentInput==='function'&&__dsCanvas.setAgentInput(false)`);
+        }
+      });
+    }
+    return this.transaction(async () => {
+      const screen = requestedScreen ?? this.activeScreenId;
+      if (!screen || !SCREEN_ID_RE.test(screen)) throw new Error('no canvas screen is active; open a workspace first');
+      await this.dispatchCanvasInput(screen, events);
+    });
+  }
+
+  /**
+   * The shared native-dispatch loop: every event is remapped through the
+   * artboard's SCALED rect (`ds-frame-<screen>`) into real compositor
+   * coordinates. Used by both the legacy path and the V4-7 agent-input path
+   * (the latter with wheels already filtered out).
+   */
+  private async dispatchCanvasInput(screen: string, events: SurfaceInputEvent[]): Promise<void> {
     const cdp = this.requireCdp();
     const session = this.requireSession();
-    const screen = requestedScreen ?? this.activeScreenId;
-    if (!screen || !SCREEN_ID_RE.test(screen)) throw new Error('no canvas screen is active; open a workspace first');
-
     for (const event of events) {
       await this.shellEval('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))',true);
       const rect=await this.shellEval(`(()=>{const f=document.getElementById('ds-frame-${screen}'),r=f.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,cssWidth:f.clientWidth,cssHeight:f.clientHeight}})()`) as {x:number;y:number;width:number;height:number;cssWidth:number;cssHeight:number};
@@ -2272,7 +2882,6 @@ export class Browser {
         await cdp.send('Input.insertText', { text: event.text }, session);
       }
     }
-    });
   }
 
   /** The emulated viewport size in CSS px. */
@@ -2345,6 +2954,21 @@ export class Browser {
         windowState: 'normal',
       },
     });
+  }
+
+  /**
+   * V4-13: the shell page's `screen.availWidth` — the only honest source for
+   * "does a dock BESIDE the chat leave ≥640 px?" (the frozen §3 dock payload
+   * carries only the host window rect). Null without a window.
+   */
+  async screenAvailWidth(): Promise<number | null> {
+    if (!this.cdp) return null;
+    try {
+      const value = await this.shellEval('window.screen&&typeof window.screen.availWidth==="number"?window.screen.availWidth:null');
+      return typeof value === 'number' && Number.isFinite(value) ? value : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -2467,6 +3091,11 @@ export class Browser {
     this.captureInFlight=true;
     let overrideApplied=false;
     try{
+    // V4-2 (E4): NOTHING tool-owned may ride into an export. Hide every
+    // [data-ds-overlay] in THIS frame (pick outline, hover outline) before the
+    // normalize, restore in the finally — a pick seconds ago cannot leak its
+    // green outline into the PNG.
+    await this.evalIn('window.__dsOverlays&&window.__dsOverlays(false)',false,screen).catch(()=>undefined);
     await cdp.send('Emulation.setDeviceMetricsOverride',{width:Math.max(1000,this.viewportWidth+48),height:this.viewportHeight+256,deviceScaleFactor:1,mobile:false},session);
     overrideApplied=true;
     const bounds=await this.shellEvalSettled(`__dsCanvas.normalizeCapture(${JSON.stringify(token)})`,4000,true) as {x:number;y:number;width:number;height:number};
@@ -2484,6 +3113,9 @@ export class Browser {
       height: isActive ? this.viewportHeight : bounds.height,
     };
     }finally{
+      // V4-2: overlays come back exactly as they were (a pick outline inside
+      // its 1500 ms fade window re-appears; a faded one stays hidden).
+      await this.evalIn('window.__dsOverlays&&window.__dsOverlays(true)',false,screen).catch(()=>undefined);
       // The override must end CLEARED on every path, including when the SET
       // itself failed. A bare clear after a rejected set leaves Chromium's
       // input routing into the frames dead (native clicks stop landing), so a
@@ -2778,6 +3410,14 @@ export class Browser {
    * the temp profile.
    */
   private async doQuit(): Promise<void> {
+    // A dead window drains nobody's long-polls: resolve waiters empty and give
+    // the next launch a fresh queue/heartbeats (picks never leak across windows).
+    this.pickQueue.close();
+    this.pickQueue = new PickQueue((kind, text) => {
+      void this.pushToast(kind, text);
+    });
+    this.hoverPending = null;
+    this.lastHoverScreen = null;
     const cdp = this.cdp;
     if (cdp) {
       if (this.targetId) {
