@@ -2457,7 +2457,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   }
 
   // panel/version.ts
-  var EXTENSION_VERSION = "0.2.0";
+  var EXTENSION_VERSION = "0.3.0";
   var EXTENSION_API_VERSION = 1;
 
   // shared/design-systems.ts

@@ -1,6 +1,6 @@
 {
   "name": "openchamber-design-canvas",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "OpenChamber Design Canvas — a project-free, multi-screen artboard canvas with live edit/play and point-and-edit into the standard OpenChamber chat.",
   "license": "MIT",
   "private": true,

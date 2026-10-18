@@ -20,6 +20,50 @@ visible. Do not expect them in 0.1.0:
 - **Point + voice pairing**: speaking a change while pointing at an element, for
   faster point → talk → change loops. Voice control is **not** present in 0.1.0.
 
+## [0.3.0] - 2026-10-19 — the working-canvas release
+
+### Fixed
+- `/canvas <brief>` and the Canvas row's Start: panel/service scaffold-status
+  contract mismatch (missing `dir`) made every workspace creation fail on its
+  first poll; no-session attempts now throw an actionable message instead of
+  a silent null; the resolver returns before install/boot and the row opens
+  the window through a `canvas-open/` hand-off (20 s host budget respected).
+- Reopening the canvas (or reloading the shell) no longer leaves every
+  artboard stuck on "Loading": window-scoped board-state reset, a
+  `shellState` gate and a re-sync on the shell handshake.
+- Pick latency and unwanted auto-attach: clicks now select; an explicit
+  Reference in chat (toolbar, pill, Enter) sends, pulled over CDP at send
+  time (median 6 ms click→drained in stress).
+- Acked picks can no longer replay on row remount, and one chat's acks can
+  no longer hide another chat's held picks (per-dir ack watermark).
+- Screen picks carry their workspace dir, so multi-chat routing cannot
+  deliver a chip (or a fabricated path) to the wrong chat.
+
+### Added
+- Rail tab is a working surface: status, Create/Open canvas, brief box,
+  Your design work, designs-location line, diagnostics.
+- Creation page redesign: Look tabs (Project/Presets/Directions), Devices
+  chip, questions + options toggles, Structure brief skeleton, 15 starters,
+  project + designs-folder context row.
+- Questions-first working agreement (3–6 questions with bold defaults),
+  2–3 directions as sibling artboards, design-system precedence with
+  placeholder/confirmed status, BRIEF.md decision log, feel/tone question.
+- Artboards are device viewports with internal scroll (edit-mode wheel
+  scrolls the frame), scroll cue, deterministic top-of-page PNG export,
+  fit-viewport migration for old tall boards.
+- Workspace management: inline rename, per-row stop dev server with
+  two-step confirm, copy path, configurable designs location with
+  previousRoots + "Old location" badges.
+- Native feel: rail badge, message/session actions, `/canvas help`,
+  first-run strip, diagnostics popover with Copy, toast wording guide.
+- Export/critique answer immediately with a job chip (rail-gated from hidden
+  panes); slow dev-server boots answer `starting`/`opening` instead of
+  dying at the guest timeout; stale session storage keys pruned.
+
+### Changed
+- Brief limit 3000 chars enforced on the page and in `/canvas` alike.
+- Default desktop artboard is 1440×900; 1280×800 remains the laptop preset.
+
 ## [0.2.0] - 2026-10-18 — Design Canvas (`canvas-fork`)
 
 The fork release: Design Studio becomes **Design Canvas**, a project-free,
