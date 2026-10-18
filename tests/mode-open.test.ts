@@ -1665,6 +1665,73 @@ test('F6/F7: with a workspace bound, a batch carries ONE compact mode chip first
   }
 });
 
+test('R5 (B4): a pick from another canvas dir is passed over — cursor advances, no chip, no ack — while own-dir picks name their own dir', async () => {
+  setWorkspace(null);
+  stubToast();
+  const store = stubStorage();
+  await seedModeOn('ses_dirs', store);
+  const ws = ['C:', 'Docs', 'Design Canvas', 'site'].join('\\');
+  const other = ['C:', 'Docs', 'Design Canvas', 'other'].join('\\');
+  setWorkspace({ dir: ws, name: 'Site' });
+  const chips = stubAttach();
+  const queue = stubPickQueue();
+  queue.push({ ...queuedElement(1, '#foreign'), dir: other, batch: 'b-x' });
+  // Same dir, different separators/drive case: still ours.
+  queue.push({ ...queuedElement(2, '#mine'), dir: 'c:/Docs/Design Canvas/site', batch: 'b-y' });
+  queue.push({ ...queuedElement(3, '#foreign2'), dir: other, batch: 'b-x' });
+  resetPickLoop();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let stop = false;
+    const loop = runPickLoop(() => stop);
+    await flush();
+    const pickChips = chips.filter((chip) => chip.id?.startsWith('element-'));
+    assert.deepEqual(pickChips.map((chip) => chip.id), ['element-2'], 'only the own-dir pick becomes a chip');
+    const lines = (pickChips[0]!.text ?? '').split('\n');
+    assert.ok(lines.includes('Workspace: c:/Docs/Design Canvas/site'), 'Workspace: uses the pick\'s own dir');
+    assert.deepEqual(queue.acks.map((ack) => ack.seq), [2], 'the ack covers the delivered pick only — a trailing foreign pick is never acked here');
+    assert.equal(getPickCursor(), 3, 'the cursor still moves past the foreign picks');
+    stop = true;
+    mock.timers.tick(12_000);
+    await flush();
+    mock.timers.tick(1_000);
+    await loop;
+  } finally {
+    mock.timers.reset();
+    setWorkspace(null);
+  }
+});
+
+test('R5 (B4): a delivered page carrying N>1 elements of one batch acks "N elements"; a single element keeps its own label', async () => {
+  setWorkspace(null);
+  stubToast();
+  const store = stubStorage();
+  await seedModeOn('ses_batch', store);
+  stubAttach();
+  const queue = stubPickQueue();
+  queue.push({ ...queuedElement(1, '#a'), batch: 'b-1' });
+  queue.push({ ...queuedElement(2, '#b'), batch: 'b-1' });
+  queue.push({ ...queuedElement(3, '#c'), batch: 'b-1' });
+  resetPickLoop();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let stop = false;
+    const loop = runPickLoop(() => stop);
+    await flush();
+    assert.deepEqual(queue.acks, [{ seq: 3, label: '3 elements' }], 'one ack, counted label');
+    queue.push({ ...queuedElement(4, '#solo'), batch: 'b-2' });
+    await flush();
+    assert.deepEqual(queue.acks.at(-1), { seq: 4, label: '#solo' }, 'a one-element send names the element');
+    stop = true;
+    mock.timers.tick(12_000);
+    await flush();
+    mock.timers.tick(1_000);
+    await loop;
+  } finally {
+    mock.timers.reset();
+  }
+});
+
 test('F2: Start in a draft chat (no session) toasts the "send a message first" instruction and creates nothing', async () => {
   setWorkspace(null);
   setSessionId(null);

@@ -345,7 +345,7 @@ test('the list copy is fixed', () => {
   assert.equal(NO_CONFIG_BADGE, 'No dev server yet');
   assert.equal(NO_DESIGN_WORK_MESSAGE, 'No canvas workspaces yet — /canvas creates one.');
   assert.equal(NO_WORKSPACE_MESSAGE, 'No canvas workspace yet — Start creates one.');
-  assert.match(PICK_HINT, /^Click an element in edit mode to add a reference$/, 'V4: edit-mode click is the pick gesture (no ⌘ needed with hover outlines, V4-6)');
+  assert.equal(PICK_HINT, 'Click an element in the canvas, then Reference in chat.', 'R2/R5: a click selects; Reference in chat sends');
   assert.match(ATTACH_NEEDS_URL, /http\(s\)/);
   assert.match(NO_PROJECT_URL_MESSAGE, /No \.design-studio\.json url/);
 });
@@ -719,8 +719,10 @@ test('the pick pipeline is the V4-5 queue: long-poll, ordered attach, ack after 
   assert.match(queue, /export const PICK_SHORT_POLL_BUDGET_MS = 30_000/, '…for a 30 s budget, then the long-poll retries');
   assert.match(queue, /\[...picks\]\.sort\(\(a, b\) => a\.seq - b\.seq\)/, 'batches deliver in SEQ ORDER');
   assert.match(queue, /if \(!\(await addToChat\(entry\)\)\) break/, 'a failed attach stops the batch — no ack past it, the queue retries it');
-  assert.match(queue, /pickCursor = lastDelivered\.seq/, 'the cursor moves only past delivered chips');
-  assert.match(queue, /await ackPicks\(lastDelivered\.seq, pickAckLabel\(lastDelivered\)\)/, 'ONE ack with the last delivered seq + label');
+  assert.match(queue, /advanceTo = entry\.seq;\s*\}\s*if \(advanceTo === pickCursor\) return false;\s*pickCursor = advanceTo;/, 'the cursor moves only past delivered (or foreign, passed-over) picks');
+  assert.match(queue, /await ackPicks\(lastDelivered\.seq, batchAckLabel\(delivered, lastDelivered\)\)/, 'ONE ack with the last delivered seq + label');
+  assert.match(queue, /export const PICK_IDLE_POLL_MS = 150;/, 'R5: the idle pace is 150 ms');
+  assert.match(queue, /if \(!pickBelongsHere\(entry\)\) \{\s*advanceTo = entry\.seq;\s*continue;\s*\}/, 'R5: a foreign-dir pick is passed over without attach or ack');
   assert.match(queue, /if \(!state\.mode\.on\) break/, 'mode-off HOLDS delivery (fence §5)');
   assert.doesNotMatch(queue, /bridgeActive/, 'the removed /bridge claim no longer gates delivery');
   assert.doesNotMatch(queue, /document\.visibilityState/, 'the queue loop has NO visibility guard — hidden windows lose nothing');

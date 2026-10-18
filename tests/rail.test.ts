@@ -195,7 +195,8 @@ function resetRecorders(): void {
 }
 
 const CONFIG_BODY = JSON.stringify({ config: { version: 1, name: 'Site', url: 'http://localhost:5173' }, path: '/p/site/.design-studio.json' });
-const WORKSPACES_BODY = JSON.stringify({ root: '/docs/Design Canvas', workspaces: [{ dir: '/docs/Design Canvas/one', name: 'one', url: 'http://localhost:5173' }] });
+const WORKSPACES_BODY = JSON.stringify({ root: '/docs/Design Canvas', workspaces: [{ dir: '/docs/Design Canvas/one', name: 'one', url: 'http://localhost:5173', server: { recorded: true, up: true, port: 5173 } }] });
+const SETTINGS_BODY = JSON.stringify({ workspaceRoot: '/docs/Design Canvas', source: 'default', defaultRoot: '/docs/Design Canvas', envOverride: false, previousRoots: [] });
 const OPEN_OK = JSON.stringify({ ok: true, url: 'http://localhost:5173/home.html', title: 'Site', settled: true });
 
 function liveService(windowOpen: boolean): (request: ServiceRequest) => StubResult {
@@ -203,6 +204,7 @@ function liveService(windowOpen: boolean): (request: ServiceRequest) => StubResu
     if (request.path === '/state') return { status: 200, body: JSON.stringify({ url: '', title: '', lastPick: null, pickSeq: 0, windowOpen }) };
     if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
     if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (request.path === '/settings') return { status: 200, body: SETTINGS_BODY };
     if (request.path === '/scaffold') {
       const body = JSON.parse(request.body ?? '{}') as { dir?: string };
       return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-r', dir: body.dir, url: 'http://localhost:5173/' }) };
@@ -229,6 +231,8 @@ test('a 1×1 panel frame (the hidden /canvas pane) mounts the static rail shell 
   assert.ok(railNode('ds-rail-primary'), 'the shell has the primary button');
   assert.ok(railNode('ds-rail-input'), 'the shell has the brief box');
   assert.deepEqual(railNode('ds-rail-work').children, [], 'no work list in a 1×1 frame');
+  assert.equal(railNode('ds-rail-location').hidden, true, 'R5: no designs-location line in a 1×1 frame');
+  assert.deepEqual(railNode('ds-rail-location').children, [], 'R5: …and nothing rendered into it');
   assert.deepEqual(serviceCalls, [], 'no service call of any kind (no /config, /state, /workspaces, /open)');
   assert.deepEqual(storageWrites, [], 'no storage write or delete (the handoff is not claimed)');
   assert.deepEqual(intervals, [], 'no interval is started');
@@ -255,6 +259,20 @@ test('the rail goes live when the frame grows into a real tab: one refresh inter
   const work = railNode('ds-rail-work');
   assert.ok(work.find('ds-section'), 'the work list section renders');
   assert.ok(work.find('ds-list-row'), 'the workspace row renders');
+  assert.ok(work.find('ds-list-more'), 'R5: the row has its ⋯ menu');
+  assert.ok(work.find('ds-list-stop'), 'R5: a recorded + up server gets the inline Stop');
+  const badges: string[] = [];
+  const collect = (node: RailNode): void => {
+    if (node.className.split(' ').includes('ds-badge')) badges.push(node.textContent);
+    node.children.forEach(collect);
+  };
+  collect(work);
+  assert.ok(badges.includes('● Running'), 'R5: the "● Running" badge');
+  assert.ok(serviceCalls.some((call) => call.path === '/settings'), 'R5: the real rail reads the designs location');
+  const location = railNode('ds-rail-location');
+  assert.equal(location.hidden, false, 'R5: the designs-location line shows in the real tab');
+  assert.equal(location.find('ds-location-path')?.textContent, '/docs/Design Canvas');
+  assert.equal(location.find('ds-location-change')?.textContent, 'Change');
   assert.equal(railNode('ds-rail-footer').textContent, 'Full home: Design Canvas in the sidebar.');
   // A second wake refreshes; it never stacks a second interval.
   for (const listener of windowListeners.get('focus') ?? []) listener();

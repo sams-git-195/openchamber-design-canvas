@@ -86,6 +86,10 @@ export type QueuedElementPick = {
   screenUrl: string;
   at: number;
   additive: boolean;
+  /** R2 (B4): the send this pick belongs to (one id per Reference in chat). */
+  batch?: string;
+  /** R2 (B4): the workspace dir of the canvas window the pick came from. */
+  dir?: string;
 } & PickPayload;
 
 export type QueuedScreenPick = {
@@ -99,6 +103,8 @@ export type QueuedScreenPick = {
   height: number;
   /** The workspace file behind the screen (the registry path, absolute when the service resolves it). */
   file: string;
+  batch?: string;
+  dir?: string;
 };
 
 export type QueuedPick = QueuedElementPick | QueuedScreenPick;
@@ -134,6 +140,17 @@ export function pickAckLabel(entry: QueuedPick): string {
     ? `screen ${entry.screen}`
     : entry.selector || entry.tag || `screen ${entry.screen}`;
   return raw.slice(0, PICK_ACK_LABEL_MAX);
+}
+
+/**
+ * The ack label for a delivered page: when it carried N>1 elements of the
+ * LAST delivered pick's batch (one Reference in chat send), the pill names the
+ * count instead of one element.
+ */
+export function batchAckLabel(delivered: ReadonlyArray<QueuedPick>, last: QueuedPick): string {
+  if (last.kind !== 'element' || !last.batch) return pickAckLabel(last);
+  const count = delivered.filter((entry) => entry.kind === 'element' && entry.batch === last.batch).length;
+  return count > 1 ? `${count} elements` : pickAckLabel(last);
 }
 
 /** One screen as the canvas shell reports it (spec §B `GET /state`). */
@@ -174,6 +191,8 @@ export type LiveState = {
   registryError?: string | null;
   /** V4-15/E17 bridge-health telemetry: read by the integrator's loop, never rendered by the row. */
   shellBridge?: { authority: boolean; lastCommandAt: number | null };
+  /** The workspace dir the window has open, or null. */
+  dir?: string | null;
 };
 
 /** What `POST /open` answers after opening/navigating the real window. */
@@ -233,6 +252,15 @@ export type ServerStopResult = { ok: boolean; stopped?: boolean; error?: string 
  * on Design Mode OFF, or the manual Stop preview action).
  */
 export function stopDevServer(dir: string): Promise<ServerStopResult> {
+  return callService<ServerStopResult>('/server/stop', undefined, 'POST', JSON.stringify({ dir }));
+}
+
+/**
+ * R5: the work list's Stop dev server — `POST /server/stop {dir}` for ANY
+ * listed workspace. Deliberately not `requestDevServerStop`: its gates are
+ * about THIS chat's session; the list's own confirm step guards this one.
+ */
+export function stopWorkspaceServer(dir: string): Promise<ServerStopResult> {
   return callService<ServerStopResult>('/server/stop', undefined, 'POST', JSON.stringify({ dir }));
 }
 
@@ -349,13 +377,82 @@ export type WorkspaceRow = {
   name: string;
   url?: string;
   screens?: ScreenInfo[];
+  /** R4: the root the workspace was found under. */
+  root?: string;
+  /** R4: true when that root is an earlier designs location. */
+  legacyRoot?: boolean;
+  /** R4: a cheap dev-server peek — recorded by the service, and reachable. */
+  server?: { recorded: boolean; up: boolean; port: number | null };
 };
 
 /** What `GET /workspaces` answers: the resolved root plus every workspace. */
 export type WorkspacesResult = {
   root: string;
   workspaces: WorkspaceRow[];
+  /** R4: every root scanned (the current one first). */
+  roots?: string[];
+  /** R4: roots that could not be read, with why. */
+  rootError?: Record<string, string>;
 };
+
+/** Whether a row's dev server is one the service recorded AND is up — the only one the list can stop. */
+export function workspaceServerRunning(row: Pick<WorkspaceRow, 'server'>): boolean {
+  return Boolean(row.server?.recorded && row.server.up);
+}
+
+/** What `POST /workspaces/rename` answers. */
+export type RenameResult = { ok: boolean; name?: string; error?: string };
+
+/** R4 (F1): rename a workspace — the service sets ONLY its config `name`. */
+export function renameWorkspace(dir: string, name: string): Promise<RenameResult> {
+  return callService<RenameResult>('/workspaces/rename', undefined, 'POST', JSON.stringify({ dir, name }));
+}
+
+/** What `GET /settings` answers: the designs location and where it came from. */
+export type DesignsSettings = {
+  workspaceRoot: string;
+  source: string;
+  defaultRoot: string;
+  envOverride: boolean;
+  previousRoots: string[];
+};
+
+/** The service's refusal codes for `PUT /settings`. */
+export type SettingsErrorCode =
+  | 'ENV_OVERRIDE' | 'NOT_ABSOLUTE' | 'INVALID' | 'IS_FS_ROOT' | 'IS_WORKSPACE'
+  | 'INSIDE_EXTENSION' | 'NOT_WRITABLE' | 'SETTINGS_WRITE_FAILED';
+
+export type SettingsPutResult =
+  | { ok: true; workspaceRoot: string }
+  | { ok: false; code: SettingsErrorCode; error: string };
+
+/** The service-owned designs location (R4, F4). */
+export function getSettings(): Promise<DesignsSettings> {
+  return callService<DesignsSettings>('/settings');
+}
+
+/** Choose the designs location, or reset it to the default with `null`. */
+export function putSettings(workspaceRoot: string | null): Promise<SettingsPutResult> {
+  return callService<SettingsPutResult>('/settings', undefined, 'PUT', JSON.stringify({ workspaceRoot }));
+}
+
+/** Whether a `/settings` answer has the shape the panel renders. */
+export function isDesignsSettings(value: unknown): value is DesignsSettings {
+  return Boolean(value && typeof value === 'object' && typeof (value as DesignsSettings).workspaceRoot === 'string' && (value as DesignsSettings).workspaceRoot !== '');
+}
+
+/** Copy a workspace folder path to the clipboard (host-mediated). */
+export function copyPath(dir: string): Promise<void> {
+  return host.writeClipboard(dir);
+}
+
+/** A long path shortened in the middle, so both the drive and the folder name stay readable. */
+export function middleTruncatePath(path: string, max = 36): string {
+  if (path.length <= max) return path;
+  const head = Math.max(1, Math.floor((max - 1) * 0.4));
+  const tail = max - 1 - head;
+  return `${path.slice(0, head)}…${path.slice(path.length - tail)}`;
+}
 
 /**
  * All workspaces on disk — the page's "Your design work" list (decision 2).
@@ -706,11 +803,11 @@ export function sessionShowsDesignMode(session: Pick<GuestSessionRecord, 'items'
 // ---- pure helpers (kept DOM-free so they can be unit-tested) ----
 
 /**
- * The row's compact pick gesture hint. V4 (V4-5/V4-6): in edit mode a plain
- * click picks the element under the (now hover-outlined) point; every click
- * becomes its own chip through the pick queue.
+ * The row's compact pick gesture hint. R2 (B4): a click SELECTS an element in
+ * the canvas; the explicit Reference in chat action sends the selection, which
+ * arrives through the pick queue.
  */
-export const PICK_HINT = 'Click an element in edit mode to add a reference';
+export const PICK_HINT = 'Click an element in the canvas, then Reference in chat.';
 
 /**
  * The hint is ACTIVE only while the live window is open; with no window there

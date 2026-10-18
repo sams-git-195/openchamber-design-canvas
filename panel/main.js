@@ -1685,6 +1685,11 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     const raw = entry.kind === "screen" ? `screen ${entry.screen}` : entry.selector || entry.tag || `screen ${entry.screen}`;
     return raw.slice(0, PICK_ACK_LABEL_MAX);
   }
+  function batchAckLabel(delivered, last) {
+    if (last.kind !== "element" || !last.batch) return pickAckLabel(last);
+    const count = delivered.filter((entry) => entry.kind === "element" && entry.batch === last.batch).length;
+    return count > 1 ? `${count} elements` : pickAckLabel(last);
+  }
   var WORKSPACE_MISSING_CODE = "WORKSPACE_MISSING";
   var OPENING_STATUS = "Starting dev server\u2026";
   function openWorkspace(input) {
@@ -1697,6 +1702,9 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return callService("/close", void 0, "POST");
   }
   function stopDevServer(dir) {
+    return callService("/server/stop", void 0, "POST", JSON.stringify({ dir }));
+  }
+  function stopWorkspaceServer(dir) {
     return callService("/server/stop", void 0, "POST", JSON.stringify({ dir }));
   }
   function startDevServer(dir, url) {
@@ -1727,6 +1735,30 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   }
   function validateReferencePath(dir, path) {
     return callService("/reference", void 0, "POST", JSON.stringify({ dir, path }));
+  }
+  function workspaceServerRunning(row) {
+    return Boolean(row.server?.recorded && row.server.up);
+  }
+  function renameWorkspace(dir, name) {
+    return callService("/workspaces/rename", void 0, "POST", JSON.stringify({ dir, name }));
+  }
+  function getSettings() {
+    return callService("/settings");
+  }
+  function putSettings(workspaceRoot) {
+    return callService("/settings", void 0, "PUT", JSON.stringify({ workspaceRoot }));
+  }
+  function isDesignsSettings(value) {
+    return Boolean(value && typeof value === "object" && typeof value.workspaceRoot === "string" && value.workspaceRoot !== "");
+  }
+  function copyPath(dir) {
+    return host.writeClipboard(dir);
+  }
+  function middleTruncatePath(path, max = 36) {
+    if (path.length <= max) return path;
+    const head = Math.max(1, Math.floor((max - 1) * 0.4));
+    const tail = max - 1 - head;
+    return `${path.slice(0, head)}\u2026${path.slice(path.length - tail)}`;
   }
   function getWorkspaces() {
     return callService("/workspaces");
@@ -1841,7 +1873,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function sessionShowsDesignMode(session) {
     return Array.isArray(session.items) && session.items.some((item) => isModeChipData(item.data));
   }
-  var PICK_HINT = "Click an element in edit mode to add a reference";
+  var PICK_HINT = "Click an element in the canvas, then Reference in chat.";
   function pickHintActive(state2) {
     return state2.windowOpen;
   }
@@ -5114,16 +5146,23 @@ ${TRUNCATED_MARKUP}` };
   }
   async function addToChat(entry) {
     try {
-      await host.attach(buildAttachPayload(entry, pickContext()));
+      await host.attach(buildAttachPayload(entry, pickContext(entry)));
       return true;
     } catch (error) {
       setStatus(`Could not attach a canvas pick: ${error instanceof Error ? error.message : String(error)}`, "error");
       return false;
     }
   }
-  function pickContext() {
-    const dir = state.workspace?.dir?.trim();
-    return dir ? { workspaceDir: dir, screens: state.liveScreens } : null;
+  function pickContext(pick) {
+    const bound = state.workspace?.dir?.trim();
+    const dir = pick?.dir?.trim() || bound;
+    if (!dir) return null;
+    return { workspaceDir: dir, screens: bound && sameDirPath(dir, bound) ? state.liveScreens : [] };
+  }
+  function pickBelongsHere(pick) {
+    if (!pick.dir) return true;
+    const bound = state.workspace?.dir;
+    return Boolean(bound && sameDirPath(pick.dir, bound));
   }
   function currentScreenFiles(dir) {
     return currentScreens().map((screen) => {
@@ -5148,7 +5187,7 @@ ${TRUNCATED_MARKUP}` };
   var PICK_SHORT_POLL_MS = 250;
   var PICK_SHORT_POLL_BUDGET_MS = 3e4;
   var PICK_HELD_POLL_MS = 900;
-  var PICK_IDLE_POLL_MS = 1e3;
+  var PICK_IDLE_POLL_MS = 150;
   var pickCursor = 0;
   var pickLoopActive = false;
   function getPickCursor() {
@@ -5156,10 +5195,16 @@ ${TRUNCATED_MARKUP}` };
   }
   async function deliverPickBatch(picks) {
     let lastDelivered = null;
+    const delivered = [];
+    let advanceTo = pickCursor;
     let modeRechecked = false;
     let modeChipSent = false;
     for (const entry of [...picks].sort((a, b) => a.seq - b.seq)) {
       if (entry.seq <= pickCursor) continue;
+      if (!pickBelongsHere(entry)) {
+        advanceTo = entry.seq;
+        continue;
+      }
       if (!state.mode.on && !modeRechecked) {
         modeRechecked = true;
         await syncModeFromStorage();
@@ -5171,11 +5216,14 @@ ${TRUNCATED_MARKUP}` };
       }
       if (!await addToChat(entry)) break;
       lastDelivered = entry;
+      delivered.push(entry);
+      advanceTo = entry.seq;
     }
-    if (!lastDelivered) return false;
-    pickCursor = lastDelivered.seq;
+    if (advanceTo === pickCursor) return false;
+    pickCursor = advanceTo;
+    if (!lastDelivered) return true;
     try {
-      await ackPicks(lastDelivered.seq, pickAckLabel(lastDelivered));
+      await ackPicks(lastDelivered.seq, batchAckLabel(delivered, lastDelivered));
     } catch {
     }
     return true;
@@ -5722,9 +5770,11 @@ ${TRUNCATED_MARKUP}` };
     );
     return map;
   }
-  async function loadCanvasWorkspaces() {
-    state.workspaces = { kind: "loading" };
-    rerender();
+  async function loadCanvasWorkspaces(options = {}) {
+    if (!(options.quiet && state.workspaces?.kind === "list")) {
+      state.workspaces = { kind: "loading" };
+      rerender();
+    }
     wsSessionMap = await readWorkspaceSessionMap();
     let result;
     try {
@@ -5925,7 +5975,9 @@ ${TRUNCATED_MARKUP}` };
     if (!options.open) return anchor;
     options.panel.setAttribute("role", "dialog");
     options.panel.setAttribute("aria-label", options.label);
-    anchor.append(q("div", "ds-ds-backdrop"));
+    const backdrop = q("div", "ds-ds-backdrop");
+    if (options.closeOnBackdrop) backdrop.addEventListener("click", () => options.onClose());
+    anchor.append(backdrop);
     anchor.append(options.panel);
     options.panel.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
@@ -6505,7 +6557,7 @@ Source: ${reference.sourceDirectory}`;
   function renderFooter() {
     const footer = q("footer", "ds-footer");
     footer.append(q("span", "ds-footer-name", "Design Canvas"));
-    footer.append(q("span", "ds-footer-hint", "Add references by clicking an element in the live canvas \u2014 edit mode turns every click into a chip."));
+    footer.append(q("span", "ds-footer-hint", "Click an element in the canvas, then Reference in chat."));
     return footer;
   }
   var WORKSPACE_ROW_ICON = '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>';
@@ -6547,28 +6599,53 @@ Source: ${reference.sourceDirectory}`;
     return section;
   }
   function renderWorkspaceListRow(row) {
-    const ready = Boolean(row.url?.trim());
     const item = q("div", "ds-list-row");
-    const open = q("button", "ds-list-open");
-    open.setAttribute("aria-label", row.sessionId ? `Open the canvas chat ${row.name}` : `Open ${row.name} (starts its design chat)`);
-    open.append(rowIcon(WORKSPACE_ROW_ICON));
-    const main2 = q("div", "ds-list-main");
-    const titleLine = q("div", "ds-list-title");
-    titleLine.append(q("span", "ds-list-name", row.name || fileBaseName(row.dir)));
-    titleLine.append(q("span", `ds-badge${ready ? " ready" : ""}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
-    main2.append(titleLine);
-    main2.append(q("div", "ds-list-meta", workspaceMeta(row)));
-    open.append(main2);
-    open.append(q("span", "ds-list-go", row.sessionId ? "Open" : "Open chat"));
-    open.addEventListener("click", () => void openWorkspaceListRow(row));
-    item.append(open);
-    if (ready) {
-      const preview = q("button", "ds-list-preview", "Preview");
-      preview.title = `Open the ${row.name} preview`;
-      preview.setAttribute("aria-label", `Open the ${row.name} preview`);
-      preview.addEventListener("click", () => void previewWorkspace(row));
-      item.append(preview);
-    }
+    const key = normalizeDirPath(row.dir);
+    const paint = () => {
+      const ui = rowUiFor(row.dir);
+      const ready = Boolean(row.url?.trim());
+      const running = workspaceServerRunning(row);
+      const name = row.name || fileBaseName(row.dir);
+      item.classList.toggle("is-renaming", ui.renaming);
+      const parts = [];
+      const main2 = q("div", "ds-list-main");
+      const titleLine = q("div", "ds-list-title");
+      if (ui.renaming) titleLine.append(renderRenameField(row, ui));
+      else titleLine.append(q("span", "ds-list-name", name));
+      titleLine.append(q("span", `ds-badge${ready ? " ready" : ""}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
+      if (running) titleLine.append(q("span", "ds-badge running", "\u25CF Running"));
+      main2.append(titleLine);
+      main2.append(q("div", "ds-list-meta", workspaceMeta(row)));
+      if (ui.renaming) {
+        const body = q("div", "ds-list-open ds-list-body");
+        body.append(rowIcon(WORKSPACE_ROW_ICON), main2);
+        parts.push(body);
+      } else {
+        const open = q("button", "ds-list-open");
+        open.setAttribute("aria-label", row.sessionId ? `Open the canvas chat ${name}` : `Open ${name} (starts its design chat)`);
+        open.append(rowIcon(WORKSPACE_ROW_ICON), main2);
+        open.append(q("span", "ds-list-go", row.sessionId ? "Open" : "Open chat"));
+        open.addEventListener("click", () => void openWorkspaceListRow(row));
+        parts.push(open);
+      }
+      if (ready && !ui.renaming) {
+        const preview = q("button", "ds-list-preview", "Preview");
+        preview.title = `Open the ${name} preview`;
+        preview.setAttribute("aria-label", `Open the ${name} preview`);
+        preview.addEventListener("click", () => void previewWorkspace(row));
+        parts.push(preview);
+      }
+      if (running || ui.stopBusy) parts.push(renderRowStopButton(row, ui, name));
+      if (!ui.renaming) parts.push(renderRowMenu(row, ui, name));
+      if (ui.message) {
+        const alert = q("div", "ds-list-warn ds-list-alert", ui.message);
+        alert.setAttribute("role", "alert");
+        parts.push(alert);
+      }
+      item.replaceChildren(...parts);
+    };
+    rowPainters.set(key, paint);
+    paint();
     return item;
   }
   async function openWorkspaceListRow(row) {
@@ -6611,6 +6688,452 @@ Source: ${reference.sourceDirectory}`;
     } catch (error) {
       await host.toast({ kind: "error", message: `The canvas chat could not open. Open it from Your design work. ${error instanceof Error ? error.message : String(error)}` });
     }
+  }
+  var STOP_CONFIRM_MS = 4e3;
+  var rowUi = /* @__PURE__ */ new Map();
+  var rowPainters = /* @__PURE__ */ new Map();
+  function rowUiFor(dir) {
+    const key = normalizeDirPath(dir);
+    let ui = rowUi.get(key);
+    if (!ui) {
+      ui = {
+        menuOpen: false,
+        renaming: false,
+        renameDraft: "",
+        renameBusy: false,
+        stopChecking: false,
+        stopBusy: false,
+        stopConfirm: false,
+        stopConfirmTimer: null,
+        message: "",
+        focusRename: false,
+        focusMore: false
+      };
+      rowUi.set(key, ui);
+    }
+    return ui;
+  }
+  function repaintRow(dir) {
+    rowPainters.get(normalizeDirPath(dir))?.();
+  }
+  var STOP_ICON = '<rect x="6" y="6" width="12" height="12" rx="1.5"/>';
+  var MORE_ICON = '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>';
+  function renderRenameField(row, ui) {
+    const wrap = q("span", "ds-list-rename");
+    const input = q("input", "ds-list-rename-input");
+    input.type = "text";
+    input.value = ui.renameDraft;
+    input.disabled = ui.renameBusy;
+    input.setAttribute("aria-label", `New name for ${row.name || fileBaseName(row.dir)}`);
+    input.setAttribute("aria-busy", String(ui.renameBusy));
+    input.addEventListener("input", () => {
+      ui.renameDraft = input.value;
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void saveRowRename(row);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation?.();
+        cancelRowRename(row);
+      }
+    });
+    input.addEventListener("blur", () => {
+      if (!ui.renameBusy && ui.renaming) cancelRowRename(row);
+    });
+    wrap.append(input);
+    if (ui.renameBusy) {
+      const spinner = svgIcon('<path d="M21 12a9 9 0 1 1-6.2-8.6"/>', 14);
+      spinner.classList.add("ds-reference-spinner");
+      wrap.append(spinner);
+    }
+    if (ui.focusRename) {
+      ui.focusRename = false;
+      queueMicrotask(() => {
+        input.focus();
+        input.select?.();
+      });
+    }
+    return wrap;
+  }
+  function renderRowStopButton(row, ui, name) {
+    const stop = q("button", "ds-list-stop");
+    stop.disabled = ui.stopBusy || ui.stopChecking;
+    stop.setAttribute("aria-busy", String(ui.stopBusy));
+    stop.classList.toggle("is-confirm", ui.stopConfirm);
+    if (ui.stopBusy) {
+      stop.textContent = "Stopping\u2026";
+      stop.title = `Stopping the ${name} dev server`;
+    } else if (ui.stopConfirm) {
+      stop.textContent = "Confirm stop";
+      stop.title = `The ${name} canvas is in use \u2014 click again to stop its dev server`;
+    } else {
+      stop.append(svgIcon(STOP_ICON, 14));
+      stop.title = `Stop the ${name} dev server`;
+    }
+    stop.setAttribute("aria-label", stop.title);
+    stop.addEventListener("click", () => void stopRowServer(row));
+    return stop;
+  }
+  function renderRowMenu(row, ui, name) {
+    const trigger = q("button", "ds-list-more");
+    trigger.append(svgIcon(MORE_ICON, 16));
+    trigger.title = `More actions for ${name}`;
+    trigger.setAttribute("aria-label", trigger.title);
+    trigger.setAttribute("aria-haspopup", "menu");
+    trigger.setAttribute("aria-expanded", String(ui.menuOpen));
+    trigger.addEventListener("click", () => toggleRowMenu(row));
+    const panel = q("div", "ds-ds-panel ds-row-menu");
+    const option2 = (label, onClick) => {
+      const item = q("button", "ds-menu-item ds-row-menu-item", label);
+      item.addEventListener("click", onClick);
+      panel.append(item);
+    };
+    option2("Rename\u2026", () => startRowRename(row));
+    if (workspaceServerRunning(row)) option2("Stop dev server", () => {
+      closeRowMenu(row);
+      void stopRowServer(row);
+    });
+    option2("Copy folder path", () => {
+      closeRowMenu(row);
+      void copyRowPath(row);
+    });
+    if (ui.menuOpen) queueMicrotask(() => panel.querySelector(".ds-row-menu-item")?.focus());
+    if (ui.focusMore) {
+      ui.focusMore = false;
+      queueMicrotask(() => trigger.focus());
+    }
+    const anchor = anchoredPopover({
+      open: ui.menuOpen,
+      trigger,
+      panel,
+      label: `${name} actions`,
+      optionSelector: ".ds-row-menu-item",
+      onClose: () => closeRowMenu(row, true),
+      closeOnBackdrop: true
+    });
+    anchor.classList.add("ds-row-more");
+    return anchor;
+  }
+  function toggleRowMenu(row) {
+    const ui = rowUiFor(row.dir);
+    const next = !ui.menuOpen;
+    for (const [key, other] of rowUi) {
+      if (other.menuOpen && other !== ui) {
+        other.menuOpen = false;
+        rowPainters.get(key)?.();
+      }
+    }
+    ui.menuOpen = next;
+    repaintRow(row.dir);
+  }
+  function closeRowMenu(row, refocus = false) {
+    const ui = rowUiFor(row.dir);
+    if (!ui.menuOpen) return;
+    ui.menuOpen = false;
+    ui.focusMore = refocus;
+    repaintRow(row.dir);
+  }
+  function startRowRename(row) {
+    const ui = rowUiFor(row.dir);
+    ui.menuOpen = false;
+    ui.renaming = true;
+    ui.renameBusy = false;
+    ui.renameDraft = row.name || fileBaseName(row.dir);
+    ui.message = "";
+    ui.focusRename = true;
+    repaintRow(row.dir);
+  }
+  function cancelRowRename(row) {
+    const ui = rowUiFor(row.dir);
+    if (ui.renameBusy) return;
+    ui.renaming = false;
+    ui.renameDraft = "";
+    ui.message = "";
+    repaintRow(row.dir);
+  }
+  async function saveRowRename(row) {
+    const ui = rowUiFor(row.dir);
+    if (ui.renameBusy || !ui.renaming) return;
+    const next = ui.renameDraft.trim();
+    if (next === "") {
+      ui.message = "Enter a name for this design.";
+      ui.focusRename = true;
+      repaintRow(row.dir);
+      return;
+    }
+    if (next === (row.name || fileBaseName(row.dir))) {
+      cancelRowRename(row);
+      return;
+    }
+    ui.renameBusy = true;
+    ui.message = "";
+    repaintRow(row.dir);
+    let failure = "";
+    let saved = "";
+    try {
+      const result = await renameWorkspace(row.dir, next);
+      if (result.ok) saved = typeof result.name === "string" && result.name.trim() !== "" ? result.name : next;
+      else failure = result.error ?? "The design could not be renamed.";
+    } catch (error) {
+      failure = `The design could not be renamed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    ui.renameBusy = false;
+    if (failure) {
+      ui.message = failure;
+      ui.focusRename = true;
+      repaintRow(row.dir);
+      return;
+    }
+    ui.renaming = false;
+    ui.renameDraft = "";
+    row.name = saved;
+    repaintRow(row.dir);
+    await applyWorkspaceRename(row.dir, saved);
+    await loadCanvasWorkspaces({ quiet: true });
+  }
+  async function applyWorkspaceRename(dir, name) {
+    if (state.workspace && sameDirPath(state.workspace.dir, dir)) {
+      state.workspace = { ...state.workspace, name };
+      renderRow();
+      if (state.surface === "panel") renderRailControls();
+    }
+    const sessionId = wsSessionMap.get(normalizeDirPath(dir));
+    const key = sessionId ? workspaceStorageKey(sessionId) : null;
+    if (!key) return;
+    try {
+      const record = await host.storage.get(key);
+      if (isWorkspaceRecord(record) && sameDirPath(record.dir, dir)) {
+        await host.storage.set(key, { ...record, name });
+      }
+    } catch {
+    }
+  }
+  async function sessionBusyState(sessionId) {
+    if (sessionId === state.sessionId) return state.sessionBusy;
+    try {
+      const projects = await host.listProjects();
+      if (projects.state !== "ready") return null;
+      for (const project of projects.projects) {
+        const sessions = await host.listSessions(project.id);
+        const found = sessions.sessions.find((candidate) => candidate.id === sessionId);
+        if (found) return found.activity !== "idle";
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  async function rowStopNeedsConfirm(row) {
+    try {
+      const live = await getState();
+      if (live.windowOpen === true && typeof live.dir === "string" && sameDirPath(live.dir, row.dir)) return true;
+    } catch {
+      return true;
+    }
+    if (!row.sessionId) return false;
+    return await sessionBusyState(row.sessionId) !== false;
+  }
+  function disarmRowStop(ui) {
+    ui.stopConfirm = false;
+    if (ui.stopConfirmTimer) clearTimeout(ui.stopConfirmTimer);
+    ui.stopConfirmTimer = null;
+  }
+  async function stopRowServer(row) {
+    const ui = rowUiFor(row.dir);
+    if (ui.stopBusy || ui.stopChecking) return;
+    if (!ui.stopConfirm) {
+      ui.stopChecking = true;
+      let confirm;
+      try {
+        confirm = await rowStopNeedsConfirm(row);
+      } finally {
+        ui.stopChecking = false;
+      }
+      if (confirm) {
+        ui.stopConfirm = true;
+        ui.message = "";
+        ui.stopConfirmTimer = setTimeout(() => {
+          disarmRowStop(ui);
+          repaintRow(row.dir);
+        }, STOP_CONFIRM_MS);
+        repaintRow(row.dir);
+        return;
+      }
+    }
+    disarmRowStop(ui);
+    ui.stopBusy = true;
+    ui.message = "";
+    repaintRow(row.dir);
+    try {
+      const result = await stopWorkspaceServer(row.dir);
+      if (result.stopped) {
+        for (const started of [...state.startedServers]) {
+          if (sameDirPath(started, row.dir)) state.startedServers.delete(started);
+        }
+        if (state.workspace && sameDirPath(state.workspace.dir, row.dir)) {
+          state.serverStatus = false;
+          state.serverError = null;
+          renderServerControl();
+        }
+      } else {
+        ui.message = result.error ?? await manualStopRefusalMessage(row.dir);
+      }
+    } catch (error) {
+      ui.message = `Could not stop the dev server: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      ui.stopBusy = false;
+      repaintRow(row.dir);
+    }
+    await loadCanvasWorkspaces({ quiet: true });
+  }
+  async function copyRowPath(row) {
+    try {
+      await copyPath(row.dir);
+      await host.toast({ kind: "success", message: "Folder path copied." });
+    } catch (error) {
+      await host.toast({ kind: "error", message: `Could not copy the folder path: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  }
+  var designsSettings = null;
+  var designsSettingsLoad = "idle";
+  var locationEditorOpen = false;
+  async function loadDesignsSettings() {
+    if (isHiddenResolvePane()) return designsSettings;
+    designsSettingsLoad = "loading";
+    try {
+      const result = await getSettings();
+      designsSettings = isDesignsSettings(result) ? result : null;
+      designsSettingsLoad = designsSettings ? "loaded" : "error";
+    } catch {
+      designsSettingsLoad = "error";
+    }
+    return designsSettings;
+  }
+  var ENV_OVERRIDE_LABEL = "Set by DS_WORKSPACE_ROOT";
+  async function openLocationEditor(anchorEl, onDone) {
+    if (isHiddenResolvePane()) return;
+    locationEditorOpen = true;
+    const close = (changed) => {
+      locationEditorOpen = false;
+      onDone(changed);
+    };
+    anchorEl.replaceChildren(q("div", "ds-location-note", "Loading the designs folder\u2026"));
+    const settings = await loadDesignsSettings();
+    const editor = q("div", "ds-location-editor");
+    editor.setAttribute("role", "group");
+    editor.setAttribute("aria-label", "Designs folder");
+    const cancel = q("button", "ds-location-cancel", settings?.envOverride || !settings ? "Close" : "Cancel");
+    cancel.addEventListener("click", () => close(false));
+    if (!settings) {
+      const error2 = q("div", "ds-home-warn ds-location-error", "Could not read the designs folder from the local service.");
+      error2.setAttribute("role", "alert");
+      editor.append(error2, cancel);
+      anchorEl.replaceChildren(editor);
+      return;
+    }
+    if (settings.envOverride) {
+      editor.append(q("div", "ds-location-path", settings.workspaceRoot));
+      editor.append(q("div", "ds-location-readonly", ENV_OVERRIDE_LABEL));
+      editor.append(cancel);
+      anchorEl.replaceChildren(editor);
+      return;
+    }
+    const input = q("input", "ds-location-input");
+    input.type = "text";
+    input.value = settings.workspaceRoot;
+    input.setAttribute("aria-label", "Designs folder path");
+    const error = q("div", "ds-home-warn ds-location-error");
+    error.setAttribute("role", "alert");
+    error.hidden = true;
+    const save = q("button", "primary ds-location-save", "Save");
+    const reset = q("button", "ds-location-default", "Use default");
+    reset.title = `Use the default folder: ${settings.defaultRoot}`;
+    const actions = q("div", "ds-location-actions");
+    actions.append(save, reset, cancel);
+    let busy = false;
+    const setBusy = (on) => {
+      busy = on;
+      input.disabled = on;
+      save.disabled = on;
+      reset.disabled = on;
+      cancel.disabled = on;
+      save.textContent = on ? "Saving\u2026" : "Save";
+      editor.setAttribute("aria-busy", String(on));
+    };
+    const submit = async (value) => {
+      if (busy) return;
+      if (value !== null && value.trim() === "") {
+        error.textContent = "Enter a full folder path, or choose Use default.";
+        error.hidden = false;
+        return;
+      }
+      setBusy(true);
+      error.hidden = true;
+      let failure = "";
+      try {
+        const result = await putSettings(value === null ? null : value.trim());
+        if (!result.ok) failure = result.error || "The designs folder could not be changed.";
+      } catch (caught) {
+        failure = `The designs folder could not be changed: ${caught instanceof Error ? caught.message : String(caught)}`;
+      }
+      if (failure) {
+        setBusy(false);
+        error.textContent = failure;
+        error.hidden = false;
+        input.focus();
+        return;
+      }
+      await loadDesignsSettings();
+      if (canLoadDesignWork()) await loadCanvasWorkspaces({ quiet: true });
+      close(true);
+    };
+    save.addEventListener("click", () => void submit(input.value));
+    reset.addEventListener("click", () => void submit(null));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void submit(input.value);
+      } else if (event.key === "Escape" && !busy) {
+        event.preventDefault();
+        close(false);
+      }
+    });
+    editor.append(input, actions, error);
+    anchorEl.replaceChildren(editor);
+    queueMicrotask(() => input.focus());
+  }
+  function renderLocationRow(container) {
+    container.classList.add("ds-location");
+    if (isHiddenResolvePane() || state.surface === "panel" && !isRealPane()) {
+      container.replaceChildren();
+      container.hidden = true;
+      return;
+    }
+    if (locationEditorOpen) return;
+    const settings = designsSettings;
+    if (!settings) {
+      container.replaceChildren();
+      container.hidden = true;
+      if (designsSettingsLoad === "idle") void loadDesignsSettings().then(() => renderLocationRow(container));
+      return;
+    }
+    container.hidden = false;
+    const line = q("div", "ds-location-line");
+    line.append(q("span", "ds-location-label", "Designs: "));
+    const path = q("span", "ds-location-path", middleTruncatePath(settings.workspaceRoot));
+    path.title = settings.workspaceRoot;
+    line.append(path, q("span", "ds-location-sep", " \xB7 "));
+    if (settings.envOverride) {
+      line.append(q("span", "ds-location-readonly", ENV_OVERRIDE_LABEL));
+    } else {
+      const change = q("button", "ds-link ds-location-change", "Change");
+      change.setAttribute("aria-label", "Change the designs folder");
+      change.addEventListener("click", () => void openLocationEditor(container, () => renderLocationRow(container)));
+      line.append(change);
+    }
+    container.replaceChildren(line);
   }
   function renderWindowStatus() {
     if (hintEl) {
@@ -6884,6 +7407,7 @@ Source: ${reference.sourceDirectory}`;
   var railStartBtn = null;
   var railErrorEl = null;
   var railWorkEl = null;
+  var railLocationEl = null;
   var railBusy = false;
   var railLive = false;
   var railWorkLoaded = false;
@@ -6917,8 +7441,10 @@ Source: ${reference.sourceDirectory}`;
     railErrorEl.setAttribute("role", "alert");
     brief.append(railPromptEl, railStartBtn, railErrorEl);
     railWorkEl = q("div", "ds-rail-work");
+    railLocationEl = q("div", "ds-rail-location");
+    railLocationEl.hidden = true;
     const footer = q("div", "ds-rail-footer", RAIL_FOOTER_HINT);
-    wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, footer);
+    wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, railLocationEl, footer);
     root.append(wrap);
     window.addEventListener("resize", onRailWake);
     window.addEventListener("focus", onRailWake);
@@ -6968,9 +7494,19 @@ Source: ${reference.sourceDirectory}`;
     }
     railWorkEl.replaceChildren(renderCanvasSection());
   }
+  function renderRailLocation() {
+    if (!railLocationEl) return;
+    if (!isRealPane() || !railWorkLoaded) {
+      railLocationEl.replaceChildren();
+      railLocationEl.hidden = true;
+      return;
+    }
+    renderLocationRow(railLocationEl);
+  }
   function renderRail() {
     renderRailControls();
     renderRailWork();
+    renderRailLocation();
   }
   async function onRailPrimaryClick() {
     if (railBusy || state.serverPending || !isRealPane()) return;
@@ -7038,7 +7574,8 @@ Source: ${reference.sourceDirectory}`;
   async function loadRailWork() {
     if (!isRealPane()) return;
     railWorkLoaded = true;
-    await loadDesignHome();
+    await Promise.all([loadDesignHome(), loadDesignsSettings()]);
+    renderRailLocation();
   }
   function startRailLive() {
     if (railLive || state.surface !== "panel" || !isRealPane()) return;
@@ -7179,6 +7716,11 @@ Source: ${reference.sourceDirectory}`;
   }
   function resetServerAnnouncements() {
     serverAnnouncements.length = 0;
+  }
+  function resetDesignsSettings() {
+    designsSettings = null;
+    designsSettingsLoad = "idle";
+    locationEditorOpen = false;
   }
   function setRailClaimDelay(ms) {
     railClaimDelayMs = ms ?? RAIL_CLAIM_DELAY_MS;

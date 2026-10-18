@@ -62,8 +62,17 @@ import {
   normalizeDirPath,
   openWorkspace,
   pathContains,
-  pickAckLabel,
+  batchAckLabel,
+  copyPath,
+  getSettings,
+  isDesignsSettings,
+  middleTruncatePath,
   pickHintActive,
+  putSettings,
+  renameWorkspace,
+  stopWorkspaceServer,
+  workspaceServerRunning,
+  type DesignsSettings,
   postAgentStatus,
   projectReady,
   registryErrorToastMessage,
@@ -1488,7 +1497,7 @@ async function startNewDesign(): Promise<void> {
  */
 async function addToChat(entry: QueuedPick): Promise<boolean> {
   try {
-    await host.attach(buildAttachPayload(entry, pickContext()));
+    await host.attach(buildAttachPayload(entry, pickContext(entry)));
     return true;
   } catch (error) {
     setStatus(`Could not attach a canvas pick: ${error instanceof Error ? error.message : String(error)}`, 'error');
@@ -1496,10 +1505,23 @@ async function addToChat(entry: QueuedPick): Promise<boolean> {
   }
 }
 
-/** Where the row's picks live on disk (F6): the bound workspace + the live screens. */
-function pickContext(): PickContext | null {
-  const dir = state.workspace?.dir?.trim();
-  return dir ? { workspaceDir: dir, screens: state.liveScreens } : null;
+/**
+ * Where a pick lives on disk (F6): the pick's OWN canvas dir when the service
+ * stamped one (R2), else the bound workspace. The live screens describe the
+ * bound workspace only, so they ride along just when the dirs agree.
+ */
+function pickContext(pick?: QueuedPick): PickContext | null {
+  const bound = state.workspace?.dir?.trim();
+  const dir = pick?.dir?.trim() || bound;
+  if (!dir) return null;
+  return { workspaceDir: dir, screens: bound && sameDirPath(dir, bound) ? state.liveScreens : [] };
+}
+
+/** R2 (B4): whether a pick came from THIS chat's canvas (no dir = legacy, always ours). */
+function pickBelongsHere(pick: QueuedPick): boolean {
+  if (!pick.dir) return true;
+  const bound = state.workspace?.dir;
+  return Boolean(bound && sameDirPath(pick.dir, bound));
 }
 
 /** The live screens with ABSOLUTE files, for the compact mode chip (F7). */
@@ -1553,7 +1575,7 @@ export const PICK_SHORT_POLL_BUDGET_MS = 30_000;
 /** The idle check cadence while held (mode off). */
 const PICK_HELD_POLL_MS = 900;
 /** The pace after an idle long-poll round — pacing only; a real long-poll already waited. */
-const PICK_IDLE_POLL_MS = 1000;
+export const PICK_IDLE_POLL_MS = 150;
 
 /**
  * The highest seq this row has delivered-and-acked. Persists for the frame's
@@ -1575,13 +1597,22 @@ export function getPickCursor(): number {
  * AFTER its chip landed keeps the cursor advanced — the composer already has
  * the chip, and redelivering it would duplicate. The service's own unacked
  * watchdog raises the canvas-side warning when delivery truly stalls.
+ * R2 (B4): a pick from ANOTHER chat's canvas window (its `dir` is not this
+ * row's workspace) is passed over — the cursor moves past it, but it is never
+ * attached or acked here; the row of the chat it belongs to delivers it.
  */
 async function deliverPickBatch(picks: QueuedPick[]): Promise<boolean> {
   let lastDelivered: QueuedPick | null = null;
+  const delivered: QueuedPick[] = [];
+  let advanceTo = pickCursor;
   let modeRechecked = false;
   let modeChipSent = false;
   for (const entry of [...picks].sort((a, b) => a.seq - b.seq)) {
     if (entry.seq <= pickCursor) continue; // already delivered-and-acked (defensive)
+    if (!pickBelongsHere(entry)) {
+      advanceTo = entry.seq;
+      continue;
+    }
     // F5: memory may say OFF only because another frame (the `/canvas` resolve
     // pane) turned the mode ON in storage after this row loaded it. One cheap
     // storage read per batch beats holding the pick for another long-poll.
@@ -1599,11 +1630,14 @@ async function deliverPickBatch(picks: QueuedPick[]): Promise<boolean> {
     }
     if (!(await addToChat(entry))) break; // no ack past a failed attach; retry next poll
     lastDelivered = entry;
+    delivered.push(entry);
+    advanceTo = entry.seq;
   }
-  if (!lastDelivered) return false;
-  pickCursor = lastDelivered.seq;
+  if (advanceTo === pickCursor) return false;
+  pickCursor = advanceTo;
+  if (!lastDelivered) return true; // only foreign picks: passed over, never acked here
   try {
-    await ackPicks(lastDelivered.seq, pickAckLabel(lastDelivered));
+    await ackPicks(lastDelivered.seq, batchAckLabel(delivered, lastDelivered));
   } catch {
     /* the chips are in the composer; the next ack covers these seqs as well */
   }
@@ -2418,10 +2452,16 @@ async function readWorkspaceSessionMap(): Promise<Map<string, string>> {
   return map;
 }
 
-/** Read the workspaces list (decision 2: design work = workspaces on disk). */
-async function loadCanvasWorkspaces(): Promise<void> {
-  state.workspaces = { kind: 'loading' };
-  rerender();
+/**
+ * Read the workspaces list (decision 2: design work = workspaces on disk).
+ * `quiet` keeps a shown list on screen while it refreshes (after a row action),
+ * instead of flashing "Loading…".
+ */
+async function loadCanvasWorkspaces(options: { quiet?: boolean } = {}): Promise<void> {
+  if (!(options.quiet && state.workspaces?.kind === 'list')) {
+    state.workspaces = { kind: 'loading' };
+    rerender();
+  }
   wsSessionMap = await readWorkspaceSessionMap();
   let result: WorkspacesResult;
   try {
@@ -2675,13 +2715,17 @@ function anchoredPopover(options: {
   label: string;
   optionSelector: string;
   onClose: () => void;
+  /** Close on a click on the backdrop (surfaces without the page's window click handler). */
+  closeOnBackdrop?: boolean;
 }): HTMLElement {
   const anchor = q('div', 'ds-ds-anchor');
   anchor.append(options.trigger);
   if (!options.open) return anchor;
   options.panel.setAttribute('role', 'dialog');
   options.panel.setAttribute('aria-label', options.label);
-  anchor.append(q('div', 'ds-ds-backdrop'));
+  const backdrop = q('div', 'ds-ds-backdrop');
+  if (options.closeOnBackdrop) backdrop.addEventListener('click', () => options.onClose());
+  anchor.append(backdrop);
   anchor.append(options.panel);
   options.panel.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
@@ -3361,7 +3405,7 @@ function renderIdeas(): HTMLElement {
 function renderFooter(): HTMLElement {
   const footer = q('footer', 'ds-footer');
   footer.append(q('span', 'ds-footer-name', 'Design Canvas'));
-  footer.append(q('span', 'ds-footer-hint', 'Add references by clicking an element in the live canvas — edit mode turns every click into a chip.'));
+  footer.append(q('span', 'ds-footer-hint', 'Click an element in the canvas, then Reference in chat.'));
   return footer;
 }
 
@@ -3419,31 +3463,64 @@ function renderCanvasSection(): HTMLElement {
  * unmapped workspace opens via a NEW session titled with the workspace name
  * (carrying the open prompt); a mapped one reuses its session via
  * `host.openSession`.
+ *
+ * R5: the row also manages its workspace — a ⋯ menu (Rename…, Stop dev
+ * server, Copy folder path) and, while the service's recorded dev server is
+ * up, a "● Running" badge with an inline Stop button. The row's transient UI
+ * (menu, inline rename, stop confirm) lives in `rowUi`, keyed by dir, so a
+ * list refresh redraws it as it was; the row repaints itself in place.
  */
-function renderWorkspaceListRow(row: WorkspaceWorkRow): HTMLElement {
-  const ready = Boolean(row.url?.trim());
+export function renderWorkspaceListRow(row: WorkspaceWorkRow): HTMLElement {
   const item = q('div', 'ds-list-row');
-  const open = q<HTMLButtonElement>('button', 'ds-list-open');
-  open.setAttribute('aria-label', row.sessionId ? `Open the canvas chat ${row.name}` : `Open ${row.name} (starts its design chat)`);
-  open.append(rowIcon(WORKSPACE_ROW_ICON));
-  const main = q('div', 'ds-list-main');
-  const titleLine = q('div', 'ds-list-title');
-  titleLine.append(q('span', 'ds-list-name', row.name || fileBaseName(row.dir)));
-  titleLine.append(q('span', `ds-badge${ready ? ' ready' : ''}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
-  main.append(titleLine);
-  main.append(q('div', 'ds-list-meta', workspaceMeta(row)));
-  open.append(main);
-  open.append(q('span', 'ds-list-go', row.sessionId ? 'Open' : 'Open chat'));
-  open.addEventListener('click', () => void openWorkspaceListRow(row));
-  item.append(open);
-  // Preview is offered only for a workspace with a url — it can do what it says.
-  if (ready) {
-    const preview = q<HTMLButtonElement>('button', 'ds-list-preview', 'Preview');
-    preview.title = `Open the ${row.name} preview`;
-    preview.setAttribute('aria-label', `Open the ${row.name} preview`);
-    preview.addEventListener('click', () => void previewWorkspace(row));
-    item.append(preview);
-  }
+  const key = normalizeDirPath(row.dir);
+  const paint = (): void => {
+    const ui = rowUiFor(row.dir);
+    const ready = Boolean(row.url?.trim());
+    const running = workspaceServerRunning(row);
+    const name = row.name || fileBaseName(row.dir);
+    item.classList.toggle('is-renaming', ui.renaming);
+    const parts: HTMLElement[] = [];
+    const main = q('div', 'ds-list-main');
+    const titleLine = q('div', 'ds-list-title');
+    if (ui.renaming) titleLine.append(renderRenameField(row, ui));
+    else titleLine.append(q('span', 'ds-list-name', name));
+    titleLine.append(q('span', `ds-badge${ready ? ' ready' : ''}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
+    if (running) titleLine.append(q('span', 'ds-badge running', '● Running'));
+    main.append(titleLine);
+    main.append(q('div', 'ds-list-meta', workspaceMeta(row)));
+    if (ui.renaming) {
+      // An <input> cannot live inside the open button: while renaming the
+      // row's body is a plain container, and the open action pauses.
+      const body = q('div', 'ds-list-open ds-list-body');
+      body.append(rowIcon(WORKSPACE_ROW_ICON), main);
+      parts.push(body);
+    } else {
+      const open = q<HTMLButtonElement>('button', 'ds-list-open');
+      open.setAttribute('aria-label', row.sessionId ? `Open the canvas chat ${name}` : `Open ${name} (starts its design chat)`);
+      open.append(rowIcon(WORKSPACE_ROW_ICON), main);
+      open.append(q('span', 'ds-list-go', row.sessionId ? 'Open' : 'Open chat'));
+      open.addEventListener('click', () => void openWorkspaceListRow(row));
+      parts.push(open);
+    }
+    // Preview is offered only for a workspace with a url — it can do what it says.
+    if (ready && !ui.renaming) {
+      const preview = q<HTMLButtonElement>('button', 'ds-list-preview', 'Preview');
+      preview.title = `Open the ${name} preview`;
+      preview.setAttribute('aria-label', `Open the ${name} preview`);
+      preview.addEventListener('click', () => void previewWorkspace(row));
+      parts.push(preview);
+    }
+    if (running || ui.stopBusy) parts.push(renderRowStopButton(row, ui, name));
+    if (!ui.renaming) parts.push(renderRowMenu(row, ui, name));
+    if (ui.message) {
+      const alert = q('div', 'ds-list-warn ds-list-alert', ui.message);
+      alert.setAttribute('role', 'alert');
+      parts.push(alert);
+    }
+    item.replaceChildren(...parts);
+  };
+  rowPainters.set(key, paint);
+  paint();
   return item;
 }
 
@@ -3493,6 +3570,534 @@ async function openWorkspaceListRow(row: WorkspaceWorkRow): Promise<void> {
   } catch (error) {
     await host.toast({ kind: 'error', message: `The canvas chat could not open. Open it from Your design work. ${error instanceof Error ? error.message : String(error)}` });
   }
+}
+
+// ---- work-list row management (R5: rename, stop dev server, copy path) ----
+
+/** One row's transient UI, kept across list redraws (keyed by normalized dir). */
+type RowUi = {
+  menuOpen: boolean;
+  renaming: boolean;
+  renameDraft: string;
+  renameBusy: boolean;
+  /** True while the confirm check (canvas open? session busy?) runs. */
+  stopChecking: boolean;
+  stopBusy: boolean;
+  stopConfirm: boolean;
+  stopConfirmTimer: ReturnType<typeof setTimeout> | null;
+  /** The row's inline alert: a rename error or a stop refusal. */
+  message: string;
+  /** Focus the rename field on the next paint. */
+  focusRename: boolean;
+  /** Hand focus back to the ⋯ trigger on the next paint (an Escape close). */
+  focusMore: boolean;
+};
+
+/** How long the inline "Confirm stop" stays armed. */
+const STOP_CONFIRM_MS = 4000;
+
+const rowUi = new Map<string, RowUi>();
+/** The latest painter for each listed row — a redraw replaces it. */
+const rowPainters = new Map<string, () => void>();
+
+function rowUiFor(dir: string): RowUi {
+  const key = normalizeDirPath(dir);
+  let ui = rowUi.get(key);
+  if (!ui) {
+    ui = {
+      menuOpen: false, renaming: false, renameDraft: '', renameBusy: false,
+      stopChecking: false, stopBusy: false, stopConfirm: false, stopConfirmTimer: null,
+      message: '', focusRename: false, focusMore: false,
+    };
+    rowUi.set(key, ui);
+  }
+  return ui;
+}
+
+function repaintRow(dir: string): void {
+  rowPainters.get(normalizeDirPath(dir))?.();
+}
+
+const STOP_ICON = '<rect x="6" y="6" width="12" height="12" rx="1.5"/>';
+const MORE_ICON = '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>';
+
+/** The inline rename field: Enter saves, Escape or leaving the field cancels. */
+function renderRenameField(row: WorkspaceWorkRow, ui: RowUi): HTMLElement {
+  const wrap = q('span', 'ds-list-rename');
+  const input = q<HTMLInputElement>('input', 'ds-list-rename-input');
+  input.type = 'text';
+  input.value = ui.renameDraft;
+  input.disabled = ui.renameBusy;
+  input.setAttribute('aria-label', `New name for ${row.name || fileBaseName(row.dir)}`);
+  input.setAttribute('aria-busy', String(ui.renameBusy));
+  input.addEventListener('input', () => { ui.renameDraft = input.value; });
+  input.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void saveRowRename(row);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation?.();
+      cancelRowRename(row);
+    }
+  });
+  input.addEventListener('blur', () => {
+    if (!ui.renameBusy && ui.renaming) cancelRowRename(row);
+  });
+  wrap.append(input);
+  if (ui.renameBusy) {
+    const spinner = svgIcon('<path d="M21 12a9 9 0 1 1-6.2-8.6"/>', 14);
+    spinner.classList.add('ds-reference-spinner');
+    wrap.append(spinner);
+  }
+  if (ui.focusRename) {
+    ui.focusRename = false;
+    queueMicrotask(() => {
+      input.focus();
+      input.select?.();
+    });
+  }
+  return wrap;
+}
+
+/** The inline Stop button: one click, or a two-step confirm when the stop would interrupt live work. */
+function renderRowStopButton(row: WorkspaceWorkRow, ui: RowUi, name: string): HTMLButtonElement {
+  const stop = q<HTMLButtonElement>('button', 'ds-list-stop');
+  stop.disabled = ui.stopBusy || ui.stopChecking;
+  stop.setAttribute('aria-busy', String(ui.stopBusy));
+  stop.classList.toggle('is-confirm', ui.stopConfirm);
+  if (ui.stopBusy) {
+    stop.textContent = 'Stopping…';
+    stop.title = `Stopping the ${name} dev server`;
+  } else if (ui.stopConfirm) {
+    stop.textContent = 'Confirm stop';
+    stop.title = `The ${name} canvas is in use — click again to stop its dev server`;
+  } else {
+    stop.append(svgIcon(STOP_ICON, 14));
+    stop.title = `Stop the ${name} dev server`;
+  }
+  stop.setAttribute('aria-label', stop.title);
+  stop.addEventListener('click', () => void stopRowServer(row));
+  return stop;
+}
+
+/** The row's ⋯ menu, on the shared anchored-popover pattern. */
+function renderRowMenu(row: WorkspaceWorkRow, ui: RowUi, name: string): HTMLElement {
+  const trigger = q<HTMLButtonElement>('button', 'ds-list-more');
+  trigger.append(svgIcon(MORE_ICON, 16));
+  trigger.title = `More actions for ${name}`;
+  trigger.setAttribute('aria-label', trigger.title);
+  trigger.setAttribute('aria-haspopup', 'menu');
+  trigger.setAttribute('aria-expanded', String(ui.menuOpen));
+  trigger.addEventListener('click', () => toggleRowMenu(row));
+  const panel = q('div', 'ds-ds-panel ds-row-menu');
+  const option = (label: string, onClick: () => void): void => {
+    const item = q<HTMLButtonElement>('button', 'ds-menu-item ds-row-menu-item', label);
+    item.addEventListener('click', onClick);
+    panel.append(item);
+  };
+  option('Rename…', () => startRowRename(row));
+  if (workspaceServerRunning(row)) option('Stop dev server', () => {
+    closeRowMenu(row);
+    void stopRowServer(row);
+  });
+  option('Copy folder path', () => {
+    closeRowMenu(row);
+    void copyRowPath(row);
+  });
+  if (ui.menuOpen) queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-row-menu-item')?.focus());
+  if (ui.focusMore) {
+    ui.focusMore = false;
+    queueMicrotask(() => trigger.focus());
+  }
+  const anchor = anchoredPopover({
+    open: ui.menuOpen,
+    trigger,
+    panel,
+    label: `${name} actions`,
+    optionSelector: '.ds-row-menu-item',
+    onClose: () => closeRowMenu(row, true),
+    closeOnBackdrop: true,
+  });
+  anchor.classList.add('ds-row-more');
+  return anchor;
+}
+
+function toggleRowMenu(row: WorkspaceWorkRow): void {
+  const ui = rowUiFor(row.dir);
+  const next = !ui.menuOpen;
+  // One row menu open at a time.
+  for (const [key, other] of rowUi) {
+    if (other.menuOpen && other !== ui) {
+      other.menuOpen = false;
+      rowPainters.get(key)?.();
+    }
+  }
+  ui.menuOpen = next;
+  repaintRow(row.dir);
+}
+
+function closeRowMenu(row: WorkspaceWorkRow, refocus = false): void {
+  const ui = rowUiFor(row.dir);
+  if (!ui.menuOpen) return;
+  ui.menuOpen = false;
+  ui.focusMore = refocus;
+  repaintRow(row.dir);
+}
+
+function startRowRename(row: WorkspaceWorkRow): void {
+  const ui = rowUiFor(row.dir);
+  ui.menuOpen = false;
+  ui.renaming = true;
+  ui.renameBusy = false;
+  ui.renameDraft = row.name || fileBaseName(row.dir);
+  ui.message = '';
+  ui.focusRename = true;
+  repaintRow(row.dir);
+}
+
+function cancelRowRename(row: WorkspaceWorkRow): void {
+  const ui = rowUiFor(row.dir);
+  if (ui.renameBusy) return;
+  ui.renaming = false;
+  ui.renameDraft = '';
+  ui.message = '';
+  repaintRow(row.dir);
+}
+
+/**
+ * Save an inline rename: `POST /workspaces/rename`, then update the row in
+ * place, the bound workspace's name, and a `ws/<sid>` record that ALREADY
+ * maps this dir (never a new key) — and reload the list.
+ */
+async function saveRowRename(row: WorkspaceWorkRow): Promise<void> {
+  const ui = rowUiFor(row.dir);
+  if (ui.renameBusy || !ui.renaming) return;
+  const next = ui.renameDraft.trim();
+  if (next === '') {
+    ui.message = 'Enter a name for this design.';
+    ui.focusRename = true;
+    repaintRow(row.dir);
+    return;
+  }
+  if (next === (row.name || fileBaseName(row.dir))) {
+    cancelRowRename(row);
+    return;
+  }
+  ui.renameBusy = true;
+  ui.message = '';
+  repaintRow(row.dir);
+  let failure = '';
+  let saved = '';
+  try {
+    const result = await renameWorkspace(row.dir, next);
+    if (result.ok) saved = typeof result.name === 'string' && result.name.trim() !== '' ? result.name : next;
+    else failure = result.error ?? 'The design could not be renamed.';
+  } catch (error) {
+    failure = `The design could not be renamed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  ui.renameBusy = false;
+  if (failure) {
+    ui.message = failure;
+    ui.focusRename = true;
+    repaintRow(row.dir);
+    return;
+  }
+  ui.renaming = false;
+  ui.renameDraft = '';
+  row.name = saved;
+  repaintRow(row.dir);
+  await applyWorkspaceRename(row.dir, saved);
+  await loadCanvasWorkspaces({ quiet: true });
+}
+
+/** Carry a rename into this chat's binding and the mapped session's `ws/` record (only if it exists). */
+async function applyWorkspaceRename(dir: string, name: string): Promise<void> {
+  if (state.workspace && sameDirPath(state.workspace.dir, dir)) {
+    state.workspace = { ...state.workspace, name };
+    renderRow();
+    if (state.surface === 'panel') renderRailControls();
+  }
+  const sessionId = wsSessionMap.get(normalizeDirPath(dir));
+  const key = sessionId ? workspaceStorageKey(sessionId) : null;
+  if (!key) return;
+  try {
+    const record = await host.storage.get(key);
+    if (isWorkspaceRecord(record) && sameDirPath(record.dir, dir)) {
+      await host.storage.set(key, { ...record, name });
+    }
+  } catch {
+    /* the config carries the new name; the chat's record catches up on its next bind */
+  }
+}
+
+/**
+ * Whether a session is busy right now: the current one from its live
+ * snapshot, any other from the host's session lists. `null` = unknown.
+ */
+async function sessionBusyState(sessionId: string): Promise<boolean | null> {
+  if (sessionId === state.sessionId) return state.sessionBusy;
+  try {
+    const projects = await host.listProjects();
+    if (projects.state !== 'ready') return null;
+    for (const project of projects.projects) {
+      const sessions = await host.listSessions(project.id);
+      const found = sessions.sessions.find((candidate) => candidate.id === sessionId);
+      if (found) return found.activity !== 'idle';
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * A stop needs the two-step confirm when it would cut off live work: the
+ * workspace is the one open on the canvas, or its chat is busy. Anything that
+ * cannot be verified asks (fail closed).
+ */
+async function rowStopNeedsConfirm(row: WorkspaceWorkRow): Promise<boolean> {
+  try {
+    const live = await getState();
+    if (live.windowOpen === true && typeof live.dir === 'string' && sameDirPath(live.dir, row.dir)) return true;
+  } catch {
+    return true;
+  }
+  if (!row.sessionId) return false;
+  return (await sessionBusyState(row.sessionId)) !== false;
+}
+
+function disarmRowStop(ui: RowUi): void {
+  ui.stopConfirm = false;
+  if (ui.stopConfirmTimer) clearTimeout(ui.stopConfirmTimer);
+  ui.stopConfirmTimer = null;
+}
+
+/**
+ * Stop a listed workspace's dev server: `POST /server/stop {dir}` directly.
+ * A confirmed stop forgets the server and, for this chat's own workspace,
+ * flips the Work Status control; a refusal says why inline. The list reloads
+ * either way.
+ */
+async function stopRowServer(row: WorkspaceWorkRow): Promise<void> {
+  const ui = rowUiFor(row.dir);
+  if (ui.stopBusy || ui.stopChecking) return;
+  if (!ui.stopConfirm) {
+    ui.stopChecking = true;
+    let confirm: boolean;
+    try {
+      confirm = await rowStopNeedsConfirm(row);
+    } finally {
+      ui.stopChecking = false;
+    }
+    if (confirm) {
+      ui.stopConfirm = true;
+      ui.message = '';
+      ui.stopConfirmTimer = setTimeout(() => {
+        disarmRowStop(ui);
+        repaintRow(row.dir);
+      }, STOP_CONFIRM_MS);
+      repaintRow(row.dir);
+      return;
+    }
+  }
+  disarmRowStop(ui);
+  ui.stopBusy = true;
+  ui.message = '';
+  repaintRow(row.dir);
+  try {
+    const result = await stopWorkspaceServer(row.dir);
+    if (result.stopped) {
+      for (const started of [...state.startedServers]) {
+        if (sameDirPath(started, row.dir)) state.startedServers.delete(started);
+      }
+      if (state.workspace && sameDirPath(state.workspace.dir, row.dir)) {
+        state.serverStatus = false;
+        state.serverError = null;
+        renderServerControl();
+      }
+    } else {
+      ui.message = result.error ?? await manualStopRefusalMessage(row.dir);
+    }
+  } catch (error) {
+    ui.message = `Could not stop the dev server: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    ui.stopBusy = false;
+    repaintRow(row.dir);
+  }
+  await loadCanvasWorkspaces({ quiet: true });
+}
+
+/** Copy a row's folder path through the host clipboard. */
+async function copyRowPath(row: WorkspaceWorkRow): Promise<void> {
+  try {
+    await copyPath(row.dir);
+    await host.toast({ kind: 'success', message: 'Folder path copied.' });
+  } catch (error) {
+    await host.toast({ kind: 'error', message: `Could not copy the folder path: ${error instanceof Error ? error.message : String(error)}` });
+  }
+}
+
+// ---- the designs location (R5: rail footer line + a reusable editor) ----
+
+/** The last `GET /settings` answer, or null before it (or when it failed). */
+let designsSettings: DesignsSettings | null = null;
+let designsSettingsLoad: 'idle' | 'loading' | 'loaded' | 'error' = 'idle';
+/** True while an editor is open, so a background redraw never clobbers it. */
+let locationEditorOpen = false;
+
+/** Read the designs location. Never runs in the hidden 1×1 resolve pane. */
+async function loadDesignsSettings(): Promise<DesignsSettings | null> {
+  if (isHiddenResolvePane()) return designsSettings;
+  designsSettingsLoad = 'loading';
+  try {
+    const result = await getSettings();
+    designsSettings = isDesignsSettings(result) ? result : null;
+    designsSettingsLoad = designsSettings ? 'loaded' : 'error';
+  } catch {
+    designsSettingsLoad = 'error';
+  }
+  return designsSettings;
+}
+
+/** The read-only stand-in when the environment pins the location. */
+const ENV_OVERRIDE_LABEL = 'Set by DS_WORKSPACE_ROOT';
+
+/**
+ * Open the inline designs-location editor INSIDE `anchorEl` (its children are
+ * replaced): the current root prefilled, Save / Use default / Cancel, service
+ * refusals inline. With `DS_WORKSPACE_ROOT` set it shows the path read-only.
+ * `onDone(changed)` runs when it closes — the caller redraws its own line.
+ * After a change the list reloads, so new designs land under the new root.
+ */
+export async function openLocationEditor(anchorEl: HTMLElement, onDone: (changed: boolean) => void): Promise<void> {
+  if (isHiddenResolvePane()) return;
+  locationEditorOpen = true;
+  const close = (changed: boolean): void => {
+    locationEditorOpen = false;
+    onDone(changed);
+  };
+  anchorEl.replaceChildren(q('div', 'ds-location-note', 'Loading the designs folder…'));
+  const settings = await loadDesignsSettings();
+  const editor = q('div', 'ds-location-editor');
+  editor.setAttribute('role', 'group');
+  editor.setAttribute('aria-label', 'Designs folder');
+  const cancel = q<HTMLButtonElement>('button', 'ds-location-cancel', settings?.envOverride || !settings ? 'Close' : 'Cancel');
+  cancel.addEventListener('click', () => close(false));
+  if (!settings) {
+    const error = q('div', 'ds-home-warn ds-location-error', 'Could not read the designs folder from the local service.');
+    error.setAttribute('role', 'alert');
+    editor.append(error, cancel);
+    anchorEl.replaceChildren(editor);
+    return;
+  }
+  if (settings.envOverride) {
+    editor.append(q('div', 'ds-location-path', settings.workspaceRoot));
+    editor.append(q('div', 'ds-location-readonly', ENV_OVERRIDE_LABEL));
+    editor.append(cancel);
+    anchorEl.replaceChildren(editor);
+    return;
+  }
+  const input = q<HTMLInputElement>('input', 'ds-location-input');
+  input.type = 'text';
+  input.value = settings.workspaceRoot;
+  input.setAttribute('aria-label', 'Designs folder path');
+  const error = q('div', 'ds-home-warn ds-location-error');
+  error.setAttribute('role', 'alert');
+  error.hidden = true;
+  const save = q<HTMLButtonElement>('button', 'primary ds-location-save', 'Save');
+  const reset = q<HTMLButtonElement>('button', 'ds-location-default', 'Use default');
+  reset.title = `Use the default folder: ${settings.defaultRoot}`;
+  const actions = q('div', 'ds-location-actions');
+  actions.append(save, reset, cancel);
+  let busy = false;
+  const setBusy = (on: boolean): void => {
+    busy = on;
+    input.disabled = on;
+    save.disabled = on;
+    reset.disabled = on;
+    cancel.disabled = on;
+    save.textContent = on ? 'Saving…' : 'Save';
+    editor.setAttribute('aria-busy', String(on));
+  };
+  const submit = async (value: string | null): Promise<void> => {
+    if (busy) return;
+    if (value !== null && value.trim() === '') {
+      error.textContent = 'Enter a full folder path, or choose Use default.';
+      error.hidden = false;
+      return;
+    }
+    setBusy(true);
+    error.hidden = true;
+    let failure = '';
+    try {
+      const result = await putSettings(value === null ? null : value.trim());
+      if (!result.ok) failure = result.error || 'The designs folder could not be changed.';
+    } catch (caught) {
+      failure = `The designs folder could not be changed: ${caught instanceof Error ? caught.message : String(caught)}`;
+    }
+    if (failure) {
+      setBusy(false);
+      error.textContent = failure;
+      error.hidden = false;
+      input.focus();
+      return;
+    }
+    await loadDesignsSettings();
+    if (canLoadDesignWork()) await loadCanvasWorkspaces({ quiet: true });
+    close(true);
+  };
+  save.addEventListener('click', () => void submit(input.value));
+  reset.addEventListener('click', () => void submit(null));
+  input.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void submit(input.value);
+    } else if (event.key === 'Escape' && !busy) {
+      event.preventDefault();
+      close(false);
+    }
+  });
+  editor.append(input, actions, error);
+  anchorEl.replaceChildren(editor);
+  queueMicrotask(() => input.focus());
+}
+
+/**
+ * The one-line designs location — "Designs: <path> · Change" — rendered into
+ * `container`, for the rail footer and the page. Reads `GET /settings` once on
+ * first use; renders nothing in the hidden 1×1 resolve pane.
+ */
+export function renderLocationRow(container: HTMLElement): void {
+  container.classList.add('ds-location');
+  if (isHiddenResolvePane() || (state.surface === 'panel' && !isRealPane())) {
+    container.replaceChildren();
+    container.hidden = true;
+    return;
+  }
+  if (locationEditorOpen) return;
+  const settings = designsSettings;
+  if (!settings) {
+    container.replaceChildren();
+    container.hidden = true;
+    if (designsSettingsLoad === 'idle') void loadDesignsSettings().then(() => renderLocationRow(container));
+    return;
+  }
+  container.hidden = false;
+  const line = q('div', 'ds-location-line');
+  line.append(q('span', 'ds-location-label', 'Designs: '));
+  const path = q('span', 'ds-location-path', middleTruncatePath(settings.workspaceRoot));
+  path.title = settings.workspaceRoot;
+  line.append(path, q('span', 'ds-location-sep', ' · '));
+  if (settings.envOverride) {
+    line.append(q('span', 'ds-location-readonly', ENV_OVERRIDE_LABEL));
+  } else {
+    const change = q<HTMLButtonElement>('button', 'ds-link ds-location-change', 'Change');
+    change.setAttribute('aria-label', 'Change the designs folder');
+    change.addEventListener('click', () => void openLocationEditor(container, () => renderLocationRow(container)));
+    line.append(change);
+  }
+  container.replaceChildren(line);
 }
 
 // ---- live window state ----
@@ -3885,6 +4490,8 @@ let railPromptEl: HTMLTextAreaElement | null = null;
 let railStartBtn: HTMLButtonElement | null = null;
 let railErrorEl: HTMLElement | null = null;
 let railWorkEl: HTMLElement | null = null;
+/** R5: the "Designs: <path> · Change" line above the footer (real pane only). */
+let railLocationEl: HTMLElement | null = null;
 /** True while the primary button's flow runs (swallows double clicks). */
 let railBusy = false;
 /** The refresh interval is running (started once, and only in a real pane). */
@@ -3923,8 +4530,10 @@ export function buildRail(root: HTMLElement): void {
   railErrorEl.setAttribute('role', 'alert');
   brief.append(railPromptEl, railStartBtn, railErrorEl);
   railWorkEl = q('div', 'ds-rail-work');
+  railLocationEl = q('div', 'ds-rail-location');
+  railLocationEl.hidden = true;
   const footer = q('div', 'ds-rail-footer', RAIL_FOOTER_HINT);
-  wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, footer);
+  wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, railLocationEl, footer);
   root.append(wrap);
   // A tab mounted while collapsed (or behind another tab) grows into a real
   // pane later; these wake it then. The hidden resolve pane never resizes.
@@ -3988,9 +4597,21 @@ function renderRailWork(): void {
   railWorkEl.replaceChildren(renderCanvasSection());
 }
 
+/** The designs-location line: only in a real pane, and only once the rail went live. */
+function renderRailLocation(): void {
+  if (!railLocationEl) return;
+  if (!isRealPane() || !railWorkLoaded) {
+    railLocationEl.replaceChildren();
+    railLocationEl.hidden = true;
+    return;
+  }
+  renderLocationRow(railLocationEl);
+}
+
 function renderRail(): void {
   renderRailControls();
   renderRailWork();
+  renderRailLocation();
 }
 
 /**
@@ -4084,7 +4705,8 @@ async function refreshRail(): Promise<void> {
 async function loadRailWork(): Promise<void> {
   if (!isRealPane()) return;
   railWorkLoaded = true;
-  await loadDesignHome();
+  await Promise.all([loadDesignHome(), loadDesignsSettings()]);
+  renderRailLocation();
 }
 
 /** Start the rail's refresh — once, and only when the frame is a real pane. */
@@ -4308,6 +4930,13 @@ export { onServerControlClick as clickServerControl };
 
 /** Test seams: the rail's actions and refresh, without a host. */
 export { onRailPrimaryClick as clickRailPrimary, onRailStartDesign as clickRailStartDesign, refreshRail };
+
+/** Test seam: forget the cached designs location (and any open editor). */
+export function resetDesignsSettings(): void {
+  designsSettings = null;
+  designsSettingsLoad = 'idle';
+  locationEditorOpen = false;
+}
 
 /** Test seam: shorten how long a rail handoff waits for a row before claiming it. */
 export function setRailClaimDelay(ms: number | null): void {
