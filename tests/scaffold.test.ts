@@ -123,7 +123,7 @@ test('scaffolds a runnable multi-page Vite skeleton with a pinned loopback URL',
   };
   assert.deepEqual(registry, {
     version: 1,
-    screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }],
+    screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1440, height: 900 }],
   });
 
   // The URL is loopback and the port is inside the pinned scan range.
@@ -160,8 +160,25 @@ test('scaffolds a runnable multi-page Vite skeleton with a pinned loopback URL',
   assert.equal(config.url, `http://127.0.0.1:${port}/`, 'the config url is the IPv4 loopback literal');
   assert.equal(typeof pkg.devDependencies.vite, 'string');
 
-  // The skeleton carries the design-system authority stub.
-  assert.match(await readFile(path.join(dir, 'DESIGN.md'), 'utf8'), /authoritative/);
+  // The skeleton carries the design-system authority stub, marked placeholder
+  // until the agent confirms a look; tokens.css says the same.
+  const defaultDesignMd = await readFile(path.join(dir, 'DESIGN.md'), 'utf8');
+  assert.match(defaultDesignMd, /authoritative/);
+  assert.match(defaultDesignMd, /Status: placeholder/, 'the default DESIGN.md is a placeholder');
+  const defaultTokens = await readFile(path.join(dir, 'tokens.css'), 'utf8');
+  assert.match(defaultTokens, /Status: placeholder/, 'the default tokens.css is a placeholder');
+  assert.match(defaultTokens, /--bg: #0e1116/, 'the default values are unchanged');
+
+  // BRIEF.md is seeded beside DESIGN.md with the request and the setup lines.
+  assert.ok(result.files.includes('BRIEF.md'), 'BRIEF.md is reported in files[]');
+  const briefMd = await readFile(path.join(dir, 'BRIEF.md'), 'utf8');
+  assert.match(briefMd, /A small landing page for a type foundry/, 'BRIEF.md carries the brief');
+  assert.match(briefMd, /- Type: prototype · Fidelity: interactive/);
+  assert.match(briefMd, /- Look: editorial/);
+  assert.match(briefMd, /- Devices: to confirm/, 'no devices → to confirm');
+  assert.match(briefMd, /- User's project: none/);
+  assert.match(briefMd, /## Decisions/);
+  assert.match(briefMd, /## Open questions/);
 
   // D14 risk 5: vite.config.mjs keeps the service's runtime state dir
   // (.design-studio/ — view.json positions/camera) out of the watcher so
@@ -230,6 +247,8 @@ test('a known designSystemId writes the preset tokens, DESIGN.md and harness id'
   assert.match(designMd, /authoritative/, 'DESIGN.md carries the authority statement');
   assert.match(designMd, /focus-visible/, 'the authority statement keeps focus-visible');
   assert.match(designMd, /44px/, 'the authority statement keeps the 44px target');
+  assert.match(designMd, /Status: confirmed — source: preset/, 'a preset DESIGN.md is marked confirmed');
+  assert.ok(designMd.startsWith(`Status: confirmed — source: preset ${preset.name} (${preset.id}).\n\n`), 'the status line leads the file');
 
   // The config records the preset id and keeps direction/fidelity.
   const config = JSON.parse(await readFile(path.join(dir, '.design-studio.json'), 'utf8')) as StudioConfig;
@@ -265,6 +284,85 @@ test('an unknown designSystemId falls back to the default skeleton', async () =>
     undefined,
     'no designSystem is recorded for an unknown id',
   );
+});
+
+// ---- P3: device artboards + BRIEF.md ----
+
+test('devices seed one artboard per device at the viewport presets, sharing home.html', async () => {
+  const dir = await tempDir();
+  const projectDir = path.join(await tempDir(), 'my-app');
+  const result = await scaffoldProject({
+    dir,
+    type: 'hi-fi',
+    brief: 'A habit tracker',
+    devices: ['phone', 'desktop'],
+    projectDir,
+    install: false,
+    boot: false,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  if (!result.ok) return;
+
+  const registry = JSON.parse(await readFile(path.join(dir, 'screens.json'), 'utf8')) as {
+    screens: Array<{ id: string; file: string; title: string; width: number; height: number }>;
+  };
+  assert.deepEqual(
+    registry.screens.map(({ id, file, width, height }) => ({ id, file, width, height })),
+    [
+      { id: 'home', file: 'home.html', width: 1440, height: 900 },
+      { id: 'home-phone', file: 'home.html', width: 390, height: 844 },
+    ],
+    'desktop first, then phone; both point at the one shared home.html',
+  );
+  // The registry round-trips through the reader with both entries intact.
+  const { readScreens } = await import('../service/screens.ts');
+  assert.deepEqual((await readScreens(dir)).screens.map((s) => s.id), ['home', 'home-phone']);
+  // No per-device copies are written.
+  await assert.rejects(() => stat(path.join(dir, 'home-phone.html')));
+
+  // app.js bakes the same list, in the same order.
+  const appJs = await readFile(path.join(dir, 'app.js'), 'utf8');
+  assert.ok(appJs.indexOf('"home-phone"') > appJs.indexOf('"id": "home"'), 'DS_SCREENS keeps the registry order');
+
+  const briefMd = await readFile(path.join(dir, 'BRIEF.md'), 'utf8');
+  assert.match(briefMd, /- Devices: desktop, phone/);
+  assert.ok(briefMd.includes(`- User's project: ${projectDir}`), 'projectDir lands in BRIEF.md');
+  await assert.rejects(() => stat(path.join(projectDir, 'BRIEF.md')), 'no project files are written');
+});
+
+test('all three devices seed home / home-tablet / home-phone in canvas order', async () => {
+  const dir = await tempDir();
+  const result = await scaffoldProject({
+    dir,
+    type: 'hi-fi',
+    devices: ['phone', 'tablet', 'desktop'],
+    install: false,
+    boot: false,
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const registry = JSON.parse(await readFile(path.join(dir, 'screens.json'), 'utf8')) as {
+    screens: Array<{ id: string; width: number; height: number }>;
+  };
+  assert.deepEqual(
+    registry.screens.map(({ id, width, height }) => ({ id, width, height })),
+    [
+      { id: 'home', width: 1440, height: 900 },
+      { id: 'home-tablet', width: 768, height: 1024 },
+      { id: 'home-phone', width: 390, height: 844 },
+    ],
+  );
+});
+
+test('a preset scaffold names the preset on the BRIEF.md Look line', async () => {
+  const dir = await tempDir();
+  const preset = DESIGN_SYSTEMS.find((p) => p.id === 'vercel');
+  assert.ok(preset);
+  if (!preset) return;
+  const result = await scaffoldProject({ dir, type: 'hi-fi', designSystemId: preset.id, install: false, boot: false });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const briefMd = await readFile(path.join(dir, 'BRIEF.md'), 'utf8');
+  assert.ok(briefMd.includes(`- Look: ${preset.name}`));
+  assert.match(briefMd, /\(none yet — the agent asks first\)/, 'no brief → the placeholder request');
 });
 
 // ---- port scan: skips busy ports, respects an injected offset/range ----

@@ -89,6 +89,13 @@ export type ScaffoldOptions = {
    * Documents layout; production resolves it via DS_WORKSPACE_ROOT / probing.
    */
   workspaceRoot?: string;
+  /**
+   * Devices to seed artboards for (desktop → tablet → phone order, ids home /
+   * home-tablet / home-phone). Absent or empty seeds the single desktop home.
+   */
+  devices?: ScaffoldDevice[];
+  /** The user's own project directory, recorded in BRIEF.md only. */
+  projectDir?: string;
 };
 
 export type ScaffoldResult =
@@ -191,7 +198,7 @@ function packageJson(name: string, port: number): string {
 function homeHtml(name: string, brief: string): string {
   const lede = brief
     ? esc(brief)
-    : 'Replace this hero with the brief&#39;s opening moment and keep every value a token.';
+    : 'Placeholder — the agent replaces this with the brief&#39;s opening moment after the questions.';
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -300,13 +307,21 @@ function appJs(screens: ReadonlyArray<{ id: string; file: string; title: string 
 const DS_SCREENS = ${JSON.stringify(screens, null, 2)};
 (function () {
   'use strict';
-  if (!Array.isArray(DS_SCREENS) || DS_SCREENS.length <= 1) return; // one screen needs no nav
+  if (!Array.isArray(DS_SCREENS)) return;
+  // Device artboards of one screen share a file: link each file once.
+  var seen = {};
+  var links = DS_SCREENS.filter(function (s) {
+    if (seen[s.file]) return false;
+    seen[s.file] = true;
+    return true;
+  });
+  if (links.length <= 1) return; // one screen needs no nav
   var page = (location.pathname.split('/').pop() || 'index.html');
   var nav = document.createElement('nav');
   nav.className = 'ds-nav';
   nav.setAttribute('aria-label', 'Screens');
-  for (var i = 0; i < DS_SCREENS.length; i += 1) {
-    var s = DS_SCREENS[i];
+  for (var i = 0; i < links.length; i += 1) {
+    var s = links[i];
     var a = document.createElement('a');
     a.href = s.file;
     a.textContent = s.title;
@@ -324,8 +339,11 @@ const DS_SCREENS = ${JSON.stringify(screens, null, 2)};
 `;
 }
 
-const TOKENS_CSS = `/* tokens.css — the design system's single source of values.
-   Every colour, space and type value in styles.css must come from here. */
+const TOKENS_CSS = `/* tokens.css — Status: placeholder. Scaffold defaults, NOT a design decision.
+   Before building, replace these values with the confirmed look: the user's
+   project tokens (name the source file here), the chosen preset, or a palette
+   the user approved in chat. Every color, space and type value in styles.css
+   must come from this file. */
 :root {
   color-scheme: dark;
 
@@ -496,25 +514,95 @@ a {
 
 const DESIGN_MD = `# Design system
 
-**This file and \`tokens.css\` are authoritative for this project.** Follow them over
-any conflicting instinct. Do not invent colours, spacing or type values that are
-not expressed as tokens; a hardcoded value a token already covers is a defect.
+Status: placeholder — scaffold defaults, not decisions.
+
+Before building, the agent replaces \`tokens.css\` with the confirmed look and
+changes the line above to \`Status: confirmed — source: <file, preset, or "approved in chat">\`:
+
+1. the design-system preset chosen for this canvas, if any;
+2. otherwise the user's project design system (tokens, theme config, AGENTS.md, design docs) — copy the values, cite the file;
+3. otherwise a palette + type pairing the user approved in chat.
+
+Once confirmed, **this file and \`tokens.css\` are authoritative for this workspace.**
+Do not invent colors, spacing or type values that are not tokens; a hardcoded
+value a token already covers is a defect.
 
 ## Tokens
 
-The single source of values is \`tokens.css\`:
-\`--bg\`, \`--surface\`, \`--fg\`, \`--muted\`, \`--border\`, \`--accent\`, the type
-steps (\`--step-*\`), and the space scale (\`--space-*\`).
+\`tokens.css\` is the single source of values: \`--bg\`, \`--surface\`, \`--fg\`,
+\`--muted\`, \`--border\`, \`--accent\`, the type steps (\`--step-*\`) and the space
+scale (\`--space-*\`, on an 8pt grid).
 
 ## Rules for every screen
 
-- Colour comes from the tokens above; no ad-hoc hex values.
-- Type comes from the modular scale; no invented sizes.
-- Spacing comes from \`--space-*\`; no magic numbers.
-- Every interactive element has a visible \`:focus-visible\` treatment and a 44px
-  touch target.
+- Color, type and spacing come from the tokens; no ad-hoc values.
+- One primary action per view; hierarchy by position, size, weight, then color.
+- Every interactive element has a visible \`:focus-visible\` treatment and a 44px touch target.
 - Render data surfaces in all five states: Loading, Empty, Error, Populated, Edge.
+- Real content from the brief or the project — never lorem ipsum.
 `;
+
+/** Devices a scaffold can seed an artboard for, in canvas order (desktop → tablet → phone). */
+export type ScaffoldDevice = 'phone' | 'tablet' | 'desktop';
+
+const DEVICE_SEEDS: ReadonlyArray<{ device: ScaffoldDevice; id: string; title: string; width: number; height: number }> = [
+  { device: 'desktop', id: 'home', title: 'Home', width: 1440, height: 900 },
+  { device: 'tablet', id: 'home-tablet', title: 'Home · Tablet', width: 768, height: 1024 },
+  { device: 'phone', id: 'home-phone', title: 'Home · Phone', width: 390, height: 844 },
+];
+
+/** The recognised requested devices, deduped and in canvas order. */
+function requestedDevices(devices: ReadonlyArray<ScaffoldDevice> | undefined): ScaffoldDevice[] {
+  const wanted = new Set(Array.isArray(devices) ? devices : []);
+  return DEVICE_SEEDS.filter((seed) => wanted.has(seed.device)).map((seed) => seed.device);
+}
+
+/** The seeded screens: the default desktop home, or one artboard per requested device. */
+function seedScreens(devices: ReadonlyArray<ScaffoldDevice> | undefined): Screen[] {
+  const wanted = new Set(requestedDevices(devices));
+  const picked = DEVICE_SEEDS.filter((seed) => wanted.has(seed.device));
+  const seeds = picked.length ? picked : DEVICE_SEEDS.slice(0, 1);
+  return seeds.map(({ id, title, width, height }) => ({ id, file: 'home.html', title, width, height }));
+}
+
+/** BRIEF.md: the request and setup as the workspace was created; the agent keeps the rest current. */
+function briefMd(input: {
+  brief: string;
+  type: string;
+  fidelity: string;
+  look: string;
+  devices: ReadonlyArray<string>;
+  projectDir: string;
+}): string {
+  return `# Brief
+
+> Written by Design Canvas when this workspace was created. The agent keeps
+> "Decisions" and "Open questions" current; the user can edit anything here.
+
+## Request
+
+${input.brief || '(none yet — the agent asks first)'}
+
+## Setup
+
+- Type: ${input.type} · Fidelity: ${input.fidelity}
+- Look: ${input.look}
+- Devices: ${input.devices.length ? input.devices.join(', ') : 'to confirm'}
+- User's project: ${input.projectDir || 'none'}
+
+## Decisions
+
+- Devices and artboard sizes:
+- Audience and primary task:
+- Key screens and flow:
+- Look source (file / preset / approved palette):
+- Chosen option:
+
+## Open questions
+
+-
+`;
+}
 
 /** The authority statement appended to a preset's DESIGN.md. */
 const AUTHORITY_STATEMENT = `## Authority
@@ -587,7 +675,7 @@ ${decls}${bridge}
 
 /** A preset's DESIGN.md followed by the project's authority statement. */
 function presetDesignMd(preset: DesignSystemPreset): string {
-  return `${preset.designMd.trimEnd()}\n\n${AUTHORITY_STATEMENT}`;
+  return `Status: confirmed — source: preset ${preset.name} (${preset.id}).\n\n${preset.designMd.trimEnd()}\n\n${AUTHORITY_STATEMENT}`;
 }
 
 /**
@@ -663,7 +751,18 @@ export async function writeScaffoldFiles(options: ScaffoldOptions): Promise<Writ
 
   // The seeded registry entry mirrors what the agent must keep in sync when
   // adding screens (screens.json + the DS_SCREENS array baked into app.js).
-  const seedScreen: Screen = { id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 };
+  // Device artboards share ONE file (home.html), each at its own viewport size:
+  // screens.ts validation and the registry watcher key on `id`, never on `file`,
+  // so duplicate files are tolerated (verified in service/screens.ts and
+  // screens-watch.ts) — no home-tablet.html/home-phone.html copies to drift.
+  const seeded = seedScreens(options.devices);
+  const devices = requestedDevices(options.devices);
+  const lookLine = preset
+    ? preset.name
+    : direction !== 'auto'
+      ? direction
+      : "match the user's project, else propose and confirm";
+  const projectDir = typeof options.projectDir === 'string' ? options.projectDir.trim() : '';
   const files: Array<[string, string]> = [
     ['package.json', packageJson(name, port)],
     ['home.html', homeHtml(name, brief)],
@@ -672,7 +771,11 @@ export async function writeScaffoldFiles(options: ScaffoldOptions): Promise<Writ
     ['tokens.css', preset ? presetTokensCss(preset) : TOKENS_CSS],
     ['styles.css', STYLES_CSS],
     ['DESIGN.md', preset ? presetDesignMd(preset) : DESIGN_MD],
-    ['app.js', appJs([seedScreen])],
+    [
+      'BRIEF.md',
+      briefMd({ brief, type: options.type.trim(), fidelity, look: lookLine, devices, projectDir }),
+    ],
+    ['app.js', appJs(seeded)],
   ];
 
   const written: string[] = [];
@@ -697,7 +800,7 @@ export async function writeScaffoldFiles(options: ScaffoldOptions): Promise<Writ
   // The screens registry (§A) — validated and written through screens.ts, the
   // same module the /screens routes use.
   try {
-    await writeScreens(dir, { version: 1, screens: [seedScreen] });
+    await writeScreens(dir, { version: 1, screens: seeded });
     written.push(SCREENS_FILENAME);
   } catch (error) {
     return { ok: false, error: `could not write the screens registry: ${error instanceof Error ? error.message : String(error)}` };
