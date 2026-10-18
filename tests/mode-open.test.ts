@@ -1851,7 +1851,7 @@ test('isRealPane safety net: in a 1×1 panel frame (the hidden resolve pane) beg
 // ---- P2': the session text the page sends (main.ts wires the spec fields later) ----
 
 test("P2': questions off sends an assumptions-first prompt with no numbered questions", () => {
-  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'a dog-walking app', questions: false }, { dir: 'C:\ws', name: 'ws' });
+  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'a dog-walking app', questions: false }, { dir: 'C:\\ws', name: 'ws' });
   assert.match(text, /turned questions off/);
   assert.doesNotMatch(text, /numbered questions/);
   assert.match(text, /Your "Assumptions" list, then the build\./);
@@ -1859,7 +1859,7 @@ test("P2': questions off sends an assumptions-first prompt with no numbered ques
 });
 
 test("P2': options 2 tells the agent the user wants 2 directions", () => {
-  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x', options: 2 }, { dir: 'C:\ws', name: 'ws' });
+  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x', options: 2 }, { dir: 'C:\\ws', name: 'ws' });
   assert.match(text, /the user wants 2 directions/);
 });
 

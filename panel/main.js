@@ -2041,7 +2041,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       "- Also check the awkward widths where relevant: 320, 375, 1024, 1440.",
       "- Horizontal scroll on a normal content page is a defect, not a style choice.",
       "- Fix the cheapest deterministic failure first; never restyle to hide an overflow or a contrast error.",
-      "- Use only tokens from tokens.css / DESIGN.md; a hardcoded colour or spacing value is a defect.",
+      "- Use only tokens from tokens.css / DESIGN.md; a hardcoded color or spacing value is a defect.",
       "- Keep tap targets at least 24px (44px on touch), headings in order, every control labelled.",
       "- Done means the gates pass at every breakpoint \u2014 not that it looks right at one width."
     ].join("\n")
@@ -2129,11 +2129,17 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       optionsLine,
       questions ? "With no project design system, propose a palette + type pairing and confirm it before building." : "With no project design system, put a palette + type pairing in the Assumptions list and build.",
       questions ? "Picks are direct edits: do them; ask only if ambiguous." : "Picks are direct edits: do them.",
-      `Never claim a file changed unless your edit call on it succeeded; name the absolute workspace path when you ${questions ? "ask or " : ""}report.`
+      `Never claim a file changed unless your edit call on it succeeded; name the absolute workspace path when you ${questions ? "ask or " : ""}report.`,
+      "At most one approval round before the first screen: questions, palette and the direction choice go in the same message.",
+      "Record the agreed devices, look source and chosen option in the workspace BRIEF.md (create it if missing); a failed read means the file is absent."
     ].join(" ");
   }
   var WORKING_AGREEMENT_CHIP = workingAgreementChip();
-  var WORKING_AGREEMENT_COMPACT = "Each pick is a direct edit of the screen file it names: make it, verify it, and ask one question only if it is ambiguous. Never claim an edit you did not make.";
+  function workingAgreementCompact(opts = {}) {
+    const ambiguity = opts.questions !== false ? "ask one question only if it is ambiguous" : "state your reading in one line and make the change";
+    return `Each pick is a direct edit of the screen file it names: make it, verify it, and ${ambiguity}. Never claim an edit you did not make.`;
+  }
+  var WORKING_AGREEMENT_COMPACT = workingAgreementCompact();
 
   // panel/craft.ts
   var DIRECTIONS = {
@@ -3666,8 +3672,8 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   var MODE_CHIP_SCREEN_CAP = 40;
   var DESIGN_TYPES = ["wireframe", "hi-fi", "prototype", "deck", "custom"];
   var TYPE_HINT = {
-    wireframe: "structure and navigation only \u2014 no final colour, type or copy",
-    "hi-fi": "static screens with the full design system (tokens, type, colour)",
+    wireframe: "structure and navigation only \u2014 no final color, type or copy",
+    "hi-fi": "static screens with the full design system (tokens, type, color)",
     prototype: "a real, interactive app with a dev server, all five states and motion",
     deck: "a presentation deck (HTML slides) with its own nav and print layout",
     custom: "ask what is being made, then choose the closest approach"
@@ -3675,7 +3681,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   var FIDELITIES = ["wireframe", "hi-fi", "interactive"];
   var FIDELITY_HINT = {
     wireframe: "low fidelity: boxes, flows and labels, no polish",
-    "hi-fi": "final visual quality: tokens, type, colour, spacing",
+    "hi-fi": "final visual quality: tokens, type, color, spacing",
     interactive: "hi-fi plus working interactions and transitions"
   };
   var FIDELITY_OPTIONS = [
@@ -3742,15 +3748,16 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     tablet: { label: "tablet", width: 768, height: 1024 },
     desktop: { label: "desktop", width: 1440, height: 900 }
   };
-  function devicesLabel(devices) {
-    const known = (devices ?? []).filter((id) => id in DEVICE_PRESETS);
-    if (known.length === 0) return "not chosen yet \u2014 agree them first";
+  function devicesLabel(devices, questions = true) {
+    const known = [...new Set(devices ?? [])].filter((id) => Object.hasOwn(DEVICE_PRESETS, id));
+    if (known.length === 0) return questions ? "not chosen yet \u2014 agree them first" : "not chosen \u2014 pick them and list them in your Assumptions";
     return known.map((id) => `${DEVICE_PRESETS[id].label} ${DEVICE_PRESETS[id].width}\xD7${DEVICE_PRESETS[id].height}`).join(" \xB7 ");
   }
   function agreementStatusLine(input) {
     const questions = input.questions !== false;
-    const options = input.options ?? (questions ? "ask" : 1);
-    return `Questions first: ${questions ? "on" : "off"} \xB7 Options: ${options === "ask" ? "ask the user" : options} \xB7 Devices: ${devicesLabel(input.devices)}`;
+    const options = input.options === "ask" && !questions ? 1 : input.options ?? (questions ? "ask" : 1);
+    const optionsText = options === "ask" ? "ask the user" : input.options === "ask" ? "one direction" : options;
+    return `Questions first: ${questions ? "on" : "off"} \xB7 Options: ${optionsText} \xB7 Devices: ${devicesLabel(input.devices, questions)}`;
   }
   var DEFAULT_MODE = { on: false, type: "hi-fi", direction: "auto", fidelity: "hi-fi", canvMode: "edit", brief: "" };
   function parseDesignArgs(raw) {
@@ -3840,15 +3847,15 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   function directionLabel(value) {
     return value === "auto" ? "Auto (infer from the brief)" : DIRECTIONS[value].name;
   }
-  var LOOK_HINT = {
-    project: "take it from the user's project (its tokens, theme and components)",
-    preset: "use the chosen design-system preset",
-    new: "a new look \u2014 propose it first"
-  };
+  function lookHint(look, questions) {
+    if (look === "project") return "take it from the user's project (its tokens, theme and components)";
+    if (look === "preset") return "use the chosen design-system preset";
+    return questions ? "a new look \u2014 propose it first and confirm it with the questions" : "a new look \u2014 put its palette and type pairing in your Assumptions list";
+  }
   var CRAFT_BY_TYPE = {
-    wireframe: ["layout", "content", "states", "laws-of-ux", "responsive"],
+    wireframe: ["layout", "content", "anti-slop", "states", "laws-of-ux", "responsive"],
     "hi-fi": ["layout", "typography", "color", "content", "anti-slop", "accessibility", "laws-of-ux", "responsive"],
-    prototype: ["layout", "typography", "color", "content", "states", "motion", "accessibility", "responsive"],
+    prototype: ["layout", "typography", "color", "content", "anti-slop", "states", "motion", "accessibility", "responsive"],
     deck: ["layout", "typography", "color", "content", "anti-slop"],
     custom: ["layout", "typography", "color", "content", "anti-slop", "accessibility", "responsive"]
   };
@@ -3871,7 +3878,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       `Fidelity: ${spec.fidelity} \u2014 ${FIDELITY_HINT[spec.fidelity]}.`,
       agreementStatusLine({ questions: spec.questions, options: spec.options, devices: spec.devices })
     ];
-    if (spec.look) lines.push(`Look: ${LOOK_HINT[spec.look]}.`);
+    if (spec.look) lines.push(`Look: ${lookHint(spec.look, questions)}.`);
     if (projectDir) {
       lines.push(`User project: ${JSON.stringify(projectDir)} \u2014 read it first for design context; never write design files there.`);
     }
@@ -3883,7 +3890,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
         `Design system: ${preset.name} (${preset.category}) \u2014 its tokens and DESIGN.md are authoritative; use them as given and keep every screen inside the system.`
       );
     }
-    lines.push("", IDENTITY, "", workingAgreementChip(agreement), "", firstReplyContract(questions), "");
+    lines.push("", IDENTITY, "", workingAgreementChip(agreement), "");
     if (workspace) {
       lines.push(
         `Design Canvas workspace: ${workspace.dir}`,
@@ -3908,7 +3915,9 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       "",
       "Workflow: in the live canvas (edit mode) the user clicks elements; EACH click arrives as its own reference chip with its screen id. Sending a whole artboard from its menu arrives as a `Screen: <id> (<w>\xD7<h>) \u2014 <file>` chip with the screen URL \u2014 edit that file.",
       "",
-      VERIFY_PROTOCOL
+      VERIFY_PROTOCOL,
+      "",
+      firstReplyContract(questions)
     );
     return lines.join("\n");
   }
@@ -3938,7 +3947,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       `Artifact type: ${mode.type} \u2014 ${TYPE_HINT[mode.type]}`,
       `Visual direction: ${directionLabel(mode.direction)} \xB7 Fidelity: ${mode.fidelity}`,
       agreementStatusLine(mode),
-      mode.brief ? `Brief: ${mode.brief}` : "Brief: the user will say or type it next."
+      mode.brief ? `Brief: ${mode.brief.slice(0, 2e3)}` : "Brief: the user will say or type it next."
     ];
     if (workspace) {
       lines.push(
@@ -3955,7 +3964,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     if (screens.length > 0) {
       const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);
       lines.push(`Screens (${screens.length}):`);
-      for (const screen of shown) lines.push(`- ${screen.id} \xB7 ${screen.title || screen.file} \xB7 ${screen.file}`);
+      for (const screen of shown) lines.push(`- ${screen.id} \xB7 ${(screen.title || screen.file).slice(0, 60)} \xB7 ${screen.file}`);
       if (screens.length > MODE_CHIP_SCREEN_CAP) {
         lines.push(`\u2026 ${screens.length - MODE_CHIP_SCREEN_CAP} more \u2014 every screen is reachable through the canvas; the full registry is screens.json at the workspace root.`);
       }
@@ -3997,7 +4006,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       `Canvas mode: ${mode.canvMode} \xB7 Artifact type: ${mode.type}`,
       `Workspace: ${workspace.dir}`,
       workspacePathRule(workspace.dir),
-      WORKING_AGREEMENT_COMPACT
+      workingAgreementCompact({ questions: mode.questions })
     ];
     if (screens.length > 0) {
       const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);

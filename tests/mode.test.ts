@@ -16,8 +16,8 @@ const shim = {
   documentElement: {},
 };
 
-const { DEFAULT_MODE, GUEST_ATTACH_TEXT_MAX, VERIFY_PROTOCOL, attachUrl, buildModeChip, designSessionPrompt, isHttpUrl, modeStorageKey, workspaceStorageKey, parseDesignArgs, seedModeValue, seedSessionData, NO_DESIGN_SYSTEM, designSystemGroups, designSystemLabel, designSystemSwatches, filterDesignSystems, findDesignSystem, isColorTokenValue, designMarkerKey, designMarkerValue, designSessionIdFromKey, fileBaseName, fileReferenceChip, isDesignMarker, popoverStep, projectHttpUrl, projectReferenceChip, parseCanvasExportArgs, exportJobSummary, exportFailureSummary, critiqueReviewText, critiqueReviewChip, CRITIQUE_ADVISORY, BRIEF_MAX, CRAFT_BY_TYPE, DESIGN_TYPES, DEVICE_PRESETS, FIDELITIES, FIDELITY_FOR_TYPE, buildCompactModeChip, devicesLabel, structureBrief, workspaceOpenPrompt } = await import('../panel/mode.ts');
-const { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP, CRAFT_RULES, DESIGN_AUTHORITY, IDENTITY, WORKING_AGREEMENT_CHIP, WORKING_AGREEMENT_COMPACT, firstReplyContract } = await import('../shared/harness-text.ts');
+const { DEFAULT_MODE, GUEST_ATTACH_TEXT_MAX, VERIFY_PROTOCOL, attachUrl, buildModeChip, designSessionPrompt, isHttpUrl, modeStorageKey, workspaceStorageKey, parseDesignArgs, seedModeValue, seedSessionData, NO_DESIGN_SYSTEM, designSystemGroups, designSystemLabel, designSystemSwatches, filterDesignSystems, findDesignSystem, isColorTokenValue, designMarkerKey, designMarkerValue, designSessionIdFromKey, fileBaseName, fileReferenceChip, isDesignMarker, popoverStep, projectHttpUrl, projectReferenceChip, parseCanvasExportArgs, exportJobSummary, exportFailureSummary, critiqueReviewText, critiqueReviewChip, CRITIQUE_ADVISORY, BRIEF_MAX, CRAFT_BY_TYPE, DESIGN_TYPES, DEVICE_PRESETS, FIDELITIES, FIDELITY_FOR_TYPE, buildCompactModeChip, agreementStatusLine, devicesLabel, structureBrief, workspaceOpenPrompt } = await import('../panel/mode.ts');
+const { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP, CRAFT_RULES, DESIGN_AUTHORITY, IDENTITY, WORKING_AGREEMENT_CHIP, WORKING_AGREEMENT_COMPACT, firstReplyContract, harnessRulesText, workingAgreementCompact } = await import('../shared/harness-text.ts');
 const { isModeChipData } = await import('../panel/api.ts');
 const { DESIGN_SYSTEMS } = await import('../shared/design-systems.ts');
 // A type-only import: erased at compile time, so it needs no window shim.
@@ -174,29 +174,34 @@ test('structureBrief re-flows without inventing and is idempotent', () => {
   }
 });
 
-test('the budget holds: session prompt at BRIEF_MAX and the 45-screen chip stay ≤ 15500', () => {
-  const ws = { dir: 'C:\\Users\\samhe\\Documents\\Design Canvas\\a-very-long-workspace-name-for-the-budget-1234567890', name: 'x' };
+test('the budget holds: session prompt at BRIEF_MAX, the 45-screen chip and the compact chip stay ≤ 15500', () => {
+  const ws = { dir: 'C:\\Users\\samhe\\OneDrive - Some Company Name Ltd\\Documents\\Design Canvas\\a-very-long-workspace-name-for-the-budget-1234567890', name: 'x' };
+  const longestPreset = DESIGN_SYSTEMS.reduce((a, b) => (b.name.length + b.category.length > a.name.length + a.category.length ? b : a));
   const screens = Array.from({ length: 45 }, (_, i) => ({
     id: `screen-${String(i).padStart(2, '0')}-abcdefghijklmnop`,
     file: `screen-${String(i).padStart(2, '0')}-abcdefghijklmnop.html`,
-    title: `Screen ${String(i).padStart(2, '0')} with a long descriptive title`,
+    title: `Screen ${String(i).padStart(2, '0')} ${'t'.repeat(120)}`,
   }));
   const brief = 'x'.repeat(BRIEF_MAX);
   let worst = 0;
   for (const type of DESIGN_TYPES) {
     for (const questions of [true, false]) {
       const text = designSessionPrompt(
-        { type, direction: 'auto', fidelity: 'interactive', brief, designSystemId: 'stripe', projectDir: 'C:\\Users\\samhe\\Documents\\GitHub\\some-project', questions, options: 3, devices: ['phone', 'tablet', 'desktop'], look: 'project' },
+        { type, direction: 'auto', fidelity: 'interactive', brief, designSystemId: longestPreset.id, projectDir: 'C:\\Users\\samhe\\OneDrive - Some Company Name Ltd\\Documents\\GitHub\\some-project', questions, options: 3, devices: ['phone', 'tablet', 'desktop'], look: 'new' },
         ws,
       );
       worst = Math.max(worst, text.length);
     }
   }
-  const chip = buildModeChip('ses_budget45', { ...DEFAULT_MODE, on: true, brief: 'y'.repeat(2000), devices: ['phone', 'tablet', 'desktop'] }, ws, screens);
+  const chip = buildModeChip('ses_budget45', { ...DEFAULT_MODE, on: true, brief: 'y'.repeat(BRIEF_MAX), devices: ['phone', 'tablet', 'desktop'] }, ws, screens);
   const compact = buildCompactModeChip('ses_budget45', { ...DEFAULT_MODE, on: true }, ws, screens);
   console.info('P2 budget measurement:', JSON.stringify({ sessionPromptWorst: worst, chip: (chip.text ?? '').length, compact: (compact.text ?? '').length }));
   assert.ok(worst <= 15500, `session prompt ${worst} ≤ 15500`);
   assert.ok((chip.text ?? '').length <= 15500, `mode chip ${(chip.text ?? '').length} ≤ 15500`);
+  assert.ok((compact.text ?? '').length <= 15500, `compact chip ${(compact.text ?? '').length} ≤ 15500`);
+  assert.ok((chip.text ?? '').endsWith(VERIFY_PROTOCOL), 'the verification protocol is intact at the chip tail');
+  assert.ok((chip.text ?? '').includes(`Brief: ${'y'.repeat(2000)}\n`), 'the brief is capped at 2000 characters');
+  assert.ok(!(chip.text ?? '').includes('t'.repeat(61)), 'screen titles are capped at 60 characters');
 });
 
 test('the mode chip carries the agreement status line; old stored modes read as defaults', () => {
@@ -217,6 +222,63 @@ test('the compact chip carries the compact agreement after the path rule', () =>
   const lines = (compact.text ?? '').split('\n');
   const rule = lines.findIndex((line) => line.includes('the ONLY place design files are written'));
   assert.equal(lines[rule + 1], WORKING_AGREEMENT_COMPACT);
+});
+
+test("P2'': the compact chip with questions off never asks", () => {
+  const compact = buildCompactModeChip('ses_c', { ...DEFAULT_MODE, on: true, questions: false }, WORKSPACE);
+  assert.ok((compact.text ?? '').includes(workingAgreementCompact({ questions: false })));
+  assert.match(compact.text ?? '', /state your reading in one line and make the change/);
+  assert.doesNotMatch(compact.text ?? '', /ask one question/);
+  assert.equal(workingAgreementCompact(), WORKING_AGREEMENT_COMPACT);
+});
+
+test("P2'': questions off with options 'ask' resolves to one direction and never says stop and ask", () => {
+  assert.equal(
+    agreementStatusLine({ questions: false, options: 'ask' }),
+    'Questions first: off · Options: one direction · Devices: not chosen — pick them and list them in your Assumptions',
+  );
+  assert.match(agreementStatusLine({ questions: false }), /Options: 1 ·/);
+  assert.match(agreementStatusLine({ questions: true, options: 'ask' }), /Options: ask the user · Devices: not chosen yet — agree them first/);
+  assert.doesNotMatch(agreementStatusLine({ questions: false, options: 'ask' }), /agree them first|ask the user/);
+});
+
+test("P2'': devicesLabel drops duplicates and inherited keys", () => {
+  assert.equal(devicesLabel(['phone', 'phone', 'desktop']), 'phone 390×844 · desktop 1440×900');
+  assert.equal(devicesLabel(['toString' as never, 'constructor' as never]), 'not chosen yet — agree them first');
+});
+
+test("P2'': the new-look hint follows the questions choice", () => {
+  const base = { type: 'hi-fi' as const, direction: 'auto' as const, fidelity: 'hi-fi' as const, brief: 'x', look: 'new' as const };
+  assert.match(designSessionPrompt(base, WORKSPACE), /Look: a new look — propose it first and confirm it with the questions\./);
+  const off = designSessionPrompt({ ...base, questions: false }, WORKSPACE);
+  assert.match(off, /Look: a new look — put its palette and type pairing in your Assumptions list\./);
+  assert.doesNotMatch(off, /propose it first/);
+});
+
+test("P2'': the first-reply contract is the last thing in the session prompt", () => {
+  for (const questions of [true, false]) {
+    const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x', questions }, WORKSPACE);
+    assert.ok(text.endsWith(`${VERIFY_PROTOCOL}\n\n${firstReplyContract(questions)}`), `questions ${questions}`);
+  }
+});
+
+test("P2'': every artifact type ships the anti-slop rules", () => {
+  for (const type of DESIGN_TYPES) {
+    assert.ok(CRAFT_BY_TYPE[type].includes('anti-slop'), `${type} carries anti-slop`);
+    const text = designSessionPrompt({ type, direction: 'auto', fidelity: FIDELITY_FOR_TYPE[type], brief: 'x' }, WORKSPACE);
+    assert.ok(text.includes(`### anti-slop\n${CRAFT_RULES['anti-slop']}`), `${type} session prompt has the anti-slop section`);
+  }
+});
+
+test("P2'': the session prompt, chips and rulebook use one spelling (color, not colour)", () => {
+  for (const type of DESIGN_TYPES) {
+    for (const fidelity of FIDELITIES) {
+      const text = designSessionPrompt({ type, direction: 'auto', fidelity, brief: 'x', look: 'new' }, WORKSPACE);
+      assert.doesNotMatch(text, /colour/i, `${type}/${fidelity}`);
+    }
+  }
+  assert.doesNotMatch(buildModeChip('ses_s', { ...DEFAULT_MODE, on: true }, WORKSPACE).text ?? '', /colour/i);
+  assert.doesNotMatch(harnessRulesText(), /colour/i);
 });
 
 test('the workspace open prompt points at BRIEF.md and DESIGN.md and carries the agreement', () => {

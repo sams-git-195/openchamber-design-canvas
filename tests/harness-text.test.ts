@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP, CRAFT_RULES, DESIGN_AUTHORITY, DESIGN_WORKSPACE_NOTE, WORKING_AGREEMENT_CHIP, workingAgreement, workingAgreementChip } from '../shared/harness-text.ts';
+import { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP, CRAFT_RULES, DESIGN_AUTHORITY, DESIGN_WORKSPACE_NOTE, WORKING_AGREEMENT_CHIP, workingAgreement, workingAgreementChip, workingAgreementCompact, harnessRulesText } from '../shared/harness-text.ts';
 
 test('the working agreement carries the senior-practice contract', () => {
   const text = workingAgreement();
@@ -78,4 +78,32 @@ test('craft rules agree: 8pt at breakpoint endpoints, one hierarchy order, one s
   assert.match(CRAFT_RULES.layout, /position, then size, then weight, then color/);
   assert.match(CRAFT_RULES.typography, /Let position, size, weight and color carry hierarchy, in that order/);
   assert.doesNotMatch(workingAgreement() + DESIGN_AUTHORITY + CRAFT_RULES.layout, /colour/);
+});
+
+test("P2'': the clarifying questions include the feel and tone", () => {
+  assert.match(workingAgreement(), /Ask only what changes the design: target devices and sizes, audience and primary task, the feel and tone they want \(calm, playful, corporate, luxurious, technical — recommend the one that fits the domain\), key screens/);
+});
+
+test("P2'': the plugin harness carries the questions-off override; the chips do not", () => {
+  const override = /When the session prompt or Design Mode chip says 'Questions first: off', skip steps 2–4's questions and build from a stated Assumptions list\./;
+  const text = harnessRulesText();
+  assert.match(text, override);
+  assert.ok(text.indexOf('## Working agreement') < text.search(override), 'inside the working agreement section');
+  assert.ok(text.search(override) < text.indexOf('1. Read before you ask.'));
+  assert.doesNotMatch(workingAgreementChip(), override);
+  assert.doesNotMatch(workingAgreementChip({ questions: false }), override);
+});
+
+test("P2'': both chip variants cap approval rounds and record the BRIEF.md facts", () => {
+  for (const opts of [{}, { questions: false }]) {
+    const chip = workingAgreementChip(opts);
+    assert.match(chip, /At most one approval round before the first screen: questions, palette and the direction choice go in the same message\./);
+    assert.match(chip, /Record the agreed devices, look source and chosen option in the workspace BRIEF\.md \(create it if missing\); a failed read means the file is absent\./);
+  }
+});
+
+test("P2'': the compact agreement is questions-aware", () => {
+  assert.match(workingAgreementCompact(), /ask one question only if it is ambiguous/);
+  assert.match(workingAgreementCompact({ questions: false }), /state your reading in one line and make the change/);
+  assert.doesNotMatch(workingAgreementCompact({ questions: false }), /\bask\b/);
 });

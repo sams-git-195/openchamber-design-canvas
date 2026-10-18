@@ -20,10 +20,10 @@ import {
   IDENTITY,
   VERIFY_PROTOCOL,
   WORKING_AGREEMENT_CHIP,
-  WORKING_AGREEMENT_COMPACT,
   defaultCraft,
   firstReplyContract,
   workingAgreementChip,
+  workingAgreementCompact,
   type CraftRuleId,
   type OptionsChoice,
 } from '../shared/harness-text.ts';
@@ -43,8 +43,8 @@ export type DesignType = 'wireframe' | 'hi-fi' | 'prototype' | 'deck' | 'custom'
 export const DESIGN_TYPES: DesignType[] = ['wireframe', 'hi-fi', 'prototype', 'deck', 'custom'];
 
 export const TYPE_HINT: Record<DesignType, string> = {
-  wireframe: 'structure and navigation only — no final colour, type or copy',
-  'hi-fi': 'static screens with the full design system (tokens, type, colour)',
+  wireframe: 'structure and navigation only — no final color, type or copy',
+  'hi-fi': 'static screens with the full design system (tokens, type, color)',
   prototype: 'a real, interactive app with a dev server, all five states and motion',
   deck: 'a presentation deck (HTML slides) with its own nav and print layout',
   custom: 'ask what is being made, then choose the closest approach',
@@ -56,7 +56,7 @@ export const FIDELITIES: Fidelity[] = ['wireframe', 'hi-fi', 'interactive'];
 
 export const FIDELITY_HINT: Record<Fidelity, string> = {
   wireframe: 'low fidelity: boxes, flows and labels, no polish',
-  'hi-fi': 'final visual quality: tokens, type, colour, spacing',
+  'hi-fi': 'final visual quality: tokens, type, color, spacing',
   interactive: 'hi-fi plus working interactions and transitions',
 };
 
@@ -181,17 +181,18 @@ export const DEVICE_PRESETS: Record<DeviceId, { label: string; width: number; he
 };
 
 /** `phone 390×844 · desktop 1440×900`, or the not-chosen wording for none. */
-export function devicesLabel(devices: readonly DeviceId[] | null | undefined): string {
-  const known = (devices ?? []).filter((id) => id in DEVICE_PRESETS);
-  if (known.length === 0) return 'not chosen yet — agree them first';
+export function devicesLabel(devices: readonly DeviceId[] | null | undefined, questions = true): string {
+  const known = [...new Set(devices ?? [])].filter((id) => Object.hasOwn(DEVICE_PRESETS, id));
+  if (known.length === 0) return questions ? 'not chosen yet — agree them first' : 'not chosen — pick them and list them in your Assumptions';
   return known.map((id) => `${DEVICE_PRESETS[id].label} ${DEVICE_PRESETS[id].width}×${DEVICE_PRESETS[id].height}`).join(' · ');
 }
 
 /** `Questions first: on · Options: ask · Devices: …` — old stored modes read as defaults. */
 export function agreementStatusLine(input: { questions?: boolean; options?: OptionsChoice; devices?: readonly DeviceId[] }): string {
   const questions = input.questions !== false;
-  const options = input.options ?? (questions ? 'ask' : 1);
-  return `Questions first: ${questions ? 'on' : 'off'} · Options: ${options === 'ask' ? 'ask the user' : options} · Devices: ${devicesLabel(input.devices)}`;
+  const options = input.options === 'ask' && !questions ? 1 : input.options ?? (questions ? 'ask' : 1);
+  const optionsText = options === 'ask' ? 'ask the user' : input.options === 'ask' ? 'one direction' : options;
+  return `Questions first: ${questions ? 'on' : 'off'} · Options: ${optionsText} · Devices: ${devicesLabel(input.devices, questions)}`;
 }
 
 export const DEFAULT_MODE: DesignMode = { on: false, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' };
@@ -402,11 +403,13 @@ export type DesignBriefSpec = {
 
 export type DesignLook = 'project' | 'preset' | 'new';
 
-const LOOK_HINT: Record<DesignLook, string> = {
-  project: "take it from the user's project (its tokens, theme and components)",
-  preset: 'use the chosen design-system preset',
-  new: 'a new look — propose it first',
-};
+function lookHint(look: DesignLook, questions: boolean): string {
+  if (look === 'project') return "take it from the user's project (its tokens, theme and components)";
+  if (look === 'preset') return 'use the chosen design-system preset';
+  return questions
+    ? 'a new look — propose it first and confirm it with the questions'
+    : 'a new look — put its palette and type pairing in your Assumptions list';
+}
 
 /** The longest brief the session prompt carries and stays inside its budget. */
 export const BRIEF_MAX = 3000;
@@ -420,9 +423,9 @@ export function briefLimitError(brief: string): string | null {
 
 /** The craft rule sections each artifact type ships in its session prompt (budget). */
 export const CRAFT_BY_TYPE: Record<DesignType, CraftRuleId[]> = {
-  wireframe: ['layout', 'content', 'states', 'laws-of-ux', 'responsive'],
+  wireframe: ['layout', 'content', 'anti-slop', 'states', 'laws-of-ux', 'responsive'],
   'hi-fi': ['layout', 'typography', 'color', 'content', 'anti-slop', 'accessibility', 'laws-of-ux', 'responsive'],
-  prototype: ['layout', 'typography', 'color', 'content', 'states', 'motion', 'accessibility', 'responsive'],
+  prototype: ['layout', 'typography', 'color', 'content', 'anti-slop', 'states', 'motion', 'accessibility', 'responsive'],
   deck: ['layout', 'typography', 'color', 'content', 'anti-slop'],
   custom: ['layout', 'typography', 'color', 'content', 'anti-slop', 'accessibility', 'responsive'],
 };
@@ -485,7 +488,7 @@ export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceR
     `Fidelity: ${spec.fidelity} — ${FIDELITY_HINT[spec.fidelity]}.`,
     agreementStatusLine({ questions: spec.questions, options: spec.options, devices: spec.devices }),
   ];
-  if (spec.look) lines.push(`Look: ${LOOK_HINT[spec.look]}.`);
+  if (spec.look) lines.push(`Look: ${lookHint(spec.look, questions)}.`);
   if (projectDir) {
     lines.push(`User project: ${JSON.stringify(projectDir)} — read it first for design context; never write design files there.`);
   }
@@ -501,7 +504,7 @@ export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceR
       `Design system: ${preset.name} (${preset.category}) — its tokens and DESIGN.md are authoritative; use them as given and keep every screen inside the system.`,
     );
   }
-  lines.push('', IDENTITY, '', workingAgreementChip(agreement), '', firstReplyContract(questions), '');
+  lines.push('', IDENTITY, '', workingAgreementChip(agreement), '');
   if (workspace) {
     lines.push(
       `Design Canvas workspace: ${workspace.dir}`,
@@ -527,6 +530,8 @@ export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceR
     'Workflow: in the live canvas (edit mode) the user clicks elements; EACH click arrives as its own reference chip with its screen id. Sending a whole artboard from its menu arrives as a `Screen: <id> (<w>×<h>) — <file>` chip with the screen URL — edit that file.',
     '',
     VERIFY_PROTOCOL,
+    '',
+    firstReplyContract(questions),
   );
   return lines.join('\n');
 }
@@ -577,7 +582,7 @@ export function buildModeChip(
     `Artifact type: ${mode.type} — ${TYPE_HINT[mode.type]}`,
     `Visual direction: ${directionLabel(mode.direction)} · Fidelity: ${mode.fidelity}`,
     agreementStatusLine(mode),
-    mode.brief ? `Brief: ${mode.brief}` : 'Brief: the user will say or type it next.',
+    mode.brief ? `Brief: ${mode.brief.slice(0, 2000)}` : 'Brief: the user will say or type it next.',
   ];
   if (workspace) {
     lines.push(
@@ -594,7 +599,7 @@ export function buildModeChip(
   if (screens.length > 0) {
     const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);
     lines.push(`Screens (${screens.length}):`);
-    for (const screen of shown) lines.push(`- ${screen.id} · ${screen.title || screen.file} · ${screen.file}`);
+    for (const screen of shown) lines.push(`- ${screen.id} · ${(screen.title || screen.file).slice(0, 60)} · ${screen.file}`);
     if (screens.length > MODE_CHIP_SCREEN_CAP) {
       lines.push(`… ${screens.length - MODE_CHIP_SCREEN_CAP} more — every screen is reachable through the canvas; the full registry is screens.json at the workspace root.`);
     }
@@ -653,7 +658,7 @@ export function buildCompactModeChip(
     `Canvas mode: ${mode.canvMode} · Artifact type: ${mode.type}`,
     `Workspace: ${workspace.dir}`,
     workspacePathRule(workspace.dir),
-    WORKING_AGREEMENT_COMPACT,
+    workingAgreementCompact({ questions: mode.questions }),
   ];
   if (screens.length > 0) {
     const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);

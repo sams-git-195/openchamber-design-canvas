@@ -125,7 +125,7 @@ export const CRAFT_RULES: Record<CraftRuleId, string> = {
     '- Also check the awkward widths where relevant: 320, 375, 1024, 1440.',
     '- Horizontal scroll on a normal content page is a defect, not a style choice.',
     '- Fix the cheapest deterministic failure first; never restyle to hide an overflow or a contrast error.',
-    '- Use only tokens from tokens.css / DESIGN.md; a hardcoded colour or spacing value is a defect.',
+    '- Use only tokens from tokens.css / DESIGN.md; a hardcoded color or spacing value is a defect.',
     '- Keep tap targets at least 24px (44px on touch), headings in order, every control labelled.',
     '- Done means the gates pass at every breakpoint — not that it looks right at one width.',
   ].join('\n'),
@@ -232,7 +232,7 @@ export function workingAgreement(opts: AgreementOptions = {}): string {
     '## Working agreement',
     `1. ${questions ? 'Read before you ask.' : 'Read first.'} Your chat working directory, when it is a project, is the user's app — read it, never write design files there. Look for: AGENTS.md / CLAUDE.md and design docs (DESIGN.md, docs/design*, brand*); theme and token sources (tailwind.config.*, :root custom properties, theme.ts, tokens.json, components/ui); fonts; and how its pages handle sizes (@media rules, sm:/md:/lg: classes, container queries, the viewport meta). Report what you found in 2–4 lines, citing files, or say there is no project context.`,
     questions
-      ? '2. Clarify before you build. Unless the brief already settles it, ask 3–6 short numbered questions in ONE message, each with your recommended default in bold and a few words of why. Ask only what changes the design: target devices and sizes, audience and primary task, key screens and flow, real content and brand assets the user has, the look source (their project, a preset, or new), and how many options they want. End with: "Reply with changes, or say go to use the defaults." Write no screens until the user answers.'
+      ? '2. Clarify before you build. Unless the brief already settles it, ask 3–6 short numbered questions in ONE message, each with your recommended default in bold and a few words of why. Ask only what changes the design: target devices and sizes, audience and primary task, the feel and tone they want (calm, playful, corporate, luxurious, technical — recommend the one that fits the domain), key screens and flow, real content and brand assets the user has, the look source (their project, a preset, or new), and how many options they want. End with: "Reply with changes, or say go to use the defaults." Write no screens until the user answers.'
       : '2. The user turned questions off. Skip clarifying questions; open with a short "Assumptions" list (devices, audience, key screens, look), then build. The user corrects you afterwards.',
     questions
       ? '3. Devices. If the project is responsive, say so with its breakpoints (e.g. "tailwind.config.ts: sm 640 · md 768 · lg 1024") and ask which sizes to design; recommend phone 390×844 + desktop 1440×900, plus tablet 768×1024 when the layout changes there. Never assume desktop-only for a product people use on phones.'
@@ -311,13 +311,21 @@ export function workingAgreementChip(opts: AgreementOptions = {}): string {
       : 'With no project design system, put a palette + type pairing in the Assumptions list and build.',
     questions ? 'Picks are direct edits: do them; ask only if ambiguous.' : 'Picks are direct edits: do them.',
     `Never claim a file changed unless your edit call on it succeeded; name the absolute workspace path when you ${questions ? 'ask or ' : ''}report.`,
+    'At most one approval round before the first screen: questions, palette and the direction choice go in the same message.',
+    'Record the agreed devices, look source and chosen option in the workspace BRIEF.md (create it if missing); a failed read means the file is absent.',
   ].join(' ');
 }
 
 export const WORKING_AGREEMENT_CHIP = workingAgreementChip();
 
-export const WORKING_AGREEMENT_COMPACT =
-  'Each pick is a direct edit of the screen file it names: make it, verify it, and ask one question only if it is ambiguous. Never claim an edit you did not make.';
+/** The one-sentence pick contract the compact chip carries; questions off never asks. */
+export function workingAgreementCompact(opts: { questions?: boolean } = {}): string {
+  const ambiguity =
+    opts.questions !== false ? 'ask one question only if it is ambiguous' : 'state your reading in one line and make the change';
+  return `Each pick is a direct edit of the screen file it names: make it, verify it, and ${ambiguity}. Never claim an edit you did not make.`;
+}
+
+export const WORKING_AGREEMENT_COMPACT = workingAgreementCompact();
 
 /**
  * The full harness block the generated OpenCode plugin injects into every model
@@ -334,7 +342,10 @@ export function harnessRulesText(): string {
     '## Design system authority',
     DESIGN_AUTHORITY,
     '',
-    workingAgreement(),
+    workingAgreement().replace(
+      '## Working agreement\n',
+      "## Working agreement\nWhen the session prompt or Design Mode chip says 'Questions first: off', skip steps 2–4's questions and build from a stated Assumptions list.\n",
+    ),
     '',
     '## Craft rules',
     defaultCraft(),
