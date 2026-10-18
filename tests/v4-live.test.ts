@@ -191,9 +191,15 @@ test('E3/V4-1: after fit-all the canvas still pans AND picks (probe2: fitPresetC
     const cam1 = await shell(browser, 'JSON.stringify([__dsCanvas.getCamera().panX,__dsCanvas.getCamera().scale])');
     assert.notEqual(cam1, cam0, 'fit-all keeps camera control (zoom/pan alive, unlike the old fit preset)');
 
-    // Inbound pick still lands.
+    // Inbound pick still lands. R2 (B4): the click SELECTS; the explicit
+    // selection-send is what references it (and moves pickSeq).
     const seq0 = browser.getState().pickSeq;
     await shell(browser, '__dsCanvasSend(JSON.stringify({type:"screen-pick",screen:"home",x:120,y:60}))');
+    const selDeadline = Date.now() + 2000;
+    while (Date.now() < selDeadline && browser.getState().selection.count === 0) await pause(25);
+    assert.equal(browser.getState().selection.count, 1, 'edit-mode click selects after fit-all');
+    assert.equal(browser.getState().pickSeq, seq0, 'a click alone does not pick');
+    await shell(browser, '__dsCanvasSend(JSON.stringify({type:"selection-send"}))');
     const deadline = Date.now() + 2000;
     while (Date.now() < deadline && browser.getState().pickSeq === seq0) await pause(25);
     assert.ok(browser.getState().pickSeq > seq0, 'edit-mode pick lands after fit-all');
@@ -205,6 +211,10 @@ test('E3/V4-1: after fit-all the canvas still pans AND picks (probe2: fitPresetC
     const internal = browser as unknown as { cdp: { send: (m: string, p: object, s?: string) => Promise<unknown> }; sessionId: string };
     const seq1 = browser.getState().pickSeq;
     for (const type of ['mousePressed', 'mouseReleased']) await internal.cdp.send('Input.dispatchMouseEvent', { type, x: point.x, y: point.y, button: 'left', buttons: 1, clickCount: 1 }, internal.sessionId);
+    const selDeadline2 = Date.now() + 2000;
+    while (Date.now() < selDeadline2 && browser.getState().selection.count === 0) await pause(25);
+    assert.equal(browser.getState().selection.count, 1, 'native click selects after fit-all');
+    await shell(browser, '__dsToolbarBridge.referenceSelection()');
     const deadline2 = Date.now() + 2000;
     while (Date.now() < deadline2 && browser.getState().pickSeq === seq1) await pause(25);
     assert.ok(browser.getState().pickSeq > seq1, 'native click pick lands after fit-all');
@@ -250,20 +260,25 @@ test('E4/V4-2 + V4-6: pick then export = NO green pixels; hover outline tracks a
     await pause(300);
 
     // E4: pick #b — the green outline shows, then capture must NOT contain it.
+    // R2 (B4): select, then reference — the referenced outline flashes green.
+    const greenVisible = "(()=>{const o=document.querySelector('[data-ds-overlay=selection][data-ds-picked]');return !!o&&o.style.display!=='none'})()";
     await shell(browser, '__dsCanvasSend(JSON.stringify({type:"screen-pick",screen:"home",x:100,y:60}))');
+    const selectDeadline = Date.now() + 2000;
+    while (Date.now() < selectDeadline && browser.getState().selection.count === 0) await pause(25);
+    await shell(browser, '__dsCanvasSend(JSON.stringify({type:"selection-send"}))');
     const pickDeadline = Date.now() + 2000;
     while (Date.now() < pickDeadline && !browser.pick()) await pause(25);
     assert.equal(browser.pick()?.selector, '#b');
-    assert.equal(await browser.evaluate("(()=>{const o=document.getElementById('__ds-pick-outline');return !!o&&o.style.display!=='none'})()"), true, 'the picked outline is visible BEFORE the capture');
+    assert.equal(await browser.evaluate(greenVisible), true, 'the picked outline is visible BEFORE the capture');
 
     const shot = await browser.capture('home');
     const img = pngPixels(shot.png);
     assert.equal(lacksColor(img, [0x22, 0xc5, 0x5e]), true, 'E4: no pick-green pixel (±8) survives the export');
     assert.equal(lacksColor(img, [0x3b, 0x82, 0xf6]), true, 'V4-6: no hover-blue pixel (±8) survives the export');
     // Within the 1500 ms window the outline is back on screen (capture hid and restored).
-    assert.equal(await browser.evaluate("(()=>{const o=document.getElementById('__ds-pick-outline');return !!o&&o.style.display!=='none'})()"), true, 'restored inside the fade window');
+    assert.equal(await browser.evaluate(greenVisible), true, 'restored inside the fade window');
     await pause(1700);
-    assert.equal(await browser.evaluate("(()=>{const o=document.getElementById('__ds-pick-outline');return !!o&&o.style.display!=='none'})()"), false, 'the green mark faded after 1500 ms (no permanent mark)');
+    assert.equal(await browser.evaluate(greenVisible), false, 'the green mark faded after 1500 ms (no permanent mark)');
 
     // V4-2 PDF pin (live half): print still runs on the clean throwaway target.
     const pdf = await browser.printScreenToPdf(base + 'home.html', 1280, 800);
@@ -329,7 +344,7 @@ async function readViewForTest(file: string): Promise<unknown> {
 
 // ---- V4-5 live: the real binding path feeds the queue ------------------------------
 
-test('V4-5 live: two picks 50ms apart BOTH drain from /picks in seq order; long-poll resolves on push', { timeout: 120_000 }, async (t) => {
+test('V4-5 + R2 live: clicks alone queue nothing; click + selection-send drains from /picks in seq order, one batch; long-poll resolves on push', { timeout: 120_000 }, async (t) => {
   if (!(await liveTest(t))) return;
   await liveCanvas(async (browser, base) => {
     await browser.openWorkspace({
@@ -338,28 +353,42 @@ test('V4-5 live: two picks 50ms apart BOTH drain from /picks in seq order; long-
       mode: 'edit',
     });
     await pause(2000);
+    const selected = async (count: number) => {
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline && browser.getState().selection.count !== count) await pause(20);
+      assert.equal(browser.getState().selection.count, count, `selection reached ${count}`);
+    };
+    await shell(browser, '__dsCanvasSend(JSON.stringify({type:"screen-pick",screen:"home",x:120,y:60}))');
+    await selected(1);
+    await pause(300);
+    assert.equal((await browser.getPicks(0, 0)).picks.length, 0, 'R2: a click alone does NOT queue');
     const waiting = browser.getPicks(0, 5000);
     await pause(50);
     const t0 = Date.now();
-    await shell(browser, '__dsCanvasSend(JSON.stringify({type:"screen-pick",screen:"home",x:120,y:60}))');
+    await shell(browser, '__dsCanvasSend(JSON.stringify({type:"selection-send"}))');
     const first = await waiting;
-    assert.ok(Date.now() - t0 < 300, `the wait resolved within 300 ms of the binding pick (took ${Date.now() - t0})`);
+    assert.ok(Date.now() - t0 < 300, `the wait resolved within 300 ms of the send (took ${Date.now() - t0})`);
     assert.equal(first.picks.length, 1);
     assert.equal(first.picks[0]?.screen, 'home');
     assert.equal(first.picks[0]?.kind, 'element');
     assert.equal(first.picks[0]?.screenUrl, base + 'home.html');
 
-    // Two picks inside any realistic poll interval — both must queue.
+    // Two selections inside any realistic poll interval — one send queues both.
     await shell(browser, '__dsCanvasSend(JSON.stringify({type:"screen-pick",screen:"home",x:120,y:60}))');
     await pause(50);
     await shell(browser, '__dsCanvasSend(JSON.stringify({type:"screen-pick",screen:"phone",x:100,y:60,additive:true}))');
+    await selected(2);
+    assert.equal((await browser.getPicks(first.seq, 0)).picks.length, 0, 'still nothing queued before the send');
+    await shell(browser, '__dsCanvasSend(JSON.stringify({type:"selection-send"}))');
     await pause(400);
     const both = await browser.getPicks(first.seq, 0);
     assert.equal(both.picks.length, 2, 'no pick is lost between polls (E7)');
     assert.equal(both.picks[0]?.screen, 'home');
     assert.equal(both.picks[1]?.screen, 'phone');
-    assert.equal(both.picks[1]?.additive, true, 'shift-flag survives the real round-trip');
+    assert.equal(both.picks[1]?.additive, true, 'later members of a send read as "also"');
     assert.ok(both.picks[0]!.seq < both.picks[1]!.seq, 'seq ordered');
+    assert.equal(both.picks[0]!.batch, both.picks[1]!.batch, 'one batch per send');
+    assert.notEqual(both.picks[0]!.batch, first.picks[0]!.batch, 'a new send is a new batch');
   });
 });
 
@@ -657,7 +686,7 @@ test('F5 live: a cross-artboard hover sequence leaves EXACTLY ONE visible outlin
 // queue. Every click must produce exactly one kind:'element' pick from its own
 // board; a single lost, doubled, or misattributed pick fails the run and the
 // miss list names it.
-test('STRESS: 100 real CDP edit-mode clicks across 2 artboards deliver 100 picks (drain+ack, zero loss)', { timeout: 300_000 }, async (t) => {
+test('STRESS: 100 real CDP edit-mode click+reference rounds across 2 artboards deliver 100 picks (drain+ack, zero loss)', { timeout: 300_000 }, async (t) => {
   if (!(await liveTest(t))) return;
   await liveCanvas(async (browser, base) => {
     await browser.openWorkspace({
@@ -729,6 +758,10 @@ test('STRESS: 100 real CDP edit-mode clicks across 2 artboards deliver 100 picks
           internal.sessionId,
         );
       }
+      // R2 (B4): the click selects; the explicit reference is what queues.
+      const selectDeadline = Date.now() + 5000;
+      while (Date.now() < selectDeadline && !browser.getState().selection.screens.some((entry) => entry.id === board.id)) await pause(10);
+      await shell(browser, '__dsCanvasSend(JSON.stringify({type:"selection-send"}))');
       // Drain+ack: exactly one pick must arrive for THIS click (bounded 5 s).
       let got: { seq: number; screen: string; kind: string; selector?: string } | null = null;
       const deadline = Date.now() + 5000;

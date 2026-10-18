@@ -673,16 +673,25 @@ test('F17: screen-menu stop-server runs the injected stopper and confirms via sh
   assert.ok(toasts.some((t) => t.kind === 'warn' && /Stop failed: process escaped/.test(t.text)), 'a failed kill surfaces, never silent');
 });
 
-test('V4-5: an honoured in-frame pick lands in the queue; ack toasts through showToast', async () => {
+test('V4-5 + R2: a referenced selection lands in the queue (selection-send pull); ack toasts through showToast', async () => {
   const { browser, internal, toasts } = stubbedBrowser();
   openFakeWorkspace(internal);
-  // Route a binding payload exactly as the bindingCalled authority does.
-  const internal2 = browser as unknown as { enqueueElementPick: (screen: string, picked: PickedElement & { additive?: boolean }) => void };
-  internal2.enqueueElementPick('home', { ...fakePicked(), additive: true });
+  // R2 (B4): the queue is fed by the explicit selection-send pull — select
+  // two elements, then reference them.
+  internal.evalIn = async (expr: string) => {
+    if (expr.includes('__dsSelectAt')) return { ok: true, count: expr.includes(',true)') ? 2 : 1, label: 'button#b' };
+    if (expr.includes('__dsSelectionTake')) return [{ ...fakePicked(), additive: false, scrollX: 0, scrollY: 0 }, { ...fakePicked(), selector: '#c', additive: true, scrollX: 0, scrollY: 0 }];
+    return true;
+  };
+  const canvasCommand = (browser as unknown as { canvasCommand: (c: unknown, a: unknown) => Promise<void> }).canvasCommand.bind(browser);
+  await canvasCommand({ type: 'screen-pick', screen: 'home', x: 10, y: 10 }, {});
+  await canvasCommand({ type: 'screen-pick', screen: 'home', x: 20, y: 20, additive: true }, {});
+  await canvasCommand({ type: 'selection-send' }, {});
   const page = await browser.getPicks(0, 0);
-  assert.equal(page.picks.length, 1);
+  assert.equal(page.picks.length, 2);
   assert.equal(page.picks[0]!.kind, 'element');
-  assert.equal(page.picks[0]!.additive, true);
+  assert.equal(page.picks[0]!.additive, false);
+  assert.equal(page.picks[1]!.additive, true, 'later batch members read as "also"');
   assert.equal(page.picks[0]!.selector, '#b');
   assert.equal(page.picks[0]!.screenUrl, 'http://localhost:9/home.html');
   // ack → the §3 showToast expression reaches the shell.
@@ -691,16 +700,18 @@ test('V4-5: an honoured in-frame pick lands in the queue; ack toasts through sho
   assert.ok(toasts.some((t) => t.kind === 'ok' && t.text === 'Added to chat · Button #b'));
 });
 
-test('V4-5: screen-pick inbound relays additive into the frame __dsPickAt', async () => {
+test('V4-5 + R2: screen-pick inbound SELECTS in the frame (__dsSelectAt, additive relayed) and queues nothing', async () => {
   const { browser, internal, evalCalls } = stubbedBrowser();
   openFakeWorkspace(internal);
   const canvasCommand = (browser as unknown as { canvasCommand: (c: unknown, a: unknown) => Promise<void> }).canvasCommand.bind(browser);
   await canvasCommand({ type: 'screen-pick', screen: 'home', x: 80, y: 60, additive: true }, {});
   await pause(20);
-  assert.ok(evalCalls.some((c) => c.expr === 'window.__dsPickAt(80,60,true)' && c.screen === 'home'));
+  assert.ok(evalCalls.some((c) => c.expr === 'window.__dsSelectAt?window.__dsSelectAt(80,60,true):false' && c.screen === 'home'));
   await canvasCommand({ type: 'screen-pick', screen: 'home', x: 81, y: 61 }, {});
   await pause(20);
-  assert.ok(evalCalls.some((c) => c.expr === 'window.__dsPickAt(81,61,false)'));
+  assert.ok(evalCalls.some((c) => c.expr === 'window.__dsSelectAt?window.__dsSelectAt(81,61,false):false'));
+  assert.equal(evalCalls.some((c) => c.expr.includes('__dsPickAt')), false, 'the click no longer fires the legacy pick');
+  assert.equal((await browser.getPicks(0, 0)).picks.length, 0, 'a click alone never reaches the queue');
 });
 
 test('V4-17: screen-rename inbound rewrites screens.json', async () => {

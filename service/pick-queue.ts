@@ -22,6 +22,11 @@ import type { PickedElement } from './browser.ts';
  * `kind:'element'` picks carry the full PickedElement payload. `additive` is
  * reserved (shift-click): the panel behaves identically today, the flag lets
  * the agent text say "also".
+ *
+ * R2 (B4): element entries come only from an explicit "Reference in chat"
+ * send; `batch` names the send they belong to (one id per send) and `dir` is
+ * the window's workspace dir, so a consumer can tell which canvas they came
+ * from.
  */
 export type QueuedPick = {
   seq: number;
@@ -30,6 +35,8 @@ export type QueuedPick = {
   screenUrl: string;
   at: number;
   additive: boolean;
+  dir?: string;
+  batch?: string;
 } & Partial<PickedElement> & { width?: number; height?: number; file?: string };
 
 export type PicksPage = { seq: number; picks: QueuedPick[] };

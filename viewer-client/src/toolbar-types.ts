@@ -45,6 +45,12 @@ export type ToolbarState = {
   agentBusy: boolean;
   agentLabel: string;
   modePending: CanvasMode | null;
+  /** V4-7: the agent owns canvas input right now (Reference in chat waits). */
+  agentInput: boolean;
+  /** R2 (B4): the mirrored selection — count, anchor artboard, newest label. */
+  selectionCount: number;
+  selectionScreen: string;
+  selectionLabel: string;
 };
 
 export type ToolbarBridge = {
@@ -62,6 +68,9 @@ export type ToolbarBridge = {
   activateScreen: (id: string) => void;
   fitAll: () => void;
   focusScreen: (id: string) => void;
+  /** R2 (B4): send the selection to the chat composer / drop it. */
+  referenceSelection: () => void;
+  clearSelection: () => void;
 };
 
 declare global {

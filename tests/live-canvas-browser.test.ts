@@ -376,10 +376,17 @@ test('canvas workspace: two artboards, per-screen contexts, shell-driven activat
     // mode-request asks the service, which answers by pushing setMode (§C seam).
     await shell(browser, "__dsCanvasSend(JSON.stringify({type:'mode-request',mode:'edit'}))");
     await poll(() => browser.getMode() === 'edit', 'mode-request switched to edit');
-    // Edit-mode artboard pick: {type:'screen-pick',screen,x,y} runs __dsPickAt
-    // INSIDE that frame; the pick is tagged with its screen (not the active one).
+    // Edit-mode artboard click: {type:'screen-pick',screen,x,y} SELECTS inside
+    // that frame (R2/B4 — nothing queues yet); the explicit selection-send
+    // pulls it, tagged with its screen (not the active one).
+    const seqBefore = browser.getState().pickSeq;
     await shell(browser, "__dsCanvasSend(JSON.stringify({type:'screen-pick',screen:'b',x:60,y:60}))");
+    await poll(() => browser.getState().selection.screens.some((s) => s.id === 'b'), 'the click selected on artboard b');
+    assert.equal(browser.getState().pickSeq, seqBefore, 'a click alone does not pick');
+    assert.equal((await browser.getPicks(0, 0)).picks.length, 0, 'a click alone does not queue');
+    await shell(browser, "__dsCanvasSend(JSON.stringify({type:'selection-send'}))");
     await poll(() => browser.pick()?.screen === 'b', 'a pick from artboard b arrives tagged with screen b');
+    assert.equal((await browser.getPicks(0, 0)).picks[0]?.screen, 'b', 'the send queued it');
     assert.match(String(browser.pick()!.selector), /#button|button/, 'the named artboard delivered the real element');
     // Per-screen capture: artboard b renders a PNG even while a is active.
     const shot = await browser.capture('b');
