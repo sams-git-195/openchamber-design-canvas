@@ -22,10 +22,12 @@ already running.
    server on a free loopback port — with progress toasts while it works.
 3. A chromeless Chrome window opens: each *direction* is its own artboard,
    live and scrollable, laid out on a dot-grid wall you can pan and zoom.
-4. Hover any element — it highlights with its selector and size. **Click it.**
-   A reference chip lands in your chat: selector, markup, computed styles,
-   which screen it came from. Type *"make this bigger"* — the agent edits the
-   real file and the artboard hot-reloads.
+4. Hover any element — it highlights with its selector and size. **Click it**
+   and it stays outlined; shift-click adds more (up to 40). Press
+   **Reference in chat** (toolbar button, the pill under the artboard, or
+   Enter) and one chip per element lands in your composer: selector, markup,
+   computed styles, the screen and its file. Type *"make this bigger"* — the
+   agent edits the real file and the artboard hot-reloads.
 5. Hit **Play** and the screens become a prototype: buttons and links work,
    click-throughs stay inside their artboard.
 6. Right-click an artboard to rename it, zoom to it, export it, or send the
@@ -36,14 +38,18 @@ already running.
 ## What you get
 
 **The canvas**
-- **One wall, many screens** — desktop, tablet, phone, poster, A4, 1080×1080:
-  every screen is its own artboard at its own natural size, side by side for
-  comparison. Variants and responsive sets are first-class.
+- **One wall, many screens** — desktop 1440×900, laptop 1280×800, tablet
+  768×1024, phone 390×844, poster, A4, 1080×1080: every screen is its own
+  artboard at its device viewport, side by side for comparison, and content
+  taller than the artboard scrolls inside it (the `↕` cue says so). Variants
+  and responsive sets are first-class.
 - **Real, live HTML** — artboards are pages served by Vite with hot reload,
   not pictures. Text reflows, tabs work, hover states work.
-- **Figma-style navigation** — pan both axes (drag or wheel), Ctrl/⌘+wheel
-  zoom anchored at the cursor, fit-all, zoom-to-screen, dot grid, shadows,
-  always-readable artboard labels at any zoom.
+- **Figma-style navigation** — pan both axes (drag or wheel over the
+  background), Ctrl/⌘+wheel zoom anchored at the cursor, fit-all,
+  zoom-to-screen, dot grid, shadows, always-readable artboard labels at any
+  zoom. In edit mode the wheel over an artboard scrolls *that screen*; play
+  mode scrolls natively.
 - **Drag to arrange** — artboard positions are canvas state, stored per
   workspace; your pan/zoom/active-screen/mode all reopen where you left them.
 - **Live registry** — when the agent writes a new screen, its artboard
@@ -53,22 +59,30 @@ already running.
   position · export PNG/PDF · copy path · rename · stop its dev server.
 
 **The chat loop**
-- **Edit mode picks** — hover highlight before you click; every click becomes
-  a queue-backed reference chip (rapid clicks are never lost, a hidden window
-  loses nothing, each chip is acknowledged with an "Added to chat" pill).
+- **Edit mode selection** — hover highlight before you click; a click selects
+  and outlines, shift-click adds, and **Reference in chat** sends the batch as
+  queue-backed chips (rapid clicks are never lost, a hidden window loses
+  nothing, each send is acknowledged with an "Added to chat" pill).
 - **Play mode** — real click-throughs; navigation can never escape its
   artboard or the sandbox.
 - **Agent awareness** — the toolbar shows a "Designing…" chip while your
   agent works and pulses fresh artboards when files change. Nothing is ever
   sent to the agent automatically; every chip lands in the composer for you
   to approve.
+- **Questions first** — for new work the agent reads your project (tokens,
+  breakpoints, AGENTS.md), asks 3–6 questions with bold recommended defaults
+  ("say go" to accept), and can offer 2–3 named directions as sibling
+  artboards for you to pick by clicking. The creation page toggles questions
+  off or fixes the option count.
 - **Focus discipline** — the canvas only raises itself when *you* asked.
 
 **The design system**
 - **22 built-in presets** (Linear-app, Stripe, editorial, brutalism, glass,
   neon, print…) picked at creation — or none, and the brief sets the tone.
-- **`DESIGN.md` + `tokens.css` in the workspace are authoritative** — the
-  agent is told to keep every screen inside them, so screen 7 matches screen 1.
+- **Design-system precedence** — your words in chat, then the chosen preset,
+  then your project's tokens, then the workspace `DESIGN.md` + `tokens.css`.
+  Scaffolded files start `Status: placeholder` and become authoritative once
+  confirmed, so screen 7 matches screen 1.
 - **`/canvas critique`** — deterministic accessibility/overflow/layout gates
   per screen, composed into the chat as a review request.
 - **`/canvas export [png|pdf]`** — per-screen PNGs at exact natural size and
@@ -76,7 +90,7 @@ already running.
 
 ## Gallery
 
-- [Pick toast](docs/img/pick-toast.png) — an Edit-mode click outlines the element and the canvas confirms with an "Added to chat" pill.
+- [Pick toast](docs/img/pick-toast.png) — an Edit-mode selection outlined on the artboard, confirmed with an "Added to chat" pill when referenced.
 - [Artboard context menu](docs/img/context-menu.png) — right-click an artboard to send it to chat, zoom, reload, rename or export.
 - [Error recovery](docs/img/error-recovery.png) — a dead dev server shows a per-artboard error card (siblings stay live); Reload screen restarts it.
 
@@ -125,16 +139,17 @@ other one while using this**, so agent browser actions reach the right window.
 | Start a design | `/canvas <brief>` in any chat (add "two directions" / "responsive" / a size) |
 | Toggle the canvas | `/canvas` on/off · the **Canvas** row in the chat's Work Status section |
 | Switch modes | Toolbar **Edit / Play** · `/canvas edit` · `/canvas play` |
-| Point at something | Edit mode: hover → click → chip in the composer |
+| Point at something | Edit mode: hover → click to select → **Reference in chat** (or Enter) |
 | Reference a whole screen | Artboard menu → **Send to chat** |
 | Review the design | `/canvas critique` |
 | Deliver files | `/canvas export` (or menu → Export PNG/PDF per screen) |
 | Reopen a design | Open its chat — or the workspace list on the Design Canvas page |
+| Manage a design | Work-list ⋯ menu (rail tab or page): rename, stop its dev server, copy path · "Designs: … · Change" moves where new designs scaffold |
 
 **Keyboard (canvas):** Space/H hold-to-pan · arrows pan · Ctrl/⌘ +`-`/`0`
 zoom/reset · Shift+1 fit-all · Shift+0 100% · double-click artboard zooms ·
-Shift+click queues an additive pick · Esc closes menus · right-click for the
-menu.
+Shift+click adds to the selection · Enter references it · Esc clears or closes
+menus · right-click for the menu.
 
 **Where things live**
 
@@ -195,9 +210,9 @@ into failures for honest local runs. See `docs/FORK-DESIGN-CANVAS.md` (spec),
 
 ## FAQ
 
-**The pick chip didn't appear?** Picks queue and survive hidden windows; if
-the chat's Canvas row says Design Mode is on, check the other window's composer
-— chips attach to the chat that owns the canvas.
+**The reference chips didn't appear?** Selections queue and survive hidden
+windows; Reference in chat sends them to the chat that owns the canvas — check
+that chat's composer. A failed send retries automatically on the next poll.
 **Agent can't write the files?** The workspace lives outside the chat's folder
 by design; approve the out-of-folder edit permission once (first `/canvas`
 only). Registering `Documents/Design Canvas` as an OpenChamber project removes
