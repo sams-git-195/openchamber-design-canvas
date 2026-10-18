@@ -1,4 +1,4 @@
-// Per-project Design Studio configuration.
+// Per-project Design Canvas configuration.
 //
 // The agent owns it: when it scaffolds a design project it writes one of these
 // next to the code, so the extension can open the right URL with no setup from

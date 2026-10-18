@@ -1,4 +1,4 @@
-// Craft rulebooks and visual directions for the Design Studio harness.
+// Craft rulebooks and visual directions for the Design Canvas harness.
 //
 // The rulebook itself now lives in `shared/harness-text.ts`, the single source of
 // truth shared with the service's generated OpenCode plugin. This file keeps the

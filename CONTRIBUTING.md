@@ -1,6 +1,6 @@
-# Contributing to OpenChamber Design Studio
+# Contributing to OpenChamber Design Canvas
 
-Thanks for helping improve Design Studio. This is an OpenChamber extension, so
+Thanks for helping improve Design Canvas. This is an OpenChamber extension, so
 the ground rules differ from a plain TypeScript project: OpenChamber never
 compiles our code, and one entry must stay a classic script. Read this before
 your first change.

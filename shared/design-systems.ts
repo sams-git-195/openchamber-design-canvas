@@ -1,5 +1,5 @@
 // AUTO-VENDORED from nexu-io/open-design (Apache-2.0). See THIRD_PARTY_NOTICES.md.
-// Curated subset of OpenDesign design-system presets for the Design Studio picker.
+// Curated subset of OpenDesign design-system presets for the Design Canvas picker.
 // Fetched 2026-10-13. Do not edit by hand; see scripts/ or THIRD_PARTY_NOTICES.md.
 
 export type DesignSystemPreset = {

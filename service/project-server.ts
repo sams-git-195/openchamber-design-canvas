@@ -7,7 +7,7 @@
 // service (and its Chrome window) is the only thing the panel controls; the dev
 // server is the project's own process and outlives a single open call.
 //
-// Loopback only: Design Studio drives local dev servers, never remote hosts.
+// Loopback only: Design Canvas drives local dev servers, never remote hosts.
 //
 // Lifetime: a started server is spawned `detached`, so its pid is also its
 // process-GROUP id. Killing the positive pid would only kill the shell, leaving

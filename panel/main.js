@@ -4018,7 +4018,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     let submittedData = data;
     if (references.length > 0) {
       const retained = references.map((reference) => ({ ...reference }));
-      submittedText += "\n\nDesign Studio references (paths only; no file contents uploaded):\n" + retained.map(
+      submittedText += "\n\nDesign Canvas references (paths only; no file contents uploaded):\n" + retained.map(
         (reference) => `- ${reference.kind}: ${JSON.stringify(reference.path)}; source directory: ${JSON.stringify(reference.sourceDirectory)}; label: ${JSON.stringify(reference.label)}`
       ).join("\n");
       submittedData = data !== null && typeof data === "object" && !Array.isArray(data) ? { ...data, references: retained } : { ...data === void 0 ? {} : { baseData: data }, references: retained };

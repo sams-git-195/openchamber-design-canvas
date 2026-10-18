@@ -1,4 +1,4 @@
-// The single source of truth for the Design Studio "harness": the craft
+// The single source of truth for the Design Canvas "harness": the craft
 // rulebook, the verification protocol, the designer identity and the DESIGN.md /
 // tokens authority line.
 //
@@ -202,8 +202,8 @@ export function harnessRulesText(): string {
   return [
     IDENTITY,
     '',
-    '# Design Studio harness',
-    'This session is a Design Studio session. These rules are mandatory for every edit and every reply.',
+    '# Design Canvas harness',
+    'This session is a Design Canvas session. These rules are mandatory for every edit and every reply.',
     '',
     '## Design system authority',
     DESIGN_AUTHORITY,

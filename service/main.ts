@@ -1,4 +1,4 @@
-// Design Studio local service.
+// Design Canvas local service.
 //
 // The panel iframe cannot touch the filesystem or the network, so this process
 // owns the real Chrome window the live view is: the panel asks it to open or

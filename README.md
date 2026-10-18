@@ -74,6 +74,12 @@ already running.
 - **`/canvas export [png|pdf]`** — per-screen PNGs at exact natural size and
   screen-sized PDFs, written to `exports/` by an async job.
 
+## Gallery
+
+- [Pick toast](docs/img/pick-toast.png) — an Edit-mode click outlines the element and the canvas confirms with an "Added to chat" pill.
+- [Artboard context menu](docs/img/context-menu.png) — right-click an artboard to send it to chat, zoom, reload, rename or export.
+- [Error recovery](docs/img/error-recovery.png) — a dead dev server shows a per-artboard error card (siblings stay live); Reload screen restarts it.
+
 ## How it compares to Claude Design
 
 | | Claude Design | Design Canvas |

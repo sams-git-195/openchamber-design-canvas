@@ -2,7 +2,7 @@
 
 This project vendors a curated subset of design-system presets from the
 **OpenDesign** project. The presets are redistributed here as a local,
-typed catalog (`shared/design-systems.ts`) used by the Design Studio
+typed catalog (`shared/design-systems.ts`) used by the Design Canvas
 preset picker.
 
 - **Source repository:** https://github.com/nexu-io/open-design
