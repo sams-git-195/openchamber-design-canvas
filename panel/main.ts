@@ -222,11 +222,6 @@ const state = {
   /** True while OUR side is bringing the window up (see openCanvasWindow). */
   pendingOpen: false,
   /**
-   * V4-5: another panel currently claims the pick→chat bridge (`/state.bridgeActive`)
-   * — the row's pick loop HOLDS (no attach, no ack; the queue keeps everything).
-   */
-  bridgeActive: false,
-  /**
    * V4-4: the last `/state.registryError` message we toasted while the condition
    * held. Null clears the arm, so a fixed-then-rebroken registry toasts again.
    */
@@ -1545,10 +1540,8 @@ async function attachCompactModeChip(): Promise<void> {
 // and a hidden window loses nothing — this loop has NO visibility guard, and the
 // persisted since-cursor catches up whatever queued while it could not read.
 // A request error/timeout falls back to `wait=0` short polls every 250 ms for
-// 30 s, then the long-poll retries. The `bridgeActive` semantics are unchanged:
-// a claimed bridge stands THIS row down (holding keeps every pick queued and
-// un-acked, so the claimant — or the row later — still delivers it). Design
-// Mode OFF likewise holds delivery: chips land only on an explicit gesture path,
+// 30 s, then the long-poll retries. Design Mode OFF holds delivery (every pick
+// stays queued and un-acked): chips land only on an explicit gesture path,
 // never automatically (fence §5), and turning ON re-runs the cursor catch-up.
 
 /** The long-poll window (the service accepts `wait` 0..12000). */
@@ -1557,7 +1550,7 @@ export const PICK_LONG_POLL_MS = 12_000;
 export const PICK_SHORT_POLL_MS = 250;
 /** …for up to 30 s, then back to the long-poll (spec V4-5). */
 export const PICK_SHORT_POLL_BUDGET_MS = 30_000;
-/** The idle check cadence while held (mode off / bridge claimed). */
+/** The idle check cadence while held (mode off). */
 const PICK_HELD_POLL_MS = 900;
 /** The pace after an idle long-poll round — pacing only; a real long-poll already waited. */
 const PICK_IDLE_POLL_MS = 1000;
@@ -1596,7 +1589,7 @@ async function deliverPickBatch(picks: QueuedPick[]): Promise<boolean> {
       modeRechecked = true;
       await syncModeFromStorage();
     }
-    if (!state.mode.on || state.bridgeActive) break; // held — the queue keeps it
+    if (!state.mode.on) break; // held — the queue keeps it
     // F7: the FIRST deliverable pick of a batch carries the standing Design
     // Mode instructions (workspace path + rule + screens) — at most once per
     // batch, and under the mode chip's own id so it replaces, never stacks.
@@ -1651,7 +1644,7 @@ async function pollPicksOnce(waitMs: number): Promise<'progress' | 'idle' | 'err
  */
 export async function runPickLoop(stop: () => boolean): Promise<void> {
   while (!stop()) {
-    if (!state.mode.on || state.bridgeActive) {
+    if (!state.mode.on) {
       await sleep(PICK_HELD_POLL_MS);
       // F5: a mode turned ON by another frame must release the hold without
       // waiting for anything else to refresh this row's copy.
@@ -1668,7 +1661,7 @@ export async function runPickLoop(stop: () => boolean): Promise<void> {
     // long-poll retries (and the budget restarts if the service stays down).
     const backoffStart = Date.now();
     while (!stop() && Date.now() - backoffStart < PICK_SHORT_POLL_BUDGET_MS) {
-      if (!state.mode.on || state.bridgeActive) break;
+      if (!state.mode.on) break;
       await sleep(PICK_SHORT_POLL_MS);
       if ((await pollPicksOnce(0)) !== 'error') break;
     }
@@ -1693,12 +1686,10 @@ export function resetPickLoop(): void {
   pickCursor = 0;
 }
 
-// NOTE — the pick→chat bridge claim (`POST /bridge`) keeps its old meaning: a
-// hidden resolve frame CANNOT be a long-lived bridge (it is force-unmounted
-// after `GUEST_REQUEST_TIMEOUT_MS`, 20 s), which is exactly why delivery moved
-// from "the claiming frame attaches" to "the queue + the row attaches, and the
-// claim only stands the row down". Routing chips to another window still needs
-// a host-side persistent surface there (tracked upstream).
+// NOTE — a hidden resolve frame CANNOT be a long-lived pick bridge (it is
+// force-unmounted after `GUEST_REQUEST_TIMEOUT_MS`, 20 s), which is why the
+// queue + the row attaches. Routing chips to another window still needs a
+// host-side persistent surface there (tracked upstream).
 
 // ---- the canvas window ----
 
@@ -3638,8 +3629,6 @@ export async function applyState(stateData: LiveState): Promise<void> {
   state.url = stateData.url;
   state.title = stateData.title;
   state.windowOpen = stateData.windowOpen;
-  // V4-5: the bridge claim stands the row's pick loop down (semantics unchanged).
-  state.bridgeActive = stateData.bridgeActive === true;
   if (stateData.mode === 'edit' || stateData.mode === 'play') state.liveMode = stateData.mode;
   if (stateData.screens !== undefined) state.liveScreens = stateData.screens.map((screen) => ({ ...screen }));
   state.activeScreen = stateData.activeScreen ?? null;

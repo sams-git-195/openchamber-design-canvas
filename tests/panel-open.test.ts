@@ -721,7 +721,8 @@ test('the pick pipeline is the V4-5 queue: long-poll, ordered attach, ack after 
   assert.match(queue, /if \(!\(await addToChat\(entry\)\)\) break/, 'a failed attach stops the batch — no ack past it, the queue retries it');
   assert.match(queue, /pickCursor = lastDelivered\.seq/, 'the cursor moves only past delivered chips');
   assert.match(queue, /await ackPicks\(lastDelivered\.seq, pickAckLabel\(lastDelivered\)\)/, 'ONE ack with the last delivered seq + label');
-  assert.match(queue, /if \(!state\.mode\.on \|\| state\.bridgeActive\) break/, 'mode-off and bridgeActive both HOLD delivery (semantics unchanged, fence §5)');
+  assert.match(queue, /if \(!state\.mode\.on\) break/, 'mode-off HOLDS delivery (fence §5)');
+  assert.doesNotMatch(queue, /bridgeActive/, 'the removed /bridge claim no longer gates delivery');
   assert.doesNotMatch(queue, /document\.visibilityState/, 'the queue loop has NO visibility guard — hidden windows lose nothing');
   assert.match(queue, /void runPickLoop\(\(\) => !pickLoopActive\)/, 'startPickLoop runs exactly one loop — single in-flight request');
   // The old snapshot path is really gone from the state reader:
@@ -729,7 +730,6 @@ test('the pick pipeline is the V4-5 queue: long-poll, ordered attach, ack after 
   const apply = source.slice(applyStart, source.indexOf('/** The user closed the live window.'));
   assert.doesNotMatch(apply, /lastPick|pickSeq|state\.lastSeq/, 'applyState no longer consumes lastPick/pickSeq');
   assert.match(apply, /shouldToastRegistryError\(state\.registryErrorNotified, stateData\.registryError \?\? null\)/, 'V4-4: /state.registryError feeds the once-per-message toast rule');
-  assert.match(apply, /state\.bridgeActive = stateData\.bridgeActive === true/, 'the bridge claim is tracked for the queue loop');
 });
 
 test('loadStudioConfig reads the config for display but never opens a window', async () => {

@@ -158,11 +158,6 @@ export type LiveState = {
   /** LEGACY like `lastPick`; the queue's own seqs drive delivery. */
   pickSeq: number;
   windowOpen: boolean;
-  /**
-   * Another panel (the hidden pane `/canvas` mounts inside a chat window) is
-   * the pick→chat bridge right now: this panel must not attach picks too.
-   */
-  bridgeActive?: boolean;
   /** The canvas mode (`edit` | `play`), from `GET /state` (spec §B). */
   mode?: 'edit' | 'play';
   /** The workspace's screens, activation included (spec §B). */

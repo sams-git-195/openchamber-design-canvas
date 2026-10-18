@@ -4205,11 +4205,6 @@ ${TRUNCATED_MARKUP}` };
     /** True while OUR side is bringing the window up (see openCanvasWindow). */
     pendingOpen: false,
     /**
-     * V4-5: another panel currently claims the pick→chat bridge (`/state.bridgeActive`)
-     * — the row's pick loop HOLDS (no attach, no ack; the queue keeps everything).
-     */
-    bridgeActive: false,
-    /**
      * V4-4: the last `/state.registryError` message we toasted while the condition
      * held. Null clears the arm, so a fixed-then-rebroken registry toasts again.
      */
@@ -5071,7 +5066,7 @@ ${TRUNCATED_MARKUP}` };
         modeRechecked = true;
         await syncModeFromStorage();
       }
-      if (!state.mode.on || state.bridgeActive) break;
+      if (!state.mode.on) break;
       if (!modeChipSent) {
         modeChipSent = true;
         await attachCompactModeChip();
@@ -5102,7 +5097,7 @@ ${TRUNCATED_MARKUP}` };
   }
   async function runPickLoop(stop) {
     while (!stop()) {
-      if (!state.mode.on || state.bridgeActive) {
+      if (!state.mode.on) {
         await sleep(PICK_HELD_POLL_MS);
         if (!state.mode.on) await syncModeFromStorage();
         continue;
@@ -5115,7 +5110,7 @@ ${TRUNCATED_MARKUP}` };
       }
       const backoffStart = Date.now();
       while (!stop() && Date.now() - backoffStart < PICK_SHORT_POLL_BUDGET_MS) {
-        if (!state.mode.on || state.bridgeActive) break;
+        if (!state.mode.on) break;
         await sleep(PICK_SHORT_POLL_MS);
         if (await pollPicksOnce(0) !== "error") break;
       }
@@ -6616,7 +6611,6 @@ Source: ${reference.sourceDirectory}`;
     state.url = stateData.url;
     state.title = stateData.title;
     state.windowOpen = stateData.windowOpen;
-    state.bridgeActive = stateData.bridgeActive === true;
     if (stateData.mode === "edit" || stateData.mode === "play") state.liveMode = stateData.mode;
     if (stateData.screens !== void 0) state.liveScreens = stateData.screens.map((screen) => ({ ...screen }));
     state.activeScreen = stateData.activeScreen ?? null;

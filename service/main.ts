@@ -2,9 +2,8 @@
 //
 // The panel iframe cannot touch the filesystem or the network, so this process
 // owns the real Chrome window the live view is: the panel asks it to open or
-// navigate a window (`/open`), raise it without reloading (`/focus`), read its
-// state (`/state`) and reports change stats (`/stat`) so the panel can reload
-// when the agent edits a file. Picking is a Cmd/Ctrl-click gesture in the live
+// navigate a window (`/open`), raise it without reloading (`/focus`) and read
+// its state (`/state`). Picking is a Cmd/Ctrl-click gesture in the live
 // window (browser.ts's PICK_SCRIPT), not a route.
 //
 // Contract (GUEST_SERVICES.md): bind 127.0.0.1 on OPENCHAMBER_SERVICE_PORT,
@@ -17,12 +16,9 @@ import path from 'node:path';
 import { readStudioConfig, resolveConfigPath, writeStudioConfig } from './studio-config.ts';
 import { ensureDevServer, getDevServerStatus, isLoopbackUrl, stopDevServer } from './project-server.ts';
 import { ensureBrowser, getBrowser, stopBrowser } from './surface.ts';
-import { BridgeClaims } from './bridge-claim.ts';
 import { dockPlacement, reapOrphanChrome } from './browser.ts';
 import { handleBrowserControl } from './browser-control.ts';
-import { handleVerifyRequest } from './verify-routes.ts';
-import { writeHarnessPlugin } from './harness-plugin.ts';
-import { listProjectFiles, resolveReferencePath } from './project-files.ts';
+import { resolveReferencePath } from './project-files.ts';
 import { scaffoldProject } from './scaffold.ts';
 import * as scaffoldModule from './scaffold.ts';
 import {
@@ -99,46 +95,6 @@ async function readBody(req: http.IncomingMessage): Promise<string> {
   for await (const chunk of req) chunks.push(chunk as Buffer);
   return Buffer.concat(chunks).toString('utf8');
 }
-
-async function requireFile(root: string, rel: string): Promise<string | null> {
-  const abs = path.resolve(root, rel);
-  const rootAbs = path.resolve(root);
-  if (abs !== rootAbs && !abs.startsWith(rootAbs + path.sep)) return null;
-  try {
-    const stat = await fs.stat(abs);
-    return stat.isFile() ? abs : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Newest mtime among the entry and the files beside it, so a sibling edit reloads. */
-async function newestMtime(dir: string, entryAbs: string): Promise<number> {
-  let newest = 0;
-  try {
-    newest = (await fs.stat(entryAbs)).mtimeMs;
-  } catch {
-    /* entry unreadable; still report siblings */
-  }
-  try {
-    const names = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of names) {
-      if (!entry.isFile()) continue;
-      try {
-        const stat = await fs.stat(path.join(dir, entry.name));
-        if (stat.mtimeMs > newest) newest = stat.mtimeMs;
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    /* directory gone */
-  }
-  return newest;
-}
-
-// Exclusive pick-bridge ownership: one chat window at a time attaches picks.
-const bridge = new BridgeClaims();
 
 // ---- V4-14 (A): workspace-marker guard — defense in depth -------------------
 // PUT /screens, PATCH /view, POST /export, POST /critique and POST
@@ -627,40 +583,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // The verify routes (run the matrix, return the last report).
-    if (url.pathname === '/verify' || url.pathname.startsWith('/verify/')) {
-      if (await handleVerifyRequest(req, res)) return;
-    }
-
-    // Write the project-local OpenCode plugin that runs the harness in-session.
-    // Called by the panel when Design Mode turns ON for a ready project. Writing
-    // into the project is a deliberate side effect; harness-plugin.ts never
-    // clobbers a file it did not generate and is idempotent.
-    if (url.pathname === '/harness') {
-      if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'POST required' });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await readBody(req));
-      } catch {
-        sendJson(res, 400, { error: 'body must be JSON' });
-        return;
-      }
-      const dir = (parsed as { dir?: unknown } | null)?.dir;
-      if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
-        sendJson(res, 400, { error: 'dir must be an absolute project path' });
-        return;
-      }
-      try {
-        sendJson(res, 200, (await writeHarnessPlugin(dir)) as unknown as Json);
-      } catch (error) {
-        sendJson(res, 400, { error: error instanceof Error ? error.message : 'could not write harness plugin' });
-      }
-      return;
-    }
-
     // Validate an explicitly pasted reference; no file contents are returned.
     if (url.pathname === '/reference') {
       if (req.method !== 'POST') {
@@ -683,42 +605,6 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 200, { ...(await resolveReferencePath(body.dir, body.path)) });
       } catch (error) {
         sendJson(res, 400, { error: error instanceof Error ? error.message : 'could not validate file path' });
-      }
-      return;
-    }
-
-    // List a project's files so the panel can attach a FILE reference to a
-    // message. Bearer-authed; `dir` must be an absolute path and `limit`, when
-    // present, a positive integer. A listing the service cannot produce (a
-    // missing or unreadable directory) is a 200 with `ok:false`, never a
-    // transport error.
-    if (url.pathname === '/files') {
-      if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'POST required' });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await readBody(req));
-      } catch {
-        sendJson(res, 400, { error: 'body must be JSON' });
-        return;
-      }
-      const body = parsed as { dir?: unknown; limit?: unknown } | null;
-      const dir = body?.dir;
-      if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
-        sendJson(res, 400, { error: 'dir must be an absolute project path' });
-        return;
-      }
-      const limit = body?.limit;
-      if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1)) {
-        sendJson(res, 400, { error: 'limit must be a positive integer' });
-        return;
-      }
-      try {
-        sendJson(res, 200, { ok: true, files: await listProjectFiles(dir, limit) });
-      } catch (error) {
-        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'could not list files' });
       }
       return;
     }
@@ -1171,7 +1057,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // D5/D6: the user's canvas view state. GET answers view.json-or-default
-    // (absolute-dir gate like /stat); PATCH merges per key (camera/positions/
+    // (absolute-dir gate); PATCH merges per key (camera/positions/
     // mode) through view-state.ts and answers {ok:true}. There is NO PUT:
     // nothing may full-overwrite view.json except the service's own merge.
     if (url.pathname === '/view') {
@@ -1396,61 +1282,19 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (url.pathname === '/stat') {
-      const root = params.get('dir') ?? '';
-      const entry = params.get('path') ?? '';
-      if (!path.isAbsolute(root)) {
-        sendJson(res, 400, { error: 'dir must be absolute' });
-        return;
-      }
-      const abs = await requireFile(root, entry);
-      if (!abs) {
-        sendJson(res, 404, { error: 'entry not found' });
-        return;
-      }
-      const dir = path.dirname(abs);
-      sendJson(res, 200, { mtime: await newestMtime(dir, abs) });
-      return;
-    }
-
     // The live window's state. Never starts the browser: a panel that only
-    // reads state must not pop a Chrome window.
+    // reads state must not pop a Chrome window. `bridgeActive` is a vestige of
+    // the removed /bridge claim, always false; it stays only for the /state
+    // byte-compat pin in tests/v4-service.test.ts until that file is next edited.
     if (url.pathname === '/state') {
       const target = getBrowser();
       if (!target) {
-        sendJson(res, 200, { url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false, bridgeActive: bridge.active() });
+        sendJson(res, 200, { url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false, bridgeActive: false });
         return;
       }
       const state = (await target.state()) as { bridgeActive?: boolean };
-      state.bridgeActive = bridge.active();
+      state.bridgeActive = false;
       sendJson(res, 200, state as unknown as Json);
-      return;
-    }
-
-    // Pick-bridge ownership (see service/bridge-claim.ts). The hidden pane that
-    // /design mounts inside a chat window claims here and heartbeats; every
-    // panel reads `bridgeActive` from /state and stands down while a bridge
-    // holds the picks, so one pick becomes exactly one chip in one window.
-    if (url.pathname === '/bridge') {
-      if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'POST required' });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await readBody(req));
-      } catch {
-        sendJson(res, 400, { error: 'body must be JSON' });
-        return;
-      }
-      const body = parsed as { token?: unknown; release?: unknown } | null;
-      if (body?.release === true) {
-        const released = typeof body.token === 'string' ? bridge.release(body.token) : false;
-        sendJson(res, 200, { ok: released, bridgeActive: bridge.active() });
-        return;
-      }
-      const result = bridge.claim(typeof body?.token === 'string' ? body.token : undefined);
-      sendJson(res, 200, result as unknown as Json);
       return;
     }
 
@@ -1661,45 +1505,6 @@ const server = http.createServer(async (req, res) => {
         /* best effort: closing the tracked window already succeeded */
       }
       sendJson(res, 200, { ok: true });
-      return;
-    }
-
-    // Briefly re-flash an element in the live window by CSS selector. The panel
-    // posts this while the user hovers a reference row so the corresponding
-    // element is visible in the window. Bearer-authed; answers ok:false (never a
-    // transport error) with no window open or when the selector matches nothing.
-    if (url.pathname === '/highlight') {
-      if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'POST required' });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await readBody(req));
-      } catch {
-        sendJson(res, 400, { error: 'body must be JSON' });
-        return;
-      }
-      const selector = (parsed as { selector?: unknown } | null)?.selector;
-      if (typeof selector !== 'string' || selector === '') {
-        sendJson(res, 400, { error: 'selector is required' });
-        return;
-      }
-      const browser = getBrowser();
-      if (!browser) {
-        sendJson(res, 200, { ok: false, error: 'no live window is open' });
-        return;
-      }
-      try {
-        const highlighted = await browser.highlight(selector);
-        if (!highlighted) {
-          sendJson(res, 200, { ok: false, error: 'selector did not match any element' });
-          return;
-        }
-        sendJson(res, 200, { ok: true });
-      } catch (error) {
-        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'highlight failed' });
-      }
       return;
     }
 

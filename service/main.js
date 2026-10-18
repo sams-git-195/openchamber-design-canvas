@@ -7,8 +7,8 @@ var __export = (target, all) => {
 
 // service/main.ts
 import http from "node:http";
-import { promises as fs13 } from "node:fs";
-import path15 from "node:path";
+import { promises as fs12 } from "node:fs";
+import path13 from "node:path";
 
 // service/studio-config.ts
 import { promises as fs } from "node:fs";
@@ -6679,49 +6679,6 @@ function getController() {
   return "none";
 }
 
-// service/bridge-claim.ts
-import { randomBytes as randomBytes2 } from "node:crypto";
-var BridgeClaims = class {
-  token = "";
-  until = 0;
-  ttlMs;
-  now;
-  constructor(ttlMs = 4e3, now = Date.now) {
-    this.ttlMs = ttlMs;
-    this.now = now;
-  }
-  /** Claim or heartbeat. An existing holder renews with its token; anyone else is refused while the claim is warm. */
-  claim(requestedToken) {
-    const at = this.now();
-    if (this.until > at) {
-      if (requestedToken !== void 0 && requestedToken === this.token) {
-        this.until = at + this.ttlMs;
-        return { ok: true, token: this.token, ttlMs: this.ttlMs };
-      }
-      return { ok: false, bridgeActive: true };
-    }
-    if (requestedToken === void 0 || requestedToken !== this.token) this.token = newBridgeToken();
-    this.until = at + this.ttlMs;
-    return { ok: true, token: this.token, ttlMs: this.ttlMs };
-  }
-  /** Give the bridge up early (the holding pane is shutting down cleanly). */
-  release(token) {
-    if (this.until > this.now() && this.token === token) {
-      this.token = "";
-      this.until = 0;
-      return true;
-    }
-    return false;
-  }
-  /** Whether a warm claim exists right now — what /state reports to every panel. */
-  active() {
-    return this.until > this.now();
-  }
-};
-function newBridgeToken() {
-  return `ds-bridge-${randomBytes2(12).toString("hex")}`;
-}
-
 // service/browser-control.ts
 import path7 from "node:path";
 import { existsSync as existsSync2 } from "node:fs";
@@ -7499,10 +7456,6 @@ function detectOscillation(history2, current) {
   return { reappeared, flipped };
 }
 var history = [];
-var lastReport = null;
-function getLastReport() {
-  return lastReport;
-}
 function providerVerification(url, gates, viewports = [], note) {
   return {
     url,
@@ -7594,7 +7547,6 @@ async function runVerification(opts) {
       iterations,
       ...halts.length > 0 ? { halted: halts[0] } : {}
     };
-    lastReport = report;
     return report;
   } finally {
     if (getController() !== "user" && (await browser2.state()).windowOpen) {
@@ -8064,358 +8016,12 @@ async function handleBrowserControl(_req, body) {
   }
 }
 
-// service/verify-routes.ts
-import path8 from "node:path";
-var MAX_BODY_BYTES = 1e6;
-function sendJson(res, status, body) {
-  const text = JSON.stringify(body);
-  res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "content-length": Buffer.byteLength(text),
-    "cache-control": "no-store"
-  });
-  res.end(text);
-}
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    req.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error("request body too large"));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}
-async function readJson(req) {
-  try {
-    const parsed = JSON.parse(await readBody(req));
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-async function handleRun(req, res) {
-  const body = await readJson(req);
-  if (!body) {
-    sendJson(res, 400, { error: "body must be JSON" });
-    return;
-  }
-  const dir = body.dir;
-  const url = body.url;
-  if (typeof dir !== "string" || !path8.isAbsolute(dir)) {
-    sendJson(res, 400, { error: "dir must be an absolute project path" });
-    return;
-  }
-  if (typeof url !== "string" || url === "") {
-    sendJson(res, 400, { error: "url is required" });
-    return;
-  }
-  const report = await runVerification({
-    dir,
-    url,
-    ...Array.isArray(body.viewports) ? { viewports: body.viewports.filter((v) => typeof v === "string") } : {}
-  });
-  sendJson(res, 200, report);
-}
-function handleReport(_req, res) {
-  const report = getLastReport();
-  if (!report) {
-    sendJson(res, 404, { error: "no verification has run yet" });
-    return;
-  }
-  sendJson(res, 200, report);
-}
-async function handleVerifyRequest(req, res) {
-  const url = new URL(req.url ?? "/", "http://127.0.0.1");
-  const pathname = url.pathname;
-  if (pathname === "/verify" && req.method === "POST") {
-    await handleRun(req, res);
-    return true;
-  }
-  if (pathname === "/verify/report" && req.method === "GET") {
-    handleReport(req, res);
-    return true;
-  }
-  return false;
-}
-
-// service/harness-plugin.ts
-import { promises as fs7 } from "node:fs";
-import path9 from "node:path";
-
-// shared/harness-text.ts
-var CRAFT_RULES = {
-  typography: [
-    "- Build one modular scale (base \xD71.2, or \xD71.25 for airier layouts) and take every size from it.",
-    "- Ship 6\u20138 sizes total; do not invent a new size per section.",
-    "- Pair a distinct display face with a readable body face, and keep each role to one family.",
-    "- Set body line-height near 1.5 and tighten only display text.",
-    "- Keep body measure to roughly 45\u201375 characters per line.",
-    "- Let weight, size and color carry hierarchy before you reach for decoration.",
-    "- Use tabular numerals for tables, prices, timers and any aligned data.",
-    "- Limit to two or three weights per family; resist faux-bold."
-  ].join("\n"),
-  color: [
-    "- Keep 70\u201390% of the palette neutral; let structure do the work.",
-    "- Spend one accent on 5\u201310% of a screen, used at most twice as a fill or emphasis.",
-    "- Reserve semantic colors (success/warn/danger/info) for 0\u20135% and only for meaning.",
-    "- Guarantee contrast of 4.5:1 for body text and 3:1 for large text and UI edges.",
-    "- Never encode meaning in color alone; add an icon, label or weight change.",
-    "- Derive surfaces from one neutral ramp rather than stacking unrelated grays.",
-    "- Test the palette in both light and dark before committing.",
-    "- Choose an accent that fits the direction; do not fall back to framework default."
-  ].join("\n"),
-  "anti-slop": [
-    "- Do not use the default indigo/violet accent that every starter kit ships.",
-    "- Do not build hero sections from two-stop gradient backgrounds.",
-    "- Do not use emoji as icons; draw or pick a coherent icon set.",
-    "- Do not invent metrics, testimonials or logos the brief did not supply.",
-    '- Do not pad copy with filler like "lorem ipsum" or "seamless, powerful solution".',
-    "- Avoid the generic card with a colored left border and a shadow.",
-    "- Avoid stock centered-everything layouts with no alignment logic.",
-    "- If a pattern feels like a template default, redesign it deliberately."
-  ].join("\n"),
-  states: [
-    "- Render every data surface in all five states: Loading, Empty, Error, Populated, Edge.",
-    "- Give Loading a skeleton or spinner, and a fallback message after ~15s.",
-    "- Make Empty states explain what belongs here and how to fill it.",
-    "- Make Error states say what failed and offer the next action.",
-    "- Cover Edge cases: one item, many items, very long strings, missing fields.",
-    "- Give forms explicit Untouched, Dirty and Submitted-pending states.",
-    "- Disable or show progress on submit, then confirm success or surface failure.",
-    "- Validate on blur, not on every keystroke."
-  ].join("\n"),
-  motion: [
-    "- Animate only to explain change, never as decoration.",
-    "- Keep UI transitions under 300ms; longer motion needs a reason.",
-    "- Make motion interruptible: a new input cancels the running one.",
-    "- Honor prefers-reduced-motion and provide a static equivalent.",
-    "- Move along a clear path; avoid bounce and overshoot on functional elements.",
-    "- Stagger lists slightly, but never block reading on animation completion."
-  ].join("\n"),
-  accessibility: [
-    "- Give every interactive element a visible :focus-visible treatment.",
-    "- Label every input; a placeholder is not a label.",
-    "- Provide a complete keyboard path, with no focus traps.",
-    "- Use semantic elements first and ARIA only to fill the gaps.",
-    "- Keep contrast at AA: 4.5:1 body, 3:1 large text and UI.",
-    "- Give images meaningful alt text, and decorative images an empty alt.",
-    "- Announce dynamic updates through a live region."
-  ].join("\n"),
-  "laws-of-ux": [
-    "- Hick: cut the number of simultaneous choices; group or defer the rest.",
-    "- Miller: keep working sets near 7\xB12, and lean toward ~4 for menus.",
-    "- Fitts: make primary targets large and near where the pointer already is.",
-    "- von Restorff: style the one thing that must stand out; mute the rest.",
-    "- Peak-End: invest in the strongest moment and the final step.",
-    "- Tesler: absorb complexity in the product so the user faces less of it."
-  ].join("\n"),
-  responsive: [
-    "- Define named breakpoints (e.g. sm/md/lg/xl) and reuse them everywhere.",
-    "- Reflow, do not merely shrink: change column counts and stacking per breakpoint.",
-    "- Test the awkward widths, not just the presets: 320, 375, 768, 1024, 1440.",
-    "- Keep tap targets at least 44px on touch layouts.",
-    "- Clamp fluid type and spacing so extremes stay legible.",
-    "- Never let horizontal scroll appear on a normal content page."
-  ].join("\n"),
-  verification: [
-    "- Never call a change done until you have seen it render at every breakpoint: mobile 390, desktop 1280, wide 2048.",
-    "- Also check the awkward widths where relevant: 320, 375, 1024, 1440.",
-    "- Horizontal scroll on a normal content page is a defect, not a style choice.",
-    "- Fix the cheapest deterministic failure first; never restyle to hide an overflow or a contrast error.",
-    "- Use only tokens from tokens.css / DESIGN.md; a hardcoded colour or spacing value is a defect.",
-    "- Keep tap targets at least 24px (44px on touch), headings in order, every control labelled.",
-    "- Done means the gates pass at every breakpoint \u2014 not that it looks right at one width."
-  ].join("\n")
-};
-var ALL_CRAFT_RULE_IDS = [
-  "typography",
-  "color",
-  "anti-slop",
-  "states",
-  "motion",
-  "accessibility",
-  "laws-of-ux",
-  "responsive",
-  "verification"
-];
-function defaultCraft(ids) {
-  const chosen = ids && ids.length > 0 ? ids : ALL_CRAFT_RULE_IDS;
-  return chosen.map((id) => `### ${id}
-${CRAFT_RULES[id]}`).join("\n\n");
-}
-var VERIFY_PROTOCOL = [
-  "Before editing, state the change's acceptance criteria in one line.",
-  "After each edit verify in this order (cheap/deterministic first): overflow \u2192 design tokens \u2192 accessibility \u2192 semantics \u2192 layout. Use the browser tool: `browser.capture` / `browser.open` returns a `verification` block covering every viewport (mobile, tablet, desktop, wide) with each gate's status.",
-  "Fix every P0 before starting a new gate tier; re-run the same gates after a fix.",
-  "Budget: at most 5 fix/verify iterations OR 10 minutes, whichever comes first. Then stop and report.",
-  "Never mark the work done while any P0 remains. Report the gate table and state the breakpoints you checked.",
-  "Oscillation: if a finding you already fixed reappears, or a gate flips across two iterations, STOP and hand back with both states. Do not keep looping.",
-  "The 0\u201310 critique is advisory only; never treat it as pass/fail and never optimise for it."
-].join("\n");
-var IDENTITY = "You are an expert designer. HTML is your tool, not your medium: the medium is the intent, the system and the craft of the page.";
-var DESIGN_AUTHORITY = [
-  "DESIGN.md and tokens.css (when present) are the project design system and are",
-  "authoritative: follow them over any conflicting instinct, and do not invent colours,",
-  "spacing or type values outside them. A hardcoded value that a token already covers is a defect."
-].join(" ");
-var DESIGN_WORKSPACE_NOTE = [
-  "The canvas workspace is a Vite multi-page app: every screen is a real HTML page (root-level *.html files) and screens.json lists them.",
-  'To add a screen: write `<id>.html` at the workspace root, then add { "id": "<id>", "file": "<id>.html", "title": "...", "width": 1280, "height": 800 } to the screens array in screens.json (ids are [a-z0-9-], unique; width/height 200\u20138192).',
-  "Keep index.html as a meta-refresh redirect to home.html so `vite build` keeps a valid default entry.",
-  'Link between screens with plain <a href="other.html"> links; never create screens outside the workspace root.',
-  "The chat session does NOT run inside the workspace: use the workspace absolute path in every file write, edit and bash call.",
-  "Inspect and reuse the existing app, design system and .design-studio.json; do not scaffold over existing work."
-].join(" ");
-var CANVAS_PROTOCOL = [
-  'Screens are artboards on one shared canvas. The workspace-root screens.json registry maps each screen to its own .html file and its natural size: { "version": 1, "screens": [ { "id", "file", "title", "width", "height" } ] }.',
-  "Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200\u20138192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.",
-  "Positions are not design content: never write x/y into screens.json; the canvas stores them in .design-studio/view.json and the user arranges artboards by hand.",
-  'Variants = side-by-side artboards. "Two directions", "options", "alternatives" mean 2\u20133 complete sibling screens (ids like home-a, home-b), each its own file + entry, each at the same size unless the brief says otherwise. Never stack variants inside one file, never hide alternates behind toggles.',
-  'Responsive = one artboard per real size. Presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1280\xD7800 desktop (default) \xB7 1440\xD7900 large desktop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop). Other sizes are allowed within 200\u20138192.'
-].join("\n");
-var CANVAS_PROTOCOL_CHIP = [
-  'Screens are artboards on one shared canvas. The workspace-root screens.json registry maps each screen to its own .html file and its natural size: { "version": 1, "screens": [ { "id", "file", "title", "width", "height" } ] }.',
-  "Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200\u20138192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.",
-  '"Two directions", "options", "alternatives" mean 2\u20133 complete sibling screens, each its own file + entry \u2014 never stacked in one file, never hidden behind toggles.',
-  'Size presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1280\xD7800 desktop (default) \xB7 1440\xD7900 large desktop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop).'
-].join("\n");
-var VERIFY_MANDATE = [
-  "Verify at every stage, not only at the end: after each edit, before showing work, and before calling",
-  "anything done. Run the cheap deterministic gates first and never claim success without having seen the",
-  "page render at the breakpoints the protocol names."
-].join(" ");
-function harnessRulesText() {
-  return [
-    IDENTITY,
-    "",
-    "# Design Studio harness",
-    "This session is a Design Studio session. These rules are mandatory for every edit and every reply.",
-    "",
-    "## Design system authority",
-    DESIGN_AUTHORITY,
-    "",
-    "## Craft rules",
-    defaultCraft(),
-    "",
-    "## Verification protocol",
-    VERIFY_PROTOCOL,
-    "",
-    "## Mandate",
-    VERIFY_MANDATE
-  ].join("\n");
-}
-
-// service/harness-plugin.ts
-var HARNESS_PLUGIN_REL = ".opencode/plugin/design-studio-harness.ts";
-var HARNESS_PLUGIN_ID = "design-studio-harness";
-var HARNESS_MARKER = "design-studio harness \u2014 generated, do not edit";
-var EDIT_TOOLS = ["edit", "write", "patch", "multiedit", "apply_patch"];
-function harnessPluginSource() {
-  const rules = harnessRulesText();
-  const nudge = [
-    "A file was just edited in this Design Studio session.",
-    "Before continuing: verify the change with the browser tool at every viewport (mobile, tablet, desktop, wide),",
-    "fix every P0 before starting a new gate tier, and do not mark the work done while any P0 remains.",
-    "If a finding you already fixed reappears, stop and hand back with both states instead of looping.",
-    VERIFY_MANDATE
-  ].join(" ");
-  const line = (value) => JSON.stringify(value);
-  return [
-    `// ${HARNESS_MARKER}`,
-    "//",
-    "// Generated by the OpenChamber Design Studio extension. Rewritten in place when a",
-    "// design session starts; any manual edit is lost on the next write. Change the",
-    "// rules in the extension (shared/harness-text.ts), not here.",
-    "//",
-    "// Side effects of this file living in the project:",
-    "//  \xB7 OpenCode discovers `.opencode/plugin/*.ts` and loads it into every session",
-    "//    for this project automatically.",
-    "//  \xB7 It imports nothing, so it adds no",
-    "//    dependency and needs no `node_modules` install. If `.opencode/` is not",
-    "//    tracked, add it to `.gitignore`.",
-    "//",
-    "// What it does:",
-    "//  \xB7 Pushes the Design Studio harness rules into every model turn (identity,",
-    "//    design-system authority, craft rules, verification protocol, mandate).",
-    "//  \xB7 Flags the session after a completed edit/write/patch so the next turn",
-    "//    carries an explicit verification nudge.",
-    "//  \xB7 Preserves the selected project workspace; never creates or moves sessions.",
-    "",
-    `const HARNESS_RULES = ${line(rules)}`,
-    "",
-    `const VERIFY_NUDGE = ${line(nudge)}`,
-    "",
-    `const WORKSPACE_NOTE = ${line(DESIGN_WORKSPACE_NOTE)}`,
-    "",
-    `const EDIT_TOOLS = new Set(${JSON.stringify(EDIT_TOOLS)})`,
-    "",
-    "export default {",
-    `  id: ${line(HARNESS_PLUGIN_ID)},`,
-    "  async setup(ctx) {",
-    "    // Sessions share one plugin instance, so track nudges per session id.",
-    "    const pending = new Set()",
-    "",
-    '    await ctx.session.hook("context", async (event) => {',
-    '      event.system.push({ type: "text", text: WORKSPACE_NOTE })',
-    '      event.system.push({ type: "text", text: HARNESS_RULES })',
-    "      if (pending.has(event.sessionID)) {",
-    "        pending.delete(event.sessionID)",
-    '        event.system.push({ type: "text", text: VERIFY_NUDGE })',
-    "      }",
-    "    })",
-    "",
-    '    await ctx.tool.hook("execute.after", (event) => {',
-    '      if (event.status !== "completed") return',
-    "      if (!EDIT_TOOLS.has(event.tool)) return",
-    "      pending.add(event.sessionID)",
-    "    })",
-    "  },",
-    "}",
-    ""
-  ].join("\n");
-}
-async function writeHarnessPlugin(projectDir2) {
-  const rootAbs = path9.resolve(projectDir2);
-  const abs = path9.resolve(rootAbs, HARNESS_PLUGIN_REL);
-  if (abs !== rootAbs && !abs.startsWith(rootAbs + path9.sep)) {
-    throw new Error("path outside project");
-  }
-  const source = harnessPluginSource();
-  let existing = null;
-  try {
-    existing = await fs7.readFile(abs, "utf8");
-  } catch {
-    existing = null;
-  }
-  if (existing !== null) {
-    if (!existing.includes(HARNESS_MARKER)) {
-      throw new Error(`refusing to overwrite ${HARNESS_PLUGIN_REL}: it was not generated by Design Studio`);
-    }
-    if (existing === source) {
-      return { path: HARNESS_PLUGIN_REL, created: false, updated: false, changed: false };
-    }
-    await fs7.writeFile(abs, source, "utf8");
-    return { path: HARNESS_PLUGIN_REL, created: false, updated: true, changed: true };
-  }
-  await fs7.mkdir(path9.dirname(abs), { recursive: true });
-  await fs7.writeFile(abs, source, "utf8");
-  return { path: HARNESS_PLUGIN_REL, created: true, updated: false, changed: true };
-}
-
 // service/project-files.ts
-import { promises as fs8, constants } from "node:fs";
-import path10 from "node:path";
+import { promises as fs7, constants } from "node:fs";
+import path8 from "node:path";
 async function resolveReferencePath(dir, input) {
   const controls = /[\u0000-\u001f\u007f-\u009f]/;
-  if (typeof dir !== "string" || !path10.isAbsolute(dir) || controls.test(dir)) {
+  if (typeof dir !== "string" || !path8.isAbsolute(dir) || controls.test(dir)) {
     throw new Error("Source directory must be a valid absolute project path. Select a project and try again.");
   }
   if (typeof input !== "string" || input.trim() === "") {
@@ -8426,23 +8032,23 @@ async function resolveReferencePath(dir, input) {
   }
   let sourceDirectory;
   try {
-    sourceDirectory = await fs8.realpath(dir);
-    if (!(await fs8.stat(sourceDirectory)).isDirectory()) throw new Error("not a directory");
+    sourceDirectory = await fs7.realpath(dir);
+    if (!(await fs7.stat(sourceDirectory)).isDirectory()) throw new Error("not a directory");
   } catch {
     throw new Error("Source project directory is not accessible. Select an accessible project and try again.");
   }
-  const absolute = path10.isAbsolute(input);
+  const absolute = path8.isAbsolute(input);
   const inside = (target) => {
-    const relative = path10.relative(sourceDirectory, target);
-    return relative !== ".." && !relative.startsWith(".." + path10.sep) && !path10.isAbsolute(relative);
+    const relative = path8.relative(sourceDirectory, target);
+    return relative !== ".." && !relative.startsWith(".." + path8.sep) && !path8.isAbsolute(relative);
   };
-  const candidate = path10.resolve(sourceDirectory, input);
+  const candidate = path8.resolve(sourceDirectory, input);
   if (!absolute && !inside(candidate)) {
     throw new Error("Relative file path is outside the source project. Paste its absolute path to select an external file.");
   }
   let canonical;
   try {
-    canonical = await fs8.realpath(candidate);
+    canonical = await fs7.realpath(candidate);
   } catch {
     throw new Error("File not found or not accessible. Check the pasted path and its permissions.");
   }
@@ -8450,7 +8056,7 @@ async function resolveReferencePath(dir, input) {
     throw new Error("Relative file path resolves outside the source project through a symlink. Paste its absolute path to select an external file.");
   }
   try {
-    const stat = await fs8.stat(canonical);
+    const stat = await fs7.stat(canonical);
     if (!stat.isFile()) throw new Error("not a regular file");
   } catch (error) {
     if (error instanceof Error && error.message === "not a regular file") {
@@ -8459,78 +8065,11 @@ async function resolveReferencePath(dir, input) {
     throw new Error("File is not accessible. Check the pasted path and its permissions.");
   }
   try {
-    await fs8.access(canonical, constants.R_OK);
+    await fs7.access(canonical, constants.R_OK);
   } catch {
     throw new Error("File is not readable. Check its permissions or paste another file path.");
   }
   return { path: canonical, sourceDirectory };
-}
-var SKIP_DIRS2 = /* @__PURE__ */ new Set(["node_modules", "dist", "build"]);
-var DEFAULT_FILE_LIMIT = 500;
-var MAX_FILE_LIMIT = 2e3;
-function shouldSkipDir(name) {
-  return name.startsWith(".") || SKIP_DIRS2.has(name);
-}
-function isInside(root, target) {
-  return target === root || target.startsWith(root + path10.sep);
-}
-async function listProjectFiles(dir, limit) {
-  if (typeof dir !== "string" || !path10.isAbsolute(dir)) {
-    throw new Error("dir must be an absolute path");
-  }
-  if (limit !== void 0 && (!Number.isInteger(limit) || limit < 1)) {
-    throw new Error("limit must be a positive integer");
-  }
-  const cap = Math.min(limit ?? DEFAULT_FILE_LIMIT, MAX_FILE_LIMIT);
-  const rootAbs = path10.resolve(dir);
-  const rootReal = await fs8.realpath(rootAbs);
-  const found = [];
-  const visitedDirs = /* @__PURE__ */ new Set([rootReal]);
-  const walk = async (absDir) => {
-    if (found.length >= cap) return;
-    let entries;
-    try {
-      entries = await fs8.readdir(absDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-    for (const entry of entries) {
-      if (found.length >= cap) return;
-      const abs = path10.join(absDir, entry.name);
-      if (entry.isSymbolicLink()) {
-        let real;
-        try {
-          real = await fs8.realpath(abs);
-        } catch {
-          continue;
-        }
-        if (!isInside(rootReal, real)) continue;
-        let stat;
-        try {
-          stat = await fs8.stat(real);
-        } catch {
-          continue;
-        }
-        if (stat.isDirectory()) {
-          if (shouldSkipDir(entry.name) || visitedDirs.has(real)) continue;
-          visitedDirs.add(real);
-          await walk(abs);
-        } else if (stat.isFile()) {
-          found.push(path10.relative(rootAbs, abs));
-        }
-        continue;
-      }
-      if (entry.isDirectory()) {
-        if (shouldSkipDir(entry.name)) continue;
-        await walk(abs);
-      } else if (entry.isFile()) {
-        found.push(path10.relative(rootAbs, abs));
-      }
-    }
-  };
-  await walk(rootAbs);
-  return found.map((rel) => rel.split(path10.sep).join("/")).sort((a, b) => a < b ? -1 : a > b ? 1 : 0).slice(0, cap);
 }
 
 // service/scaffold.ts
@@ -8544,8 +8083,8 @@ __export(scaffold_exports, {
   writeScaffoldFiles: () => writeScaffoldFiles
 });
 import { spawn as spawn3 } from "node:child_process";
-import { promises as fs10 } from "node:fs";
-import path12 from "node:path";
+import { promises as fs9 } from "node:fs";
+import path10 from "node:path";
 
 // shared/design-systems.ts
 var DESIGN_SYSTEMS = [
@@ -9982,21 +9521,21 @@ var DESIGN_SYSTEMS = [
 ];
 
 // service/workspace-root.ts
-import { promises as fs9 } from "node:fs";
+import { promises as fs8 } from "node:fs";
 import os from "node:os";
-import path11 from "node:path";
+import path9 from "node:path";
 var WORKSPACE_FOLDER = "Design Canvas";
 function candidateWorkspaceRoots(env, platform, homeDir) {
   const candidates = [];
   if (platform === "win32") {
-    if (env.ONEDRIVE) candidates.push(path11.join(env.ONEDRIVE, "Documents", WORKSPACE_FOLDER));
-    if (env.USERPROFILE) candidates.push(path11.join(env.USERPROFILE, "Documents", WORKSPACE_FOLDER));
+    if (env.ONEDRIVE) candidates.push(path9.join(env.ONEDRIVE, "Documents", WORKSPACE_FOLDER));
+    if (env.USERPROFILE) candidates.push(path9.join(env.USERPROFILE, "Documents", WORKSPACE_FOLDER));
   }
-  candidates.push(path11.join(homeDir, "Documents", WORKSPACE_FOLDER));
+  candidates.push(path9.join(homeDir, "Documents", WORKSPACE_FOLDER));
   const seen = /* @__PURE__ */ new Set();
   const roots = [];
   for (const candidate of candidates) {
-    const abs = path11.resolve(candidate);
+    const abs = path9.resolve(candidate);
     if (seen.has(abs)) continue;
     seen.add(abs);
     roots.push(abs);
@@ -10006,21 +9545,21 @@ function candidateWorkspaceRoots(env, platform, homeDir) {
 async function resolveWorkspaceRoot(env = process.env) {
   const override = env.DS_WORKSPACE_ROOT;
   if (typeof override === "string" && override.trim() !== "") {
-    return path11.resolve(override.trim());
+    return path9.resolve(override.trim());
   }
   const candidates = candidateWorkspaceRoots(env, process.platform, os.homedir());
   for (const candidate of candidates) {
     try {
-      if ((await fs9.stat(path11.dirname(candidate))).isDirectory()) return candidate;
+      if ((await fs8.stat(path9.dirname(candidate))).isDirectory()) return candidate;
     } catch {
     }
   }
-  return candidates[candidates.length - 1] ?? path11.resolve(os.homedir(), "Documents", WORKSPACE_FOLDER);
+  return candidates[candidates.length - 1] ?? path9.resolve(os.homedir(), "Documents", WORKSPACE_FOLDER);
 }
 function isInsideOrEqual(root, dir) {
-  const rootAbs = path11.resolve(root);
-  const dirAbs = path11.resolve(dir);
-  return dirAbs === rootAbs || dirAbs.startsWith(rootAbs + path11.sep);
+  const rootAbs = path9.resolve(root);
+  const dirAbs = path9.resolve(dir);
+  return dirAbs === rootAbs || dirAbs.startsWith(rootAbs + path9.sep);
 }
 
 // service/scaffold.ts
@@ -10044,7 +9583,7 @@ async function findFreePort(start, end, offset) {
   return null;
 }
 function projectName(dir) {
-  const base = path12.basename(path12.resolve(dir)).toLowerCase();
+  const base = path10.basename(path10.resolve(dir)).toLowerCase();
   const slug = base.replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "");
   if (!slug) return "design-project";
   return /^[a-z0-9]/.test(slug) ? slug : `design-${slug}`;
@@ -10415,14 +9954,14 @@ var SCAFFOLD_TOKEN_ALIASES = [
 function presetTokensCss(preset) {
   const decls = Object.entries(preset.tokens).map(([name, value]) => `  ${name}: ${value};`).join("\n");
   const aliases = SCAFFOLD_TOKEN_ALIASES.filter(([name]) => !(name in preset.tokens));
-  const bridge2 = aliases.length ? `
+  const bridge = aliases.length ? `
 
   /* scaffold aliases \u2014 styles.css vocabulary \u2192 preset tokens */
 ${aliases.map(([name, value]) => `  ${name}: ${value};`).join("\n")}` : "";
   return `/* tokens.css \u2014 ${preset.name} design system (id: ${preset.id}).
    Every colour, space and type value in styles.css must come from here. */
 :root {
-${decls}${bridge2}
+${decls}${bridge}
 }
 `;
 }
@@ -10433,11 +9972,11 @@ ${AUTHORITY_STATEMENT}`;
 }
 async function writeScaffoldFiles(options) {
   const dir = options.dir;
-  if (!path12.isAbsolute(dir)) return { ok: false, error: "dir must be an absolute path" };
+  if (!path10.isAbsolute(dir)) return { ok: false, error: "dir must be an absolute path" };
   if (typeof options.type !== "string" || options.type.trim() === "") {
     return { ok: false, error: "type must be a non-empty string" };
   }
-  const existed = await fs10.stat(dir).then((s) => s.isDirectory()).catch(() => false);
+  const existed = await fs9.stat(dir).then((s) => s.isDirectory()).catch(() => false);
   if (!existed) {
     const root = options.workspaceRoot ?? await resolveWorkspaceRoot();
     if (!isInsideOrEqual(root, dir)) {
@@ -10448,7 +9987,7 @@ async function writeScaffoldFiles(options) {
     }
   }
   try {
-    await fs10.mkdir(dir, { recursive: true });
+    await fs9.mkdir(dir, { recursive: true });
   } catch (error) {
     return { ok: false, error: `could not create ${dir}: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -10491,7 +10030,7 @@ async function writeScaffoldFiles(options) {
   ];
   const written = [];
   try {
-    await fs10.writeFile(path12.join(dir, DEFAULT_CONFIG_PATH), `${JSON.stringify(config, null, 2)}
+    await fs9.writeFile(path10.join(dir, DEFAULT_CONFIG_PATH), `${JSON.stringify(config, null, 2)}
 `, "utf8");
     written.push(DEFAULT_CONFIG_PATH);
   } catch (error) {
@@ -10499,7 +10038,7 @@ async function writeScaffoldFiles(options) {
   }
   try {
     for (const [rel, content] of files) {
-      await fs10.writeFile(path12.join(dir, rel), content, "utf8");
+      await fs9.writeFile(path10.join(dir, rel), content, "utf8");
       written.push(rel);
     }
   } catch (error) {
@@ -10527,7 +10066,7 @@ async function installAndBoot(dir, url, options = {}) {
     opts = dir;
   }
   if (opts.install !== false) {
-    const hasModules = await fs10.stat(path12.join(targetDir, "node_modules")).then((s) => s.isDirectory()).catch(() => false);
+    const hasModules = await fs9.stat(path10.join(targetDir, "node_modules")).then((s) => s.isDirectory()).catch(() => false);
     if (!hasModules) {
       if (typeof opts.install === "function") {
         const hooked = await opts.install(targetDir);
@@ -10609,13 +10148,13 @@ ${tail(output)}` });
 }
 
 // service/screens-watch.ts
-import { watch, promises as fs11 } from "node:fs";
-import path13 from "node:path";
+import { watch, promises as fs10 } from "node:fs";
+import path11 from "node:path";
 var POLL_MS = 2e3;
 var DEBOUNCE_MS = 250;
 function watchRegistry(dir, onChange) {
-  const root = path13.resolve(dir);
-  const file = path13.join(root, SCREENS_FILENAME);
+  const root = path11.resolve(dir);
+  const file = path11.join(root, SCREENS_FILENAME);
   let closed = false;
   let debounce = null;
   let pollTimer = null;
@@ -10640,7 +10179,7 @@ function watchRegistry(dir, onChange) {
           lastReadFailed = true;
           break;
         }
-        lastMtimeMs = await fs11.stat(file).then((s) => s.mtimeMs).catch(() => -1);
+        lastMtimeMs = await fs10.stat(file).then((s) => s.mtimeMs).catch(() => -1);
         lastReadFailed = !change.ok;
         if (!closed) onChange(change);
       } while (!closed && rereadQueued);
@@ -10667,12 +10206,12 @@ function watchRegistry(dir, onChange) {
     });
   } catch {
   }
-  void fs11.stat(file).then((s) => {
+  void fs10.stat(file).then((s) => {
     if (!closed) lastMtimeMs = s.mtimeMs;
   }, () => void 0);
   pollTimer = setInterval(() => {
     if (closed) return;
-    void fs11.stat(file).then(
+    void fs10.stat(file).then(
       (stat) => {
         if (closed) return;
         if (lastReadFailed || stat.mtimeMs !== lastMtimeMs) schedule();
@@ -10703,8 +10242,8 @@ function watchRegistry(dir, onChange) {
 }
 
 // service/export.ts
-import { promises as fs12 } from "node:fs";
-import path14 from "node:path";
+import { promises as fs11 } from "node:fs";
+import path12 from "node:path";
 var EXPORTS_DIRNAME = "exports";
 var ALL_FORMATS = ["png", "pdf"];
 var job = null;
@@ -10750,7 +10289,7 @@ function startExportJob(input) {
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
   const next = {
     id,
-    dir: path14.resolve(input.dir),
+    dir: path12.resolve(input.dir),
     screens: input.screens.map((screen) => ({ ...screen })),
     formats,
     state: "running",
@@ -10798,25 +10337,25 @@ async function runJob(current, browser2) {
 }
 async function captureScreen(browser2, dir, screen) {
   const shot = await browser2.capture(screen.id);
-  const file = path14.join(dir, EXPORTS_DIRNAME, `${screen.id}.png`);
+  const file = path12.join(dir, EXPORTS_DIRNAME, `${screen.id}.png`);
   await atomicWrite(file, shot.png);
   return { ok: true, file };
 }
 async function printScreen(browser2, dir, screen) {
   const pdf = await browser2.printScreenToPdf(screen.url, screen.width, screen.height);
-  const file = path14.join(dir, EXPORTS_DIRNAME, `${screen.id}.pdf`);
+  const file = path12.join(dir, EXPORTS_DIRNAME, `${screen.id}.pdf`);
   await atomicWrite(file, pdf);
   return { ok: true, file };
 }
 async function atomicWrite(file, data) {
-  const targetDir = path14.dirname(file);
-  await fs12.mkdir(targetDir, { recursive: true });
-  const tmp = path14.join(targetDir, `.${path14.basename(file)}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  const targetDir = path12.dirname(file);
+  await fs11.mkdir(targetDir, { recursive: true });
+  const tmp = path12.join(targetDir, `.${path12.basename(file)}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
   try {
-    await fs12.writeFile(tmp, data);
-    await fs12.rename(tmp, file);
+    await fs11.writeFile(tmp, data);
+    await fs11.rename(tmp, file);
   } catch (error) {
-    await fs12.rm(tmp, { force: true }).catch(() => void 0);
+    await fs11.rm(tmp, { force: true }).catch(() => void 0);
     throw error;
   }
 }
@@ -10828,7 +10367,7 @@ if (!PORT || !TOKEN) {
   console.error("[design-canvas] missing OPENCHAMBER_SERVICE_PORT or OPENCHAMBER_SERVICE_TOKEN");
   process.exit(1);
 }
-function sendJson2(res, status, body) {
+function sendJson(res, status, body) {
   const text = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
@@ -10837,48 +10376,16 @@ function sendJson2(res, status, body) {
   });
   res.end(text);
 }
-async function readBody2(req) {
+async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   return Buffer.concat(chunks).toString("utf8");
 }
-async function requireFile(root, rel) {
-  const abs = path15.resolve(root, rel);
-  const rootAbs = path15.resolve(root);
-  if (abs !== rootAbs && !abs.startsWith(rootAbs + path15.sep)) return null;
-  try {
-    const stat = await fs13.stat(abs);
-    return stat.isFile() ? abs : null;
-  } catch {
-    return null;
-  }
-}
-async function newestMtime(dir, entryAbs) {
-  let newest = 0;
-  try {
-    newest = (await fs13.stat(entryAbs)).mtimeMs;
-  } catch {
-  }
-  try {
-    const names = await fs13.readdir(dir, { withFileTypes: true });
-    for (const entry of names) {
-      if (!entry.isFile()) continue;
-      try {
-        const stat = await fs13.stat(path15.join(dir, entry.name));
-        if (stat.mtimeMs > newest) newest = stat.mtimeMs;
-      } catch {
-      }
-    }
-  } catch {
-  }
-  return newest;
-}
-var bridge = new BridgeClaims();
 async function isDesignWorkspace(dir) {
   return await resolveConfigPath(dir) !== null;
 }
 function sendNotAWorkspace(res) {
-  sendJson2(res, 400, { error: "not a design workspace" });
+  sendJson(res, 400, { error: "not a design workspace" });
 }
 var watchStop = null;
 var watchedDir = null;
@@ -11154,8 +10661,8 @@ async function startAsyncScaffold(options) {
   return { ok: true, jobId: job2.id, dir: job2.dir, url: job2.url };
 }
 function sameAbsoluteDir(a, b) {
-  const left = path15.resolve(a);
-  const right = path15.resolve(b);
+  const left = path13.resolve(a);
+  const right = path13.resolve(b);
   return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 function scaffoldStatus(id, dir) {
@@ -11173,136 +10680,79 @@ function scaffoldStatus(id, dir) {
 var server = http.createServer(async (req, res) => {
   const auth = req.headers["authorization"];
   if (auth !== `Bearer ${TOKEN}`) {
-    sendJson2(res, 401, { error: "unauthorized" });
+    sendJson(res, 401, { error: "unauthorized" });
     return;
   }
   const url = new URL(req.url ?? "/", `http://127.0.0.1:${PORT}`);
   const params = url.searchParams;
   try {
     if (req.method === "POST" && url.pathname === BROWSER_PROVIDER_PATH) {
-      const body = await readBody2(req);
+      const body = await readBody(req);
       const result = await handleBrowserControl(req, body);
-      sendJson2(res, 200, result);
-      return;
-    }
-    if (url.pathname === "/verify" || url.pathname.startsWith("/verify/")) {
-      if (await handleVerifyRequest(req, res)) return;
-    }
-    if (url.pathname === "/harness") {
-      if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
-        return;
-      }
-      let parsed;
-      try {
-        parsed = JSON.parse(await readBody2(req));
-      } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
-        return;
-      }
-      const dir = parsed?.dir;
-      if (typeof dir !== "string" || !path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be an absolute project path" });
-        return;
-      }
-      try {
-        sendJson2(res, 200, await writeHarnessPlugin(dir));
-      } catch (error) {
-        sendJson2(res, 400, { error: error instanceof Error ? error.message : "could not write harness plugin" });
-      }
+      sendJson(res, 200, result);
       return;
     }
     if (url.pathname === "/reference") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const body = parsed;
       if (typeof body?.dir !== "string" || typeof body.path !== "string") {
-        sendJson2(res, 400, { error: "dir and path must be strings. Paste an accessible file path." });
+        sendJson(res, 400, { error: "dir and path must be strings. Paste an accessible file path." });
         return;
       }
       try {
-        sendJson2(res, 200, { ...await resolveReferencePath(body.dir, body.path) });
+        sendJson(res, 200, { ...await resolveReferencePath(body.dir, body.path) });
       } catch (error) {
-        sendJson2(res, 400, { error: error instanceof Error ? error.message : "could not validate file path" });
-      }
-      return;
-    }
-    if (url.pathname === "/files") {
-      if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
-        return;
-      }
-      let parsed;
-      try {
-        parsed = JSON.parse(await readBody2(req));
-      } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
-        return;
-      }
-      const body = parsed;
-      const dir = body?.dir;
-      if (typeof dir !== "string" || !path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be an absolute project path" });
-        return;
-      }
-      const limit = body?.limit;
-      if (limit !== void 0 && (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1)) {
-        sendJson2(res, 400, { error: "limit must be a positive integer" });
-        return;
-      }
-      try {
-        sendJson2(res, 200, { ok: true, files: await listProjectFiles(dir, limit) });
-      } catch (error) {
-        sendJson2(res, 200, { ok: false, error: error instanceof Error ? error.message : "could not list files" });
+        sendJson(res, 400, { error: error instanceof Error ? error.message : "could not validate file path" });
       }
       return;
     }
     if (url.pathname === "/scaffold") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const body = parsed;
       const dir = body?.dir;
       const type = body?.type;
-      if (typeof dir !== "string" || !path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be an absolute project path" });
+      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+        sendJson(res, 400, { error: "dir must be an absolute project path" });
         return;
       }
       if (typeof type !== "string" || type.trim() === "") {
-        sendJson2(res, 400, { error: "type must be a non-empty string" });
+        sendJson(res, 400, { error: "type must be a non-empty string" });
         return;
       }
       if (body?.designSystemId !== void 0 && typeof body.designSystemId !== "string") {
-        sendJson2(res, 400, { error: "designSystemId must be a string" });
+        sendJson(res, 400, { error: "designSystemId must be a string" });
         return;
       }
       if (body?.async !== void 0 && typeof body.async !== "boolean") {
-        sendJson2(res, 400, { error: "async must be a boolean" });
+        sendJson(res, 400, { error: "async must be a boolean" });
         return;
       }
       if (body?.install !== void 0 && typeof body.install !== "boolean") {
-        sendJson2(res, 400, { error: "install must be a boolean" });
+        sendJson(res, 400, { error: "install must be a boolean" });
         return;
       }
       if (body?.boot !== void 0 && typeof body.boot !== "boolean") {
-        sendJson2(res, 400, { error: "boot must be a boolean" });
+        sendJson(res, 400, { error: "boot must be a boolean" });
         return;
       }
       const str = (value) => typeof value === "string" ? value : void 0;
@@ -11318,112 +10768,112 @@ var server = http.createServer(async (req, res) => {
       };
       if (body?.async === true) {
         const outcome = await startAsyncScaffold(options);
-        sendJson2(res, 200, outcome);
+        sendJson(res, 200, outcome);
         return;
       }
-      sendJson2(res, 200, await scaffoldProject(options));
+      sendJson(res, 200, await scaffoldProject(options));
       return;
     }
     if (url.pathname === "/scaffold/status") {
       const dir = params.get("dir") ?? "";
       const jobParam = params.get("job") ?? "";
-      if (!path15.isAbsolute(dir) || jobParam === "") {
-        sendJson2(res, 400, { error: "dir must be absolute and job is required" });
+      if (!path13.isAbsolute(dir) || jobParam === "") {
+        sendJson(res, 400, { error: "dir must be absolute and job is required" });
         return;
       }
-      sendJson2(res, 200, scaffoldStatus(jobParam, dir));
+      sendJson(res, 200, scaffoldStatus(jobParam, dir));
       return;
     }
     if (url.pathname === "/server/start") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const dir = parsed?.dir;
-      if (typeof dir !== "string" || !path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be an absolute project path" });
+      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+        sendJson(res, 400, { error: "dir must be an absolute project path" });
         return;
       }
       const targetUrl = parsed?.url;
       if (typeof targetUrl !== "string" || targetUrl === "") {
-        sendJson2(res, 400, { error: "url is required" });
+        sendJson(res, 400, { error: "url is required" });
         return;
       }
       if (!isLoopbackUrl(targetUrl)) {
-        sendJson2(res, 400, { error: "url must be a loopback address" });
+        sendJson(res, 400, { error: "url must be a loopback address" });
         return;
       }
       try {
         const { config } = await readStudioConfig(dir);
         if (!config?.url?.trim()) {
-          sendJson2(res, 200, { ok: false, started: false, up: false, error: "no .design-studio.json url found" });
+          sendJson(res, 200, { ok: false, started: false, up: false, error: "no .design-studio.json url found" });
           return;
         }
         const configuredUrl = config.url.trim();
         if (!isLoopbackUrl(configuredUrl)) {
-          sendJson2(res, 200, { ok: false, started: false, up: false, error: "configured url is not loopback" });
+          sendJson(res, 200, { ok: false, started: false, up: false, error: "configured url is not loopback" });
           return;
         }
         const result = await ensureDevServer(configuredUrl, { dir, ownedOnly: true });
-        sendJson2(res, 200, { ok: result.up, started: result.started, up: result.up, error: result.error });
+        sendJson(res, 200, { ok: result.up, started: result.started, up: result.up, error: result.error });
       } catch (error) {
-        sendJson2(res, 200, { ok: false, started: false, up: false, error: error instanceof Error ? error.message : "could not start the dev server" });
+        sendJson(res, 200, { ok: false, started: false, up: false, error: error instanceof Error ? error.message : "could not start the dev server" });
       }
       return;
     }
     if (url.pathname === "/server/stop") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const dir = parsed?.dir;
-      if (typeof dir !== "string" || !path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be an absolute project path" });
+      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+        sendJson(res, 400, { error: "dir must be an absolute project path" });
         return;
       }
       try {
         const result = await stopDevServer(dir);
-        sendJson2(
+        sendJson(
           res,
           200,
           result.error ? { ok: false, stopped: result.stopped, error: result.error } : { ok: true, stopped: result.stopped }
         );
       } catch (error) {
-        sendJson2(res, 200, { ok: false, error: error instanceof Error ? error.message : "could not stop the dev server" });
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : "could not stop the dev server" });
       }
       return;
     }
     if (url.pathname === "/server/status") {
       const dir = params.get("dir") ?? "";
-      if (!path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be absolute" });
+      if (!path13.isAbsolute(dir)) {
+        sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }
       try {
-        sendJson2(res, 200, await getDevServerStatus(dir));
+        sendJson(res, 200, await getDevServerStatus(dir));
       } catch (error) {
-        sendJson2(res, 200, { up: false, port: null, error: error instanceof Error ? error.message : "could not read server status" });
+        sendJson(res, 200, { up: false, port: null, error: error instanceof Error ? error.message : "could not read server status" });
       }
       return;
     }
     if (url.pathname === "/screens") {
       const dir = params.get("dir") ?? "";
-      if (!path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be absolute" });
+      if (!path13.isAbsolute(dir)) {
+        sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }
       if (req.method === "PUT") {
@@ -11433,36 +10883,36 @@ var server = http.createServer(async (req, res) => {
         }
         let parsed;
         try {
-          parsed = JSON.parse(await readBody2(req));
+          parsed = JSON.parse(await readBody(req));
         } catch {
-          sendJson2(res, 400, { error: "body must be JSON" });
+          sendJson(res, 400, { error: "body must be JSON" });
           return;
         }
         try {
-          sendJson2(res, 200, { ...await writeScreens(dir, parsed) });
+          sendJson(res, 200, { ...await writeScreens(dir, parsed) });
         } catch (error) {
-          sendJson2(res, 400, { error: error instanceof Error ? error.message : "invalid screens registry" });
+          sendJson(res, 400, { error: error instanceof Error ? error.message : "invalid screens registry" });
         }
         return;
       }
-      sendJson2(res, 200, await readScreens(dir));
+      sendJson(res, 200, await readScreens(dir));
       return;
     }
     if (url.pathname === "/screens/sync") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const dir = parsed?.dir;
-      if (typeof dir !== "string" || !path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be an absolute workspace path" });
+      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+        sendJson(res, 400, { error: "dir must be an absolute workspace path" });
         return;
       }
       if (!await isDesignWorkspace(dir)) {
@@ -11472,25 +10922,25 @@ var server = http.createServer(async (req, res) => {
       try {
         const browser2 = getBrowser();
         if (!browser2 || !(await browser2.state()).windowOpen) {
-          sendJson2(res, 200, { ok: true, pushed: false });
+          sendJson(res, 200, { ok: true, pushed: false });
           return;
         }
         const current = getLastWorkspace()?.dir ?? watchedDir ?? browser2.currentWorkspaceDir();
-        if (current && path15.resolve(current) !== path15.resolve(dir)) {
-          sendJson2(res, 200, { ok: true, pushed: false, reason: "this workspace is not the one open on the canvas" });
+        if (current && path13.resolve(current) !== path13.resolve(dir)) {
+          sendJson(res, 200, { ok: true, pushed: false, reason: "this workspace is not the one open on the canvas" });
           return;
         }
         const change = await readScreensStrict(dir);
         const result = await applyRegistryChange(dir, change);
-        sendJson2(res, 200, { ok: true, pushed: result.pushed });
+        sendJson(res, 200, { ok: true, pushed: result.pushed });
       } catch (error) {
-        sendJson2(res, 200, { ok: false, error: error instanceof Error ? error.message : "registry sync failed" });
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : "registry sync failed" });
       }
       return;
     }
     if (url.pathname === "/picks") {
       if (req.method !== "GET") {
-        sendJson2(res, 405, { error: "GET required" });
+        sendJson(res, 405, { error: "GET required" });
         return;
       }
       const sinceRaw = params.get("since") ?? "0";
@@ -11498,82 +10948,82 @@ var server = http.createServer(async (req, res) => {
       const since = Number(sinceRaw);
       const wait = Number(waitRaw);
       if (!Number.isInteger(since) || since < 0) {
-        sendJson2(res, 400, { error: "since must be a non-negative integer" });
+        sendJson(res, 400, { error: "since must be a non-negative integer" });
         return;
       }
       if (!Number.isFinite(wait) || wait < 0) {
-        sendJson2(res, 400, { error: "wait must be a non-negative number of milliseconds" });
+        sendJson(res, 400, { error: "wait must be a non-negative number of milliseconds" });
         return;
       }
       const browser2 = getBrowser();
       if (!browser2) {
-        sendJson2(res, 200, { seq: 0, picks: [] });
+        sendJson(res, 200, { seq: 0, picks: [] });
         return;
       }
       const page = await browser2.getPicks(since, Math.min(wait, 12e3));
-      sendJson2(res, 200, page);
+      sendJson(res, 200, page);
       return;
     }
     if (url.pathname === "/picks/ack") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const body = parsed;
       if (typeof body?.seq !== "number" || !Number.isInteger(body.seq) || body.seq < 0) {
-        sendJson2(res, 400, { error: "seq must be a non-negative integer" });
+        sendJson(res, 400, { error: "seq must be a non-negative integer" });
         return;
       }
       if (typeof body.label !== "string" || body.label === "" || body.label.length > 80) {
-        sendJson2(res, 400, { error: "label must be a string of 1\u201380 characters" });
+        sendJson(res, 400, { error: "label must be a string of 1\u201380 characters" });
         return;
       }
       getBrowser()?.ackPicks(body.seq, body.label);
-      sendJson2(res, 200, { ok: true });
+      sendJson(res, 200, { ok: true });
       return;
     }
     if (url.pathname === "/agent-status") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const body = parsed;
       if (typeof body?.busy !== "boolean") {
-        sendJson2(res, 400, { error: "busy must be a boolean" });
+        sendJson(res, 400, { error: "busy must be a boolean" });
         return;
       }
       if (body.label !== void 0 && (typeof body.label !== "string" || body.label.length > 60)) {
-        sendJson2(res, 400, { error: "label must be a string of at most 60 characters" });
+        sendJson(res, 400, { error: "label must be a string of at most 60 characters" });
         return;
       }
       const label = typeof body.label === "string" && body.label !== "" ? body.label : void 0;
       updateLastWorkspaceAgentStatus(label ? { busy: body.busy, label } : { busy: body.busy });
       const browser2 = getBrowser();
       if (browser2) await browser2.setAgentStatus(label ? { busy: body.busy, label } : { busy: body.busy });
-      sendJson2(res, 200, { ok: true });
+      sendJson(res, 200, { ok: true });
       return;
     }
     if (url.pathname === "/workspaces") {
       const rootDir = await resolveWorkspaceRoot();
       const workspaces = [];
       try {
-        for (const entry of await fs13.readdir(rootDir, { withFileTypes: true })) {
+        for (const entry of await fs12.readdir(rootDir, { withFileTypes: true })) {
           if (!entry.isDirectory()) continue;
-          const dir = path15.join(rootDir, entry.name);
+          const dir = path13.join(rootDir, entry.name);
           if (await resolveConfigPath(dir) === null) continue;
           const { config } = await readStudioConfig(dir);
           const name = typeof config?.name === "string" && config.name.trim() !== "" ? config.name.trim() : entry.name;
@@ -11588,24 +11038,24 @@ var server = http.createServer(async (req, res) => {
       } catch {
       }
       workspaces.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-      sendJson2(res, 200, { root: rootDir, workspaces });
+      sendJson(res, 200, { root: rootDir, workspaces });
       return;
     }
     if (url.pathname === "/mode") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const mode = parsed?.mode;
       if (mode !== "edit" && mode !== "play") {
-        sendJson2(res, 400, { error: 'mode must be "edit" or "play"' });
+        sendJson(res, 400, { error: 'mode must be "edit" or "play"' });
         return;
       }
       updateLastWorkspaceMode(mode);
@@ -11621,17 +11071,17 @@ var server = http.createServer(async (req, res) => {
           }
         }
       }
-      sendJson2(res, 200, { ok: true, mode });
+      sendJson(res, 200, { ok: true, mode });
       return;
     }
     if (url.pathname === "/view") {
       const dir = params.get("dir") ?? "";
-      if (!path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be absolute" });
+      if (!path13.isAbsolute(dir)) {
+        sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }
       if (req.method === "PUT") {
-        sendJson2(res, 405, { error: "PUT is not supported on /view; PATCH merges per key" });
+        sendJson(res, 405, { error: "PUT is not supported on /view; PATCH merges per key" });
         return;
       }
       if (req.method === "PATCH") {
@@ -11641,40 +11091,40 @@ var server = http.createServer(async (req, res) => {
         }
         let parsed;
         try {
-          parsed = JSON.parse(await readBody2(req));
+          parsed = JSON.parse(await readBody(req));
         } catch {
-          sendJson2(res, 400, { error: "body must be JSON" });
+          sendJson(res, 400, { error: "body must be JSON" });
           return;
         }
         try {
           const patch = validateViewPatch(parsed);
           const merged = await mergeView(dir, patch);
           if (getLastWorkspace()?.dir === dir) updateLastWorkspaceView(merged);
-          sendJson2(res, 200, { ok: true });
+          sendJson(res, 200, { ok: true });
         } catch (error) {
-          sendJson2(res, 400, { error: error instanceof ViewPatchError ? error.message : "invalid view patch" });
+          sendJson(res, 400, { error: error instanceof ViewPatchError ? error.message : "invalid view patch" });
         }
         return;
       }
-      sendJson2(res, 200, await readView(dir));
+      sendJson(res, 200, await readView(dir));
       return;
     }
     if (url.pathname === "/export") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const body = parsed;
       const dir = body?.dir;
-      if (typeof dir !== "string" || !path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be an absolute workspace path" });
+      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+        sendJson(res, 400, { error: "dir must be an absolute workspace path" });
         return;
       }
       if (!await isDesignWorkspace(dir)) {
@@ -11684,44 +11134,44 @@ var server = http.createServer(async (req, res) => {
       let requested = null;
       if (body?.screens !== void 0) {
         if (!Array.isArray(body.screens) || body.screens.some((s) => typeof s !== "string")) {
-          sendJson2(res, 400, { error: "screens must be an array of screen ids" });
+          sendJson(res, 400, { error: "screens must be an array of screen ids" });
           return;
         }
         requested = body.screens;
       }
       const formats = resolveFormats(body?.formats);
       if ("error" in formats) {
-        sendJson2(res, 400, { error: formats.error });
+        sendJson(res, 400, { error: formats.error });
         return;
       }
       try {
         const browser2 = getBrowser();
         if (!browser2 || !(await browser2.state()).windowOpen) {
-          sendJson2(res, 200, { ok: false, error: "the live canvas window is not open" });
+          sendJson(res, 200, { ok: false, error: "the live canvas window is not open" });
           return;
         }
         const { config } = await readStudioConfig(dir);
         const configUrl = typeof config?.url === "string" && config.url.trim() !== "" ? config.url.trim() : null;
         if (!configUrl) {
-          sendJson2(res, 200, { ok: false, error: "no .design-studio.json url found" });
+          sendJson(res, 200, { ok: false, error: "no .design-studio.json url found" });
           return;
         }
         if (isLoopbackUrl(configUrl)) {
           const dev = await ensureDevServer(configUrl, { dir });
           if (!dev.up) {
-            sendJson2(res, 200, { ok: false, error: dev.error ?? "the dev server is not available" });
+            sendJson(res, 200, { ok: false, error: dev.error ?? "the dev server is not available" });
             return;
           }
         }
         const registry = await readScreens(dir);
         if (registry.screens.length === 0) {
-          sendJson2(res, 200, { ok: false, error: "the workspace has no screens to export" });
+          sendJson(res, 200, { ok: false, error: "the workspace has no screens to export" });
           return;
         }
         const wanted = requested ?? registry.screens.map((s) => s.id);
         const unknown = wanted.find((id) => !registry.screens.some((s) => s.id === id));
         if (unknown !== void 0) {
-          sendJson2(res, 400, { error: `unknown screen id: ${unknown}` });
+          sendJson(res, 400, { error: `unknown screen id: ${unknown}` });
           return;
         }
         const live = (await browser2.state()).screens;
@@ -11737,38 +11187,38 @@ var server = http.createServer(async (req, res) => {
           };
         });
         const started = startExportJob({ dir, screens, formats: formats.formats, browser: browser2 });
-        sendJson2(res, 200, started);
+        sendJson(res, 200, started);
       } catch (error) {
-        sendJson2(res, 200, { ok: false, error: error instanceof Error ? error.message : "export could not start" });
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : "export could not start" });
       }
       return;
     }
     if (url.pathname === "/export/status") {
       const dir = params.get("dir") ?? "";
       const jobParam = params.get("job") ?? "";
-      if (!path15.isAbsolute(dir) || jobParam === "") {
-        sendJson2(res, 400, { error: "dir must be absolute and job is required" });
+      if (!path13.isAbsolute(dir) || jobParam === "") {
+        sendJson(res, 400, { error: "dir must be absolute and job is required" });
         return;
       }
       const status = getExportStatus(dir, jobParam);
-      sendJson2(res, 200, status);
+      sendJson(res, 200, status);
       return;
     }
     if (url.pathname === "/critique") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const dir = parsed?.dir;
-      if (typeof dir !== "string" || !path15.isAbsolute(dir)) {
-        sendJson2(res, 400, { error: "dir must be an absolute workspace path" });
+      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+        sendJson(res, 400, { error: "dir must be an absolute workspace path" });
         return;
       }
       if (!await isDesignWorkspace(dir)) {
@@ -11777,7 +11227,7 @@ var server = http.createServer(async (req, res) => {
       }
       const browser2 = getBrowser();
       if (!browser2 || !(await browser2.state()).windowOpen) {
-        sendJson2(res, 200, { ok: false, error: "the live canvas window is not open" });
+        sendJson(res, 200, { ok: false, error: "the live canvas window is not open" });
         return;
       }
       const screens = browser2.getState().screens;
@@ -11808,7 +11258,7 @@ var server = http.createServer(async (req, res) => {
         }
         digestScreens.push(entry);
       }
-      sendJson2(res, 200, { screens: digestScreens, truncated: screens.length > MAX_CRITIQUE_SCREENS });
+      sendJson(res, 200, { screens: digestScreens, truncated: screens.length > MAX_CRITIQUE_SCREENS });
       return;
     }
     if (url.pathname === "/health") {
@@ -11816,65 +11266,27 @@ var server = http.createServer(async (req, res) => {
       res.end("ok");
       return;
     }
-    if (url.pathname === "/stat") {
-      const root = params.get("dir") ?? "";
-      const entry = params.get("path") ?? "";
-      if (!path15.isAbsolute(root)) {
-        sendJson2(res, 400, { error: "dir must be absolute" });
-        return;
-      }
-      const abs = await requireFile(root, entry);
-      if (!abs) {
-        sendJson2(res, 404, { error: "entry not found" });
-        return;
-      }
-      const dir = path15.dirname(abs);
-      sendJson2(res, 200, { mtime: await newestMtime(dir, abs) });
-      return;
-    }
     if (url.pathname === "/state") {
       const target = getBrowser();
       if (!target) {
-        sendJson2(res, 200, { url: "", title: "", lastPick: null, pickSeq: 0, windowOpen: false, bridgeActive: bridge.active() });
+        sendJson(res, 200, { url: "", title: "", lastPick: null, pickSeq: 0, windowOpen: false, bridgeActive: false });
         return;
       }
       const state = await target.state();
-      state.bridgeActive = bridge.active();
-      sendJson2(res, 200, state);
-      return;
-    }
-    if (url.pathname === "/bridge") {
-      if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
-        return;
-      }
-      let parsed;
-      try {
-        parsed = JSON.parse(await readBody2(req));
-      } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
-        return;
-      }
-      const body = parsed;
-      if (body?.release === true) {
-        const released = typeof body.token === "string" ? bridge.release(body.token) : false;
-        sendJson2(res, 200, { ok: released, bridgeActive: bridge.active() });
-        return;
-      }
-      const result = bridge.claim(typeof body?.token === "string" ? body.token : void 0);
-      sendJson2(res, 200, result);
+      state.bridgeActive = false;
+      sendJson(res, 200, state);
       return;
     }
     if (url.pathname === "/open") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       let parsed;
       try {
-        parsed = JSON.parse(await readBody2(req));
+        parsed = JSON.parse(await readBody(req));
       } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
+        sendJson(res, 400, { error: "body must be JSON" });
         return;
       }
       const body = parsed;
@@ -11882,15 +11294,15 @@ var server = http.createServer(async (req, res) => {
       const target = body?.url;
       if (typeof target === "string" && target !== "") {
         const dir = typeof body?.dir === "string" && body.dir !== "" ? body.dir : null;
-        if (dir && !path15.isAbsolute(dir)) {
-          sendJson2(res, 400, { error: "dir must be absolute" });
+        if (dir && !path13.isAbsolute(dir)) {
+          sendJson(res, 400, { error: "dir must be absolute" });
           return;
         }
         let started2 = false;
         if (dir || isLoopbackUrl(target)) {
           const dev = await ensureDevServer(target, { dir: dir ?? void 0 });
           if (!dev.up) {
-            sendJson2(res, 200, { ok: false, error: dev.error ?? "the dev server is not available" });
+            sendJson(res, 200, { ok: false, error: dev.error ?? "the dev server is not available" });
             return;
           }
           started2 = dev.started;
@@ -11901,24 +11313,24 @@ var server = http.createServer(async (req, res) => {
           if (dir) startRegistryWatch(dir);
           else stopRegistryWatch();
           if (nav.settled && focusRequested) await browser2.focus();
-          sendJson2(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started: started2 });
+          sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started: started2 });
         } catch (error) {
-          sendJson2(res, 200, { ok: false, error: error instanceof Error ? error.message : "open failed" });
+          sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : "open failed" });
         }
         return;
       }
       const dirValue = body?.dir;
       if (typeof dirValue !== "string" || dirValue === "") {
-        sendJson2(res, 400, { error: "url is required" });
+        sendJson(res, 400, { error: "url is required" });
         return;
       }
-      if (!path15.isAbsolute(dirValue)) {
-        sendJson2(res, 400, { error: "dir must be absolute" });
+      if (!path13.isAbsolute(dirValue)) {
+        sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }
-      const dirExists = await fs13.stat(dirValue).then((s) => s.isDirectory(), () => false);
+      const dirExists = await fs12.stat(dirValue).then((s) => s.isDirectory(), () => false);
       if (!dirExists) {
-        sendJson2(res, 200, {
+        sendJson(res, 200, {
           ok: false,
           code: "WORKSPACE_MISSING",
           error: `The canvas folder ${dirValue} no longer exists.`
@@ -11936,21 +11348,21 @@ var server = http.createServer(async (req, res) => {
       const { config } = await readStudioConfig(dirValue);
       const configUrl = typeof config?.url === "string" && config.url.trim() !== "" ? config.url.trim() : null;
       if (!configUrl) {
-        sendJson2(res, 200, { ok: false, error: "no .design-studio.json url found" });
+        sendJson(res, 200, { ok: false, error: "no .design-studio.json url found" });
         return;
       }
       let started = false;
       if (isLoopbackUrl(configUrl)) {
         const dev = await ensureDevServer(configUrl, { dir: dirValue });
         if (!dev.up) {
-          sendJson2(res, 200, { ok: false, error: dev.error ?? "the dev server is not available" });
+          sendJson(res, 200, { ok: false, error: dev.error ?? "the dev server is not available" });
           return;
         }
         started = dev.started;
       }
       const registry = await readScreens(dirValue);
       if (screenParam !== null && !registry.screens.some((s) => s.id === screenParam)) {
-        sendJson2(res, 400, { error: "unknown screen id" });
+        sendJson(res, 400, { error: "unknown screen id" });
         return;
       }
       const view = await readView(dirValue);
@@ -11964,7 +11376,7 @@ var server = http.createServer(async (req, res) => {
           setLastWorkspace({ dir: dirValue, screens: [], mode, activeScreen: null, view });
           startRegistryWatch(dirValue);
           wireBrowserHooks(browser2);
-          sendJson2(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
+          sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
         } else {
           const active = screenParam ?? viewScreens[0].id;
           const browser2 = await ensureBrowser();
@@ -11977,16 +11389,16 @@ var server = http.createServer(async (req, res) => {
           lastPushedRegistry = JSON.stringify(registry);
           if (focusRequested) await (dock ? applyDock(browser2, dock) : applyAutoDock(browser2));
           const state = await browser2.state();
-          sendJson2(res, 200, { ok: true, started, ...state });
+          sendJson(res, 200, { ok: true, started, ...state });
         }
       } catch (error) {
-        sendJson2(res, 200, { ok: false, error: error instanceof Error ? error.message : "open failed" });
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : "open failed" });
       }
       return;
     }
     if (url.pathname === "/close") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       stopRegistryWatch();
@@ -11999,85 +11411,51 @@ var server = http.createServer(async (req, res) => {
         await reapOrphanChrome();
       } catch {
       }
-      sendJson2(res, 200, { ok: true });
-      return;
-    }
-    if (url.pathname === "/highlight") {
-      if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
-        return;
-      }
-      let parsed;
-      try {
-        parsed = JSON.parse(await readBody2(req));
-      } catch {
-        sendJson2(res, 400, { error: "body must be JSON" });
-        return;
-      }
-      const selector = parsed?.selector;
-      if (typeof selector !== "string" || selector === "") {
-        sendJson2(res, 400, { error: "selector is required" });
-        return;
-      }
-      const browser2 = getBrowser();
-      if (!browser2) {
-        sendJson2(res, 200, { ok: false, error: "no live window is open" });
-        return;
-      }
-      try {
-        const highlighted = await browser2.highlight(selector);
-        if (!highlighted) {
-          sendJson2(res, 200, { ok: false, error: "selector did not match any element" });
-          return;
-        }
-        sendJson2(res, 200, { ok: true });
-      } catch (error) {
-        sendJson2(res, 200, { ok: false, error: error instanceof Error ? error.message : "highlight failed" });
-      }
+      sendJson(res, 200, { ok: true });
       return;
     }
     if (url.pathname === "/focus") {
       if (req.method !== "POST") {
-        sendJson2(res, 405, { error: "POST required" });
+        sendJson(res, 405, { error: "POST required" });
         return;
       }
       const browser2 = getBrowser();
       if (browser2) await browser2.focus();
-      sendJson2(res, 200, { ok: true });
+      sendJson(res, 200, { ok: true });
       return;
     }
     if (url.pathname === "/config") {
       const root = params.get("dir") ?? "";
-      if (!path15.isAbsolute(root)) {
-        sendJson2(res, 400, { error: "dir must be absolute" });
+      if (!path13.isAbsolute(root)) {
+        sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }
       if (req.method === "PUT") {
-        const body = await readBody2(req);
+        const body = await readBody(req);
         let parsed;
         try {
           parsed = JSON.parse(body);
         } catch {
-          sendJson2(res, 400, { error: "body must be JSON" });
+          sendJson(res, 400, { error: "body must be JSON" });
           return;
         }
         if (typeof parsed.text !== "string") {
-          sendJson2(res, 400, { error: "text is required" });
+          sendJson(res, 400, { error: "text is required" });
           return;
         }
         try {
-          sendJson2(res, 200, { ...await writeStudioConfig(root, parsed.path ?? null, parsed.text) });
+          sendJson(res, 200, { ...await writeStudioConfig(root, parsed.path ?? null, parsed.text) });
         } catch (error) {
-          sendJson2(res, 400, { error: error instanceof Error ? error.message : "invalid config" });
+          sendJson(res, 400, { error: error instanceof Error ? error.message : "invalid config" });
         }
         return;
       }
-      sendJson2(res, 200, { ...await readStudioConfig(root) });
+      sendJson(res, 200, { ...await readStudioConfig(root) });
       return;
     }
-    sendJson2(res, 404, { error: "not found" });
+    sendJson(res, 404, { error: "not found" });
   } catch (error) {
-    sendJson2(res, 500, { error: error instanceof Error ? error.message : "internal error" });
+    sendJson(res, 500, { error: error instanceof Error ? error.message : "internal error" });
   }
 });
 server.listen(PORT, "127.0.0.1", () => {

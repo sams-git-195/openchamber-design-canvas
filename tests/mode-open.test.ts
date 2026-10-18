@@ -1372,37 +1372,6 @@ test('a /picks request error falls back to wait=0 short polls every 250 ms, then
   }
 });
 
-test('a claimed bridge stands the row down; on release the queue delivers everything since the cursor (V4-5)', async () => {
-  setWorkspace(null);
-  stubToast();
-  const store = stubStorage();
-  await seedModeOn('ses_q5', store);
-  const chips = stubAttach();
-  const queue = stubPickQueue();
-  await applyState(live({ bridgeActive: true }));
-  resetPickLoop();
-  mock.timers.enable({ apis: ['setTimeout'] });
-  try {
-    let stop = false;
-    const loop = runPickLoop(() => stop);
-    await flush();
-    mock.timers.tick(5_000); await flush();
-    assert.deepEqual(queue.requests, [], 'no /picks reads while the bridge is claimed — the claim still stands the row down');
-    queue.push(queuedElement(1));
-    await applyState(live({ bridgeActive: false })); // bridge released
-    mock.timers.tick(900); await flush(); // the held loop re-checks at its idle cadence
-    assert.deepEqual(chips.map((chip) => chip.id), ['element-1'], 'the queued pick arrives on release, nothing lost');
-    assert.deepEqual(queue.acks, [{ seq: 1, label: '#e1' }]);
-    stop = true;
-    mock.timers.tick(12_000);
-    await flush(); // the timed-out long-poll answers idle → one more pacing sleep to drain
-    mock.timers.tick(1_000);
-    await loop;
-  } finally {
-    mock.timers.reset();
-  }
-});
-
 // ---- V4-4: the registry error is loud, once ----
 
 test('registryError toasts once per distinct message, repeats are silent, a clear re-arms it (V4-4)', async () => {
