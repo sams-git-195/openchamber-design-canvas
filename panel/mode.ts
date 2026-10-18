@@ -12,11 +12,25 @@
 import type { AttachIssueRequest } from '@openchamber/sdk';
 import { GUEST_COMPOSE_TEXT_MAX } from '@openchamber/sdk';
 import { DIRECTIONS, type DirectionId } from './craft.ts';
-import { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP, DESIGN_AUTHORITY, DESIGN_WORKSPACE_NOTE, IDENTITY, VERIFY_PROTOCOL, defaultCraft } from '../shared/harness-text.ts';
+import {
+  CANVAS_PROTOCOL,
+  CANVAS_PROTOCOL_CHIP,
+  DESIGN_AUTHORITY,
+  DESIGN_WORKSPACE_NOTE,
+  IDENTITY,
+  VERIFY_PROTOCOL,
+  WORKING_AGREEMENT_CHIP,
+  WORKING_AGREEMENT_COMPACT,
+  defaultCraft,
+  firstReplyContract,
+  workingAgreementChip,
+  type CraftRuleId,
+  type OptionsChoice,
+} from '../shared/harness-text.ts';
 import { DESIGN_SYSTEMS, type DesignSystemPreset } from '../shared/design-systems.ts';
 import type { CritiqueScreenDigest, ExportFormat, ExportStatusResult, ScreenInfo, StudioConfig, WorkspaceRecord } from './api.ts';
 
-export { VERIFY_PROTOCOL };
+export { VERIFY_PROTOCOL, WORKING_AGREEMENT_CHIP };
 
 /** The text cap every attach / start-session payload must respect (SDK). */
 export const GUEST_ATTACH_TEXT_MAX = 16000;
@@ -149,7 +163,36 @@ export type DesignMode = {
   fidelity: Fidelity;
   canvMode: CanvasMode;
   brief: string;
+  /** Ask clarifying questions before building (default true; old stored modes omit it). */
+  questions?: boolean;
+  /** How many directions the user wants, or 'ask' (default). */
+  options?: OptionsChoice;
+  /** The device artboards to design; omitted = not chosen yet. */
+  devices?: DeviceId[];
 };
+
+export type DeviceId = 'phone' | 'tablet' | 'desktop';
+
+/** The device artboard sizes the canvas offers (CANVAS_PROTOCOL presets). */
+export const DEVICE_PRESETS: Record<DeviceId, { label: string; width: number; height: number }> = {
+  phone: { label: 'phone', width: 390, height: 844 },
+  tablet: { label: 'tablet', width: 768, height: 1024 },
+  desktop: { label: 'desktop', width: 1440, height: 900 },
+};
+
+/** `phone 390×844 · desktop 1440×900`, or the not-chosen wording for none. */
+export function devicesLabel(devices: readonly DeviceId[] | null | undefined): string {
+  const known = (devices ?? []).filter((id) => id in DEVICE_PRESETS);
+  if (known.length === 0) return 'not chosen yet — agree them first';
+  return known.map((id) => `${DEVICE_PRESETS[id].label} ${DEVICE_PRESETS[id].width}×${DEVICE_PRESETS[id].height}`).join(' · ');
+}
+
+/** `Questions first: on · Options: ask · Devices: …` — old stored modes read as defaults. */
+export function agreementStatusLine(input: { questions?: boolean; options?: OptionsChoice; devices?: readonly DeviceId[] }): string {
+  const questions = input.questions !== false;
+  const options = input.options ?? (questions ? 'ask' : 1);
+  return `Questions first: ${questions ? 'on' : 'off'} · Options: ${options === 'ask' ? 'ask the user' : options} · Devices: ${devicesLabel(input.devices)}`;
+}
 
 export const DEFAULT_MODE: DesignMode = { on: false, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' };
 
@@ -345,7 +388,71 @@ export type DesignBriefSpec = {
    * omitted for "No design system".
    */
   designSystemId?: string | null;
+  /** The user's project directory (read-only design context), when one is open. */
+  projectDir?: string | null;
+  /** Ask clarifying questions before building (default true). */
+  questions?: boolean;
+  /** How many directions the user wants, or 'ask' (default). */
+  options?: OptionsChoice;
+  /** The device artboards to design; omitted = not chosen yet. */
+  devices?: DeviceId[];
+  /** Where the look comes from: the user's project, the chosen preset, or a new one. */
+  look?: DesignLook;
 };
+
+export type DesignLook = 'project' | 'preset' | 'new';
+
+const LOOK_HINT: Record<DesignLook, string> = {
+  project: "take it from the user's project (its tokens, theme and components)",
+  preset: 'use the chosen design-system preset',
+  new: 'a new look — propose it first',
+};
+
+/** The longest brief the session prompt carries and stays inside its budget. */
+export const BRIEF_MAX = 3000;
+
+/** The refusal for a brief over BRIEF_MAX, or null when it fits. */
+export function briefLimitError(brief: string): string | null {
+  const length = brief.trim().length;
+  if (length <= BRIEF_MAX) return null;
+  return `The design brief is too long (${length} characters; the limit is ${BRIEF_MAX}). Shorten it, then send again.`;
+}
+
+/** The craft rule sections each artifact type ships in its session prompt (budget). */
+export const CRAFT_BY_TYPE: Record<DesignType, CraftRuleId[]> = {
+  wireframe: ['layout', 'content', 'states', 'laws-of-ux', 'responsive'],
+  'hi-fi': ['layout', 'typography', 'color', 'content', 'anti-slop', 'accessibility', 'laws-of-ux', 'responsive'],
+  prototype: ['layout', 'typography', 'color', 'content', 'states', 'motion', 'accessibility', 'responsive'],
+  deck: ['layout', 'typography', 'color', 'content', 'anti-slop'],
+  custom: ['layout', 'typography', 'color', 'content', 'anti-slop', 'accessibility', 'responsive'],
+};
+
+/** The fidelity each artifact type implies. */
+export const FIDELITY_FOR_TYPE: Record<DesignType, Fidelity> = {
+  wireframe: 'wireframe',
+  'hi-fi': 'hi-fi',
+  prototype: 'interactive',
+  deck: 'hi-fi',
+  custom: 'hi-fi',
+};
+
+/**
+ * Lay a free-text brief out as one bullet per line or sentence. It only
+ * re-flows what the user wrote — never adds a heading, field or default — and
+ * running it on its own output changes nothing.
+ */
+export function structureBrief(brief: string): string {
+  const items: string[] = [];
+  for (const raw of brief.split(/\r?\n/)) {
+    const line = raw.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    for (const sentence of line.split(/(?<=[.!?])\s+(?=[A-Z0-9"'(])/)) {
+      const item = sentence.trim();
+      if (item) items.push(item);
+    }
+  }
+  return items.map((item) => `- ${item}`).join('\n');
+}
 
 /**
  * The workspace rule every prompt repeats (decision 4a): the absolute path is
@@ -361,25 +468,40 @@ export function workspacePathRule(dir: string): string {
 
 /**
  * The session's first message: what we are making and under which rules, with
- * the absolute workspace path front and centre (decision 4a). The full craft
- * rulebook ships HERE — the mode chip carries only the trimmed rules
- * (chip budget, audit #16).
+ * the absolute workspace path front and centre (decision 4a). Budget: it carries
+ * the agreement CHIP + first-reply contract (not the full `workingAgreement`),
+ * the identity, authority, the craft subset for the type (CRAFT_BY_TYPE) and
+ * VERIFY_PROTOCOL; the mode chip carries only the trimmed rules (audit #16).
  */
 export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceRecord | null): string {
   const brief = spec.brief.trim();
   const preset = findDesignSystem(spec.designSystemId);
+  const questions = spec.questions !== false;
+  const agreement = { questions: spec.questions, options: spec.options };
+  const projectDir = spec.projectDir?.trim();
   const lines: string[] = [
     `Design brief — ${spec.type}: ${TYPE_HINT[spec.type]}`,
     `Visual direction: ${directionLabel(spec.direction)}. Lock it before building.`,
     `Fidelity: ${spec.fidelity} — ${FIDELITY_HINT[spec.fidelity]}.`,
-    brief ? `Brief: ${brief}` : 'Brief: none given — ask at most 5 questions with sensible defaults, then proceed.',
+    agreementStatusLine({ questions: spec.questions, options: spec.options, devices: spec.devices }),
   ];
+  if (spec.look) lines.push(`Look: ${LOOK_HINT[spec.look]}.`);
+  if (projectDir) {
+    lines.push(`User project: ${JSON.stringify(projectDir)} — read it first for design context; never write design files there.`);
+  }
+  lines.push(
+    brief
+      ? `Brief: ${brief}`
+      : questions
+        ? 'Brief: none given — ask 3–6 questions with a bold recommended default each, then proceed.'
+        : 'Brief: none given — state your assumptions, then build.',
+  );
   if (preset) {
     lines.push(
       `Design system: ${preset.name} (${preset.category}) — its tokens and DESIGN.md are authoritative; use them as given and keep every screen inside the system.`,
     );
   }
-  lines.push('');
+  lines.push('', IDENTITY, '', workingAgreementChip(agreement), '', firstReplyContract(questions), '');
   if (workspace) {
     lines.push(
       `Design Canvas workspace: ${workspace.dir}`,
@@ -398,11 +520,9 @@ export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceR
   }
   lines.push(
     '',
-    'Design system authority: DESIGN.md and tokens.css (when present) are the workspace design system — follow them over any conflicting instinct.',
+    DESIGN_AUTHORITY,
     '',
-    defaultCraft(),
-  );
-  lines.push(
+    defaultCraft(CRAFT_BY_TYPE[spec.type]),
     '',
     'Workflow: in the live canvas (edit mode) the user clicks elements; EACH click arrives as its own reference chip with its screen id. Sending a whole artboard from its menu arrives as a `Screen: <id> (<w>×<h>) — <file>` chip with the screen URL — edit that file.',
     '',
@@ -422,9 +542,11 @@ export function workspaceOpenPrompt(workspace: WorkspaceRecord): string {
     '',
     DESIGN_WORKSPACE_NOTE,
     '',
-    'Open the Design Canvas browser and reuse what is already there; the user will point at elements to change.',
+    'Reopening this canvas: open the Design Canvas browser, then read BRIEF.md and DESIGN.md in the workspace first — they hold the agreed devices, look and chosen option. Keep to them; ask before changing any of them. The user will point at elements to change.',
     '',
     IDENTITY,
+    '',
+    WORKING_AGREEMENT_CHIP,
     '',
     DESIGN_AUTHORITY,
     '',
@@ -437,7 +559,7 @@ export function workspaceOpenPrompt(workspace: WorkspaceRecord): string {
  * Chip budget (audit #16), in order: mode state → workspace path + screens
  * protocol (the canvas workspace note + the trimmed CANVAS_PROTOCOL lines,
  * SPEC-V3-P2-SCOPE.md D8) → screens id/URL list (cap 40) → TRIMMED rules
- * (IDENTITY + design-system authority + VERIFY_PROTOCOL only — the craft
+ * (IDENTITY + the agreement chip + design-system authority + VERIFY_PROTOCOL only — the craft
  * rulebook and the FULL protocol ship via `designSessionPrompt` instead).
  * Text is capped at `GUEST_ATTACH_TEXT_MAX`.
  */
@@ -454,6 +576,7 @@ export function buildModeChip(
     `Canvas mode: ${mode.canvMode}${mode.canvMode === 'edit' ? ' — clicking an element sends a pick chip' : ' — clicks and links drive the screens'}`,
     `Artifact type: ${mode.type} — ${TYPE_HINT[mode.type]}`,
     `Visual direction: ${directionLabel(mode.direction)} · Fidelity: ${mode.fidelity}`,
+    agreementStatusLine(mode),
     mode.brief ? `Brief: ${mode.brief}` : 'Brief: the user will say or type it next.',
   ];
   if (workspace) {
@@ -478,7 +601,7 @@ export function buildModeChip(
   } else {
     lines.push('Screens: none yet — add a screen by writing `<file>.html` and adding `{id, file, title, width, height}` to screens.json at the workspace root.');
   }
-  lines.push('', IDENTITY, '', DESIGN_AUTHORITY, '', VERIFY_PROTOCOL);
+  lines.push('', IDENTITY, '', workingAgreementChip({ questions: mode.questions, options: mode.options }), '', DESIGN_AUTHORITY, '', VERIFY_PROTOCOL);
   return {
     providerId: 'design-canvas',
     id,
@@ -493,6 +616,9 @@ export function buildModeChip(
         fidelity: mode.fidelity,
         canvMode: mode.canvMode,
         brief: mode.brief.slice(0, 2000),
+        ...(mode.questions !== undefined ? { questions: mode.questions } : {}),
+        ...(mode.options !== undefined ? { options: mode.options } : {}),
+        ...(mode.devices !== undefined ? { devices: mode.devices.slice() } : {}),
       },
       workspace: workspace ? { dir: workspace.dir, name: workspace.name } : null,
       screens: screens.slice(0, MODE_CHIP_SCREEN_CAP).map((screen) => ({
@@ -527,6 +653,7 @@ export function buildCompactModeChip(
     `Canvas mode: ${mode.canvMode} · Artifact type: ${mode.type}`,
     `Workspace: ${workspace.dir}`,
     workspacePathRule(workspace.dir),
+    WORKING_AGREEMENT_COMPACT,
   ];
   if (screens.length > 0) {
     const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);

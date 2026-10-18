@@ -1948,9 +1948,9 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   // shared/harness-text.ts
   var CRAFT_RULES = {
     layout: [
-      "- Space on an 8pt grid: every gap, padding, size and offset is a multiple of 8 (4 only inside dense controls).",
+      "- Space on an 8pt grid: every gap, padding, size and offset is a multiple of 8 at each breakpoint's endpoints (4 only inside dense controls).",
       "- Lay content on a column grid per breakpoint (4 columns phone, 8 tablet, 12 desktop) with fixed gutters, and align every block to it.",
-      "- Build hierarchy by position, then size, then weight, then colour; give each view one primary action.",
+      "- Build hierarchy by position, then size, then weight, then color; give each view one primary action.",
       "- Group by proximity before borders; do not box every section in a card.",
       "- Cap text measure near 68ch and content width near 1200px; let backgrounds bleed, never lines of text.",
       "- Reuse one component per job: the same button, input, card and list row everywhere, with the same height, radius and padding.",
@@ -1969,7 +1969,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
       "- Pair a distinct display face with a readable body face, and keep each role to one family.",
       "- Set body line-height near 1.5 and tighten only display text.",
       "- Keep body measure to roughly 45\u201375 characters per line.",
-      "- Let weight, size and color carry hierarchy before you reach for decoration.",
+      "- Let position, size, weight and color carry hierarchy, in that order, before you reach for decoration.",
       "- Use tabular numerals for tables, prices, timers and any aligned data.",
       "- Limit to two or three weights per family; resist faux-bold."
     ].join("\n"),
@@ -2077,12 +2077,12 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   var DESIGN_AUTHORITY = [
     "Design-system precedence, highest first: (1) what the user says in this chat; (2) the design-system preset chosen for this canvas;",
     "(3) the user's project design system (its tokens, theme config, AGENTS.md and design docs); (4) the workspace DESIGN.md and tokens.css (when present),",
-    'once confirmed. A file marked "Status: placeholder" holds scaffold defaults, not decisions; (5) the visual direction.',
-    "Inside the chosen system do not invent colours, spacing or type values; a hardcoded value that a token already covers is a defect."
+    'once confirmed; (5) the visual direction. A file marked "Status: placeholder" holds scaffold defaults, not decisions.',
+    "Inside the chosen system do not invent colors, spacing or type values; a hardcoded value that a token already covers is a defect."
   ].join(" ");
   var DESIGN_WORKSPACE_NOTE = [
     "The canvas workspace is a Vite multi-page app: every screen is a real HTML page (root-level *.html files) listed in screens.json.",
-    'To add a screen: write `<id>.html` at the workspace root, add { "id", "file", "title", "width", "height" } to screens.json (ids [a-z0-9-], unique; width/height 200\u20138192, taken from the size presets), and add the same entry to the DS_SCREENS array in app.js.',
+    'To add a screen: write `<id>.html` at the workspace root, add { "id", "file", "title", "width", "height" } to screens.json (ids [a-z0-9-], unique; width/height 200\u20138192, prefer the size presets), and, when app.js has a DS_SCREENS array, add the same entry there.',
     "Keep index.html as a meta-refresh redirect to home.html so `vite build` keeps a valid default entry.",
     'Link between screens with plain <a href="other.html"> links; never create screens outside the workspace root.',
     "The chat session does NOT run inside the workspace: use the workspace absolute path in every file write, edit and bash call.",
@@ -2095,29 +2095,45 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     "Positions are not design content: never write x/y into screens.json; the canvas stores them in .design-studio/view.json and the user arranges artboards by hand.",
     'Variants = side-by-side artboards. "Two directions", "options", "alternatives" mean 2\u20133 complete sibling screens (ids like home-a, home-b), each its own file + entry, each at the same size unless the brief says otherwise. Never stack variants inside one file, never hide alternates behind toggles.',
     // D8 amendment 2026-10-18: desktop default artboard is 1440x900; 1280x800 remains the laptop preset. Gate widths in CRAFT_RULES.verification are test widths and stay 1280.
-    'Responsive = one artboard per real size. Presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1440\xD7900 desktop (default) \xB7 1280\xD7800 laptop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop), ids like home-phone, home-tablet, home. Artboards are viewports: content taller than the artboard scrolls inside it \u2014 never grow the artboard height to fit the page.'
+    'Responsive = one artboard per real size. Presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1440\xD7900 desktop (default) \xB7 1280\xD7800 laptop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop), ids like home-phone, home-tablet, home. Artboards are viewports: content taller than the artboard scrolls inside it \u2014 never grow the artboard height to fit the page. Other sizes are allowed within 200\u20138192.'
   ].join("\n");
   var CANVAS_PROTOCOL_CHIP = [
     'Screens are artboards on one shared canvas. The workspace-root screens.json registry maps each screen to its own .html file and its natural size: { "version": 1, "screens": [ { "id", "file", "title", "width", "height" } ] }.',
     "Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200\u20138192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.",
     '"Two directions", "options", "alternatives" mean 2\u20133 complete sibling screens, each its own file + entry \u2014 never stacked in one file, never hidden behind toggles.',
     // D8 amendment 2026-10-18: desktop default artboard is 1440x900; 1280x800 remains the laptop preset. Gate widths in CRAFT_RULES.verification are test widths and stay 1280.
-    'Size presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1440\xD7900 desktop (default) \xB7 1280\xD7800 laptop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop). Artboards are viewports; content scrolls inside them.'
+    'Size presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1440\xD7900 desktop (default) \xB7 1280\xD7800 laptop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop). Artboards are viewports; content scrolls inside them. Other sizes are allowed within 200\u20138192.'
   ].join("\n");
   var VERIFY_MANDATE = [
     "Verify at every stage, not only at the end: after each edit, before showing work, and before calling",
     "anything done. Run the cheap deterministic gates first and never claim success without having seen the",
     "page render at the breakpoints the protocol names."
   ].join(" ");
-  var WORKING_AGREEMENT_CHIP = [
-    "Working agreement: read the user's project first (AGENTS.md, design docs, theme/tokens, breakpoints) and reuse its palette, type, radii and components.",
-    "For new work, if devices, audience, key screens, content or look are open, ask 3\u20136 numbered questions with a bold recommended default each, then wait.",
-    "If the project is responsive, say so and ask which sizes to design (phone 390\xD7844, tablet 768\xD71024, desktop 1440\xD7900).",
-    "When the user wants a choice, offer 2\u20133 distinct directions as sibling artboards and let them pick.",
-    "With no project design system, propose a palette + type pairing and confirm it before building.",
-    "Picks are direct edits: do them; ask only if ambiguous.",
-    "Never claim a file changed unless your edit call on it succeeded; name the absolute workspace path when you ask or report."
-  ].join(" ");
+  function firstReplyContract(questions) {
+    const lines = [
+      "## Your first reply",
+      `- What you found in the user's project (2\u20134 lines, files cited), or "no project context".`,
+      questions ? '- Your numbered questions with bold defaults. If the brief already settles devices, audience, key screens, content and look, give an "Assumptions" list instead and build.' : '- Your "Assumptions" list, then the build.'
+    ];
+    if (questions) lines.push("- If you asked questions, stop there: no screen writes in the same reply.");
+    return lines.join("\n");
+  }
+  function workingAgreementChip(opts = {}) {
+    const questions = opts.questions !== false;
+    const options = opts.options ?? (questions ? "ask" : 1);
+    const optionsLine = options === "ask" ? questions ? "When the user wants a choice, offer 2\u20133 distinct directions as sibling artboards and let them pick." : "Options: one direction \u2014 the Assumptions list names it." : options === 1 ? "Options: the user wants one direction." : `Options: the user wants ${options} directions \u2014 build the key screen of each as sibling artboards and let them pick.`;
+    return [
+      "Working agreement: read the user's project first (AGENTS.md, design docs, theme/tokens, breakpoints) and reuse its palette, type, radii and components.",
+      questions ? "For new work, if devices, audience, key screens, content or look are open, ask 3\u20136 numbered questions with a bold recommended default each, then wait." : "The user turned questions off: skip clarifying questions; open with a short Assumptions list (devices, audience, key screens, look), then build.",
+      questions ? "If the project is responsive, say so and ask which sizes to design (phone 390\xD7844, tablet 768\xD71024, desktop 1440\xD7900)." : "State the device sizes you chose (phone 390\xD7844, tablet 768\xD71024, desktop 1440\xD7900).",
+      optionsLine,
+      questions ? "With no project design system, propose a palette + type pairing and confirm it before building." : "With no project design system, put a palette + type pairing in the Assumptions list and build.",
+      questions ? "Picks are direct edits: do them; ask only if ambiguous." : "Picks are direct edits: do them.",
+      `Never claim a file changed unless your edit call on it succeeded; name the absolute workspace path when you ${questions ? "ask or " : ""}report.`
+    ].join(" ");
+  }
+  var WORKING_AGREEMENT_CHIP = workingAgreementChip();
+  var WORKING_AGREEMENT_COMPACT = "Each pick is a direct edit of the screen file it names: make it, verify it, and ask one question only if it is ambiguous. Never claim an edit you did not make.";
 
   // panel/craft.ts
   var DIRECTIONS = {
@@ -3721,6 +3737,21 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     );
     return [...preferred, ...extras].slice(0, max).map((name) => ({ name, value: preset.tokens[name] }));
   }
+  var DEVICE_PRESETS = {
+    phone: { label: "phone", width: 390, height: 844 },
+    tablet: { label: "tablet", width: 768, height: 1024 },
+    desktop: { label: "desktop", width: 1440, height: 900 }
+  };
+  function devicesLabel(devices) {
+    const known = (devices ?? []).filter((id) => id in DEVICE_PRESETS);
+    if (known.length === 0) return "not chosen yet \u2014 agree them first";
+    return known.map((id) => `${DEVICE_PRESETS[id].label} ${DEVICE_PRESETS[id].width}\xD7${DEVICE_PRESETS[id].height}`).join(" \xB7 ");
+  }
+  function agreementStatusLine(input) {
+    const questions = input.questions !== false;
+    const options = input.options ?? (questions ? "ask" : 1);
+    return `Questions first: ${questions ? "on" : "off"} \xB7 Options: ${options === "ask" ? "ask the user" : options} \xB7 Devices: ${devicesLabel(input.devices)}`;
+  }
   var DEFAULT_MODE = { on: false, type: "hi-fi", direction: "auto", fidelity: "hi-fi", canvMode: "edit", brief: "" };
   function parseDesignArgs(raw) {
     const text = raw.trim();
@@ -3809,6 +3840,18 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   function directionLabel(value) {
     return value === "auto" ? "Auto (infer from the brief)" : DIRECTIONS[value].name;
   }
+  var LOOK_HINT = {
+    project: "take it from the user's project (its tokens, theme and components)",
+    preset: "use the chosen design-system preset",
+    new: "a new look \u2014 propose it first"
+  };
+  var CRAFT_BY_TYPE = {
+    wireframe: ["layout", "content", "states", "laws-of-ux", "responsive"],
+    "hi-fi": ["layout", "typography", "color", "content", "anti-slop", "accessibility", "laws-of-ux", "responsive"],
+    prototype: ["layout", "typography", "color", "content", "states", "motion", "accessibility", "responsive"],
+    deck: ["layout", "typography", "color", "content", "anti-slop"],
+    custom: ["layout", "typography", "color", "content", "anti-slop", "accessibility", "responsive"]
+  };
   function workspacePathRule(dir) {
     return [
       `The workspace's absolute path is ${JSON.stringify(dir)} \u2014 it is the ONLY place design files are written.`,
@@ -3819,18 +3862,28 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   function designSessionPrompt(spec, workspace) {
     const brief = spec.brief.trim();
     const preset = findDesignSystem(spec.designSystemId);
+    const questions = spec.questions !== false;
+    const agreement = { questions: spec.questions, options: spec.options };
+    const projectDir = spec.projectDir?.trim();
     const lines = [
       `Design brief \u2014 ${spec.type}: ${TYPE_HINT[spec.type]}`,
       `Visual direction: ${directionLabel(spec.direction)}. Lock it before building.`,
       `Fidelity: ${spec.fidelity} \u2014 ${FIDELITY_HINT[spec.fidelity]}.`,
-      brief ? `Brief: ${brief}` : "Brief: none given \u2014 ask at most 5 questions with sensible defaults, then proceed."
+      agreementStatusLine({ questions: spec.questions, options: spec.options, devices: spec.devices })
     ];
+    if (spec.look) lines.push(`Look: ${LOOK_HINT[spec.look]}.`);
+    if (projectDir) {
+      lines.push(`User project: ${JSON.stringify(projectDir)} \u2014 read it first for design context; never write design files there.`);
+    }
+    lines.push(
+      brief ? `Brief: ${brief}` : questions ? "Brief: none given \u2014 ask 3\u20136 questions with a bold recommended default each, then proceed." : "Brief: none given \u2014 state your assumptions, then build."
+    );
     if (preset) {
       lines.push(
         `Design system: ${preset.name} (${preset.category}) \u2014 its tokens and DESIGN.md are authoritative; use them as given and keep every screen inside the system.`
       );
     }
-    lines.push("");
+    lines.push("", IDENTITY, "", workingAgreementChip(agreement), "", firstReplyContract(questions), "");
     if (workspace) {
       lines.push(
         `Design Canvas workspace: ${workspace.dir}`,
@@ -3849,11 +3902,9 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     }
     lines.push(
       "",
-      "Design system authority: DESIGN.md and tokens.css (when present) are the workspace design system \u2014 follow them over any conflicting instinct.",
+      DESIGN_AUTHORITY,
       "",
-      defaultCraft()
-    );
-    lines.push(
+      defaultCraft(CRAFT_BY_TYPE[spec.type]),
       "",
       "Workflow: in the live canvas (edit mode) the user clicks elements; EACH click arrives as its own reference chip with its screen id. Sending a whole artboard from its menu arrives as a `Screen: <id> (<w>\xD7<h>) \u2014 <file>` chip with the screen URL \u2014 edit that file.",
       "",
@@ -3868,9 +3919,11 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       "",
       DESIGN_WORKSPACE_NOTE,
       "",
-      "Open the Design Canvas browser and reuse what is already there; the user will point at elements to change.",
+      "Reopening this canvas: open the Design Canvas browser, then read BRIEF.md and DESIGN.md in the workspace first \u2014 they hold the agreed devices, look and chosen option. Keep to them; ask before changing any of them. The user will point at elements to change.",
       "",
       IDENTITY,
+      "",
+      WORKING_AGREEMENT_CHIP,
       "",
       DESIGN_AUTHORITY,
       "",
@@ -3884,6 +3937,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       `Canvas mode: ${mode.canvMode}${mode.canvMode === "edit" ? " \u2014 clicking an element sends a pick chip" : " \u2014 clicks and links drive the screens"}`,
       `Artifact type: ${mode.type} \u2014 ${TYPE_HINT[mode.type]}`,
       `Visual direction: ${directionLabel(mode.direction)} \xB7 Fidelity: ${mode.fidelity}`,
+      agreementStatusLine(mode),
       mode.brief ? `Brief: ${mode.brief}` : "Brief: the user will say or type it next."
     ];
     if (workspace) {
@@ -3908,7 +3962,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     } else {
       lines.push("Screens: none yet \u2014 add a screen by writing `<file>.html` and adding `{id, file, title, width, height}` to screens.json at the workspace root.");
     }
-    lines.push("", IDENTITY, "", DESIGN_AUTHORITY, "", VERIFY_PROTOCOL);
+    lines.push("", IDENTITY, "", workingAgreementChip({ questions: mode.questions, options: mode.options }), "", DESIGN_AUTHORITY, "", VERIFY_PROTOCOL);
     return {
       providerId: "design-canvas",
       id,
@@ -3922,7 +3976,10 @@ ${CRAFT_RULES[id]}`).join("\n\n");
           direction: mode.direction,
           fidelity: mode.fidelity,
           canvMode: mode.canvMode,
-          brief: mode.brief.slice(0, 2e3)
+          brief: mode.brief.slice(0, 2e3),
+          ...mode.questions !== void 0 ? { questions: mode.questions } : {},
+          ...mode.options !== void 0 ? { options: mode.options } : {},
+          ...mode.devices !== void 0 ? { devices: mode.devices.slice() } : {}
         },
         workspace: workspace ? { dir: workspace.dir, name: workspace.name } : null,
         screens: screens.slice(0, MODE_CHIP_SCREEN_CAP).map((screen) => ({
@@ -3939,7 +3996,8 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       "Design Mode: ON \u2014 every pick below is a design request for this workspace.",
       `Canvas mode: ${mode.canvMode} \xB7 Artifact type: ${mode.type}`,
       `Workspace: ${workspace.dir}`,
-      workspacePathRule(workspace.dir)
+      workspacePathRule(workspace.dir),
+      WORKING_AGREEMENT_COMPACT
     ];
     if (screens.length > 0) {
       const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);

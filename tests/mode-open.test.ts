@@ -33,7 +33,7 @@ const main = await import('../panel/main.ts');
 const { NO_PROJECT_URL_MESSAGE, ATTACH_NEEDS_URL } = api;
 const { toggleMode, setProjectDirectory, setWorkspace, applyState, getModeState, getPendingOpen, loadStudioConfig, loadProjects, resolveCanvasCommand, allowResolve, startNewDesign, setSessionId, attachProjectReference, attachProjectPath, attachDroppedFiles } = main;
 const { runPickLoop, getPickCursor, resetPickLoop, applySessionSnapshot, handleSessionLifecycle, getWorkspaceState } = main;
-const { designMarkerKey, modeStorageKey, workspaceStorageKey } = await import('../panel/mode.ts');
+const { designMarkerKey, modeStorageKey, workspaceStorageKey, designSessionPrompt, briefLimitError, BRIEF_MAX } = await import('../panel/mode.ts');
 
 type StartSession = {
   providerId?: string;
@@ -1846,4 +1846,25 @@ test('isRealPane safety net: in a 1×1 panel frame (the hidden resolve pane) beg
     setWorkspace(null);
     setSessionId(null);
   }
+});
+
+// ---- P2': the session text the page sends (main.ts wires the spec fields later) ----
+
+test("P2': questions off sends an assumptions-first prompt with no numbered questions", () => {
+  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'a dog-walking app', questions: false }, { dir: 'C:\ws', name: 'ws' });
+  assert.match(text, /turned questions off/);
+  assert.doesNotMatch(text, /numbered questions/);
+  assert.match(text, /Your "Assumptions" list, then the build\./);
+  assert.match(text, /Questions first: off · Options: 1/);
+});
+
+test("P2': options 2 tells the agent the user wants 2 directions", () => {
+  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x', options: 2 }, { dir: 'C:\ws', name: 'ws' });
+  assert.match(text, /the user wants 2 directions/);
+});
+
+test("P2': a brief over BRIEF_MAX is refused with the limit", () => {
+  assert.equal(BRIEF_MAX, 3000);
+  assert.equal(briefLimitError('x'.repeat(BRIEF_MAX)), null);
+  assert.match(briefLimitError('x'.repeat(BRIEF_MAX + 1)) ?? '', /limit is 3000/);
 });
