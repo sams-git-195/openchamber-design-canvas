@@ -3025,10 +3025,24 @@ var PICK_UNACKED_WARN_MAX_MS = 8e3;
 function pickUnackedWarnMs(pending) {
   return Math.min(PICK_UNACKED_WARN_MAX_MS, PICK_UNACKED_WARN_MS + 400 * Math.max(0, pending - 1));
 }
+function pickDirKey(dir) {
+  if (!dir) return "";
+  const text = String(dir).trim().replace(/\\/g, "/");
+  const drive = /^([a-zA-Z]):\/(.)/.exec(text);
+  const base = drive ? `${drive[1].toLowerCase()}:${text.slice(2)}` : text;
+  let end = base.length;
+  while (end > 1 && base[end - 1] === "/") end -= 1;
+  return base.slice(0, end);
+}
 var PickQueue = class {
   items = [];
   latest = 0;
+  /** Watchdog/toast bookkeeping only — reads floor at `ackedByDir`. */
   acked = 0;
+  /** Per-dir ack watermarks (pickDirKey). One queue serves every chat sharing
+   *  the window, so a chat's cumulative ack must not floor another chat's held
+   *  (skipped, unacked) picks. */
+  ackedByDir = /* @__PURE__ */ new Map();
   waiters = [];
   watchdog = null;
   closed = false;
@@ -3076,13 +3090,20 @@ var PickQueue = class {
     });
   }
   /**
-   * Record the panel's consumption of everything up to `seq`. The toast rides
-   * the same `showToast` channel; a stale/lower seq is ignored (never rewinds).
+   * Record the consumption, by the row bound to `dir`, of its picks up to `seq`.
+   * The toast rides the same `showToast` channel; a stale/lower seq for that
+   * dir is ignored (never rewinds). A dir ack also covers the legacy no-dir
+   * picks up to `seq`: a row delivers those in seq order, so it had delivered
+   * every one below its last acked seq.
    */
-  ack(seq, label) {
+  ack(seq, label, dir) {
     if (!Number.isInteger(seq) || seq < 0) return;
-    if (seq <= this.acked) return;
-    this.acked = Math.max(this.acked, Math.min(seq, this.latest));
+    const key = pickDirKey(dir);
+    const mark = Math.min(seq, this.latest);
+    if (seq <= (this.ackedByDir.get(key) ?? 0)) return;
+    this.ackedByDir.set(key, Math.max(this.ackedByDir.get(key) ?? 0, mark));
+    if (key !== "") this.ackedByDir.set("", Math.max(this.ackedByDir.get("") ?? 0, mark));
+    this.acked = Math.max(this.acked, mark);
     const batch = /^(\d+) elements$/.exec(label.trim());
     this.emitToast("ok", batch ? `Added ${batch[1]} elements to chat` : `Added to chat \xB7 ${label.slice(0, PICK_LABEL_MAX)}`);
     if (this.acked >= this.latest) this.clearWatchdog();
@@ -3099,8 +3120,7 @@ var PickQueue = class {
     }
   }
   pageSince(since) {
-    const floor = Math.max(since, this.acked);
-    return this.items.filter((pick) => pick.seq > floor).slice(0, PICKS_PAGE_MAX);
+    return this.items.filter((pick) => pick.seq > Math.max(since, this.ackedByDir.get(pickDirKey(pick.dir)) ?? 0)).slice(0, PICKS_PAGE_MAX);
   }
   flushWaiters() {
     const still = [];
@@ -6203,8 +6223,8 @@ var Browser = class {
     return this.pickQueue.read(since, waitMs);
   }
   /** POST /picks/ack: records consumption and answers with the ok toast. */
-  ackPicks(seq, label) {
-    this.pickQueue.ack(seq, label);
+  ackPicks(seq, label, dir) {
+    this.pickQueue.ack(seq, label, dir);
     for (const [lastSeq, timing] of [...this.pickTimings]) {
       if (!Number.isInteger(seq) || lastSeq > seq) continue;
       this.pickTimings.delete(lastSeq);
@@ -12350,7 +12370,11 @@ var server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: "label must be a string of 1\u201380 characters" });
         return;
       }
-      getBrowser()?.ackPicks(body.seq, body.label);
+      if (body.dir !== void 0 && (typeof body.dir !== "string" || body.dir !== "" && !path14.isAbsolute(body.dir))) {
+        sendJson(res, 400, { error: "dir must be an absolute path or empty" });
+        return;
+      }
+      getBrowser()?.ackPicks(body.seq, body.label, body.dir);
       sendJson(res, 200, { ok: true });
       return;
     }

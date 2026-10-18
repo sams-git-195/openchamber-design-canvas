@@ -1172,7 +1172,7 @@ const queuedScreen = (seq: number): QueuedScreenPick => ({
  */
 function stubPickQueue() {
   const queue: QueuedPick[] = [];
-  const acks: Array<{ seq: number; label: string }> = [];
+  const acks: Array<{ seq: number; label: string; dir?: string }> = [];
   const requests: ServiceRequest[] = [];
   let latest = 0;
   let waiters: Array<{ since: number; settle: (result: StubResult) => void }> = [];
@@ -1181,7 +1181,7 @@ function stubPickQueue() {
   (api.host as unknown as { serviceRequest: (r: ServiceRequest) => Promise<StubResult> }).serviceRequest = async (request) => {
     requests.push(request);
     if (request.path === '/picks/ack') {
-      acks.push(JSON.parse(request.body ?? '{}') as { seq: number; label: string });
+      acks.push(JSON.parse(request.body ?? '{}') as { seq: number; label: string; dir?: string });
       return ok({ ok: true });
     }
     if (request.path === '/picks') {
@@ -1249,7 +1249,7 @@ test('two queued picks become two chips IN ORDER, then ONE ack with the last seq
     const loop = runPickLoop(() => stop);
     await flush();
     assert.deepEqual(chips.map((chip) => chip.id), ['element-1', 'screen-2'], 'every queued pick becomes its own chip, in seq order — a menu screen-send rides the same path (V4-10)');
-    assert.deepEqual(queue.acks, [{ seq: 2, label: 'screen home' }], 'ONE ack carrying the LAST delivered seq rides to the canvas pill');
+    assert.deepEqual(queue.acks, [{ seq: 2, label: 'screen home', dir: '' }], 'ONE ack carrying the LAST delivered seq rides to the canvas pill');
     assert.equal(getPickCursor(), 2, 'the since-cursor advanced');
     stop = true;
     mock.timers.tick(12_000);
@@ -1324,7 +1324,7 @@ test('a failed attach is NOT acked; the queue redelivers and the retry acks once
     assert.equal(getPickCursor(), 0, 'the cursor held — the queued pick comes back');
     mock.timers.tick(1_000); await flush(); // the idle-pacled loop retries: since=0 redelivers seq 4, which now lands
     assert.deepEqual(chips.map((chip) => chip.id), ['element-4'], 'the retry delivered it');
-    assert.deepEqual(queue.acks, [{ seq: 4, label: '#e4' }], 'acked exactly once');
+    assert.deepEqual(queue.acks, [{ seq: 4, label: '#e4', dir: '' }], 'acked exactly once');
     assert.equal(getPickCursor(), 4);
     stop = true;
     mock.timers.tick(12_000);
@@ -1690,6 +1690,7 @@ test('R5 (B4): a pick from another canvas dir is passed over — cursor advances
     const lines = (pickChips[0]!.text ?? '').split('\n');
     assert.ok(lines.includes('Workspace: c:/Docs/Design Canvas/site'), 'Workspace: uses the pick\'s own dir');
     assert.deepEqual(queue.acks.map((ack) => ack.seq), [2], 'the ack covers the delivered pick only — a trailing foreign pick is never acked here');
+    assert.equal(queue.acks[0]!.dir, ws, "the ack names the row's bound dir — the service floors only that dir's picks");
     assert.equal(getPickCursor(), 3, 'the cursor still moves past the foreign picks');
     stop = true;
     mock.timers.tick(12_000);
@@ -1718,10 +1719,10 @@ test('R5 (B4): a delivered page carrying N>1 elements of one batch acks "N eleme
     let stop = false;
     const loop = runPickLoop(() => stop);
     await flush();
-    assert.deepEqual(queue.acks, [{ seq: 3, label: '3 elements' }], 'one ack, counted label');
+    assert.deepEqual(queue.acks, [{ seq: 3, label: '3 elements', dir: '' }], 'one ack, counted label');
     queue.push({ ...queuedElement(4, '#solo'), batch: 'b-2' });
     await flush();
-    assert.deepEqual(queue.acks.at(-1), { seq: 4, label: '#solo' }, 'a one-element send names the element');
+    assert.deepEqual(queue.acks.at(-1), { seq: 4, label: '#solo', dir: '' }, 'a one-element send names the element');
     stop = true;
     mock.timers.tick(12_000);
     await flush();

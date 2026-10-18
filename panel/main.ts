@@ -1741,7 +1741,9 @@ async function deliverPickBatch(picks: QueuedPick[]): Promise<boolean> {
   pickCursor = advanceTo;
   if (!lastDelivered) return true; // only foreign picks: passed over, never acked here
   try {
-    await ackPicks(lastDelivered.seq, batchAckLabel(delivered, lastDelivered));
+    // The row's bound dir keys the service's per-dir watermark, so this ack
+    // never floors another chat's held picks in the shared queue.
+    await ackPicks(lastDelivered.seq, batchAckLabel(delivered, lastDelivered), state.workspace?.dir ?? '');
   } catch {
     /* the chips are in the composer; the next ack covers these seqs as well */
   }

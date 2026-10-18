@@ -1686,12 +1686,12 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   function getPicks(since, waitMs) {
     return callService("/picks", { since: String(since), wait: String(waitMs) });
   }
-  function ackPicks(seq, label) {
+  function ackPicks(seq, label, dir) {
     return callService(
       "/picks/ack",
       void 0,
       "POST",
-      JSON.stringify({ seq, label: label.slice(0, PICK_ACK_LABEL_MAX) })
+      JSON.stringify({ seq, label: label.slice(0, PICK_ACK_LABEL_MAX), ...dir !== void 0 ? { dir } : {} })
     );
   }
   function pickAckLabel(entry) {
@@ -5485,7 +5485,7 @@ ${TRUNCATED_MARKUP}` };
     pickCursor = advanceTo;
     if (!lastDelivered) return true;
     try {
-      await ackPicks(lastDelivered.seq, batchAckLabel(delivered, lastDelivered));
+      await ackPicks(lastDelivered.seq, batchAckLabel(delivered, lastDelivered), state.workspace?.dir ?? "");
     } catch {
     }
     return true;

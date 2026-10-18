@@ -155,6 +155,56 @@ test('ack watermark floors reads: an acked pick never replays at since=0, held (
   assert.equal((await queue.read(2, 0)).picks.length, 1, 'it reads at the ack watermark too');
 });
 
+test('per-dir ack watermark: a foreign chat ack never floors another dir held picks', async () => {
+  const dirA = path.resolve(tmpdir(), 'canvas-a');
+  const dirB = path.resolve(tmpdir(), 'canvas-b');
+  const queue = new PickQueue(() => undefined);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 1, additive: false, ...fakePicked(), selector: '#b1', dir: dirB });
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 2, additive: false, ...fakePicked(), selector: '#a2', dir: dirA });
+  // Chat A delivered A@2 (and skipped B@1) — its cumulative ack covers seq 1.
+  queue.ack(2, '#a2', dirA);
+  const afterA = await queue.read(0, 0);
+  assert.deepEqual(afterA.picks.map((pick) => pick.selector), ['#b1'], "B's held pick survives A's ack (the row of its own chat still delivers it)");
+  assert.deepEqual((await queue.read(2, 0)).picks, [], 'a cursor already past it does not see it');
+  // Separator/drive-case variants of B's dir land on B's key.
+  queue.ack(1, '#b1', dirB.replace(/\\/g, '/').replace(/^([A-Z]):/, (_m, d: string) => `${d.toLowerCase()}:`) + '/');
+  assert.deepEqual((await queue.read(0, 0)).picks, [], "B's own ack floors it: nothing replays at since=0");
+  queue.close();
+});
+
+test('per-dir ack watermark: own-dir held picks read while mode is off; legacy no-dir picks floor at the empty-dir watermark', async () => {
+  const dirA = path.resolve(tmpdir(), 'canvas-a');
+  const queue = new PickQueue(() => undefined);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 1, additive: false, ...fakePicked(), selector: '#a1', dir: dirA });
+  // Mode OFF: the row holds (never acks) — a remounted panel still reads it.
+  assert.deepEqual((await queue.read(0, 0)).picks.map((pick) => pick.selector), ['#a1'], 'the held own-dir pick reads at since=0');
+  queue.ack(1, '#a1', dirA);
+  assert.deepEqual((await queue.read(0, 0)).picks, [], 'once acked it never replays');
+  // Legacy (no-dir) picks key '' — an ack without dir (old panel) floors them.
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 2, additive: false, ...fakePicked(), selector: '#l2' });
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 3, additive: false, ...fakePicked(), selector: '#a3', dir: dirA });
+  queue.ack(2, '#l2');
+  assert.deepEqual((await queue.read(0, 0)).picks.map((pick) => pick.selector), ['#a3'], "the '' ack floors the legacy pick only");
+  // A dir row delivers no-dir picks in seq order, so its ack covers them too.
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 4, additive: false, ...fakePicked(), selector: '#l4' });
+  queue.ack(4, '2 elements', dirA);
+  assert.deepEqual((await queue.read(0, 0)).picks, [], "a dir ack also floors the legacy picks it delivered");
+  queue.close();
+});
+
+test('per-dir ack watermark: a long-poll waiter wakes for a held foreign pick a sibling ack already covers', async () => {
+  const dirA = path.resolve(tmpdir(), 'canvas-a');
+  const dirB = path.resolve(tmpdir(), 'canvas-b');
+  const queue = new PickQueue(() => undefined);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 1, additive: false, ...fakePicked(), selector: '#a1', dir: dirA });
+  queue.ack(1, '#a1', dirA);
+  const waiting = queue.read(0, 2000);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 2, additive: false, ...fakePicked(), selector: '#b2', dir: dirB });
+  const got = await waiting;
+  assert.deepEqual(got.picks.map((pick) => pick.selector), ['#b2'], 'the waiter gets the new pick, never the acked one');
+  queue.close();
+});
+
 // ---- V4-4/V4-17: loud registry reads + rename ---------------------------------
 
 test('readScreensStrict answers drops with reasons, clamps silently, and names parse errors', async () => {
@@ -808,6 +858,12 @@ test('v4 routes: malformed → 400, workspace-marker guards → 400, business fa
     const ack = await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 3, label: 'Home (1280×800)' }) });
     assert.equal(ack.status, 200);
     assert.deepEqual(await ack.json(), { ok: true });
+    // Per-dir watermark: `dir` is optional — absolute or '' — anything else is a 400.
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: 42 }) })).status, 400, 'non-string dir → 400');
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: 'relative/site' }) })).status, 400, 'relative dir → 400');
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: null }) })).status, 400, 'null dir → 400');
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: '' }) })).status, 200, "'' (unbound row) is accepted");
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: path.resolve(tmpdir(), 'site') }) })).status, 200, 'an absolute dir is accepted');
 
     // POST /agent-status: {busy:boolean,label?≤60}.
     assert.equal((await api('/agent-status', { method: 'POST', body: JSON.stringify({ busy: 'yes' }) })).status, 400);

@@ -144,12 +144,12 @@ export function getPicks(since: number, waitMs: number): Promise<PicksResult> {
 
 /** Confirm delivery through `seq`; the service answers the CANVAS with the
  * `Added to chat · <label>` pill — the panel only acks (V4-5). */
-export function ackPicks(seq: number, label: string): Promise<{ ok: boolean }> {
+export function ackPicks(seq: number, label: string, dir?: string): Promise<{ ok: boolean }> {
   return callService<{ ok: boolean }>(
     '/picks/ack',
     undefined,
     'POST',
-    JSON.stringify({ seq, label: label.slice(0, PICK_ACK_LABEL_MAX) }),
+    JSON.stringify({ seq, label: label.slice(0, PICK_ACK_LABEL_MAX), ...(dir !== undefined ? { dir } : {}) }),
   );
 }
 

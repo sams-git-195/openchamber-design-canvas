@@ -934,7 +934,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // V4-5: the panel confirms consumption (`{seq:int≤latest, label≤80}`); the
+    // V4-5: the panel confirms consumption (`{seq:int≤latest, label≤80, dir?}`;
+    // `dir` is the row's bound workspace — absolute, or '' when unbound — and
+    // keys the queue's per-dir watermark); the
     // service answers the shell with the "Added to chat" toast and clears the
     // unacked watchdog when the seq covers the newest push.
     if (url.pathname === '/picks/ack') {
@@ -949,7 +951,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'body must be JSON' });
         return;
       }
-      const body = parsed as { seq?: unknown; label?: unknown } | null;
+      const body = parsed as { seq?: unknown; label?: unknown; dir?: unknown } | null;
       if (typeof body?.seq !== 'number' || !Number.isInteger(body.seq) || body.seq < 0) {
         sendJson(res, 400, { error: 'seq must be a non-negative integer' });
         return;
@@ -958,7 +960,11 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'label must be a string of 1–80 characters' });
         return;
       }
-      getBrowser()?.ackPicks(body.seq, body.label);
+      if (body.dir !== undefined && (typeof body.dir !== 'string' || (body.dir !== '' && !path.isAbsolute(body.dir)))) {
+        sendJson(res, 400, { error: 'dir must be an absolute path or empty' });
+        return;
+      }
+      getBrowser()?.ackPicks(body.seq, body.label, body.dir);
       sendJson(res, 200, { ok: true });
       return;
     }

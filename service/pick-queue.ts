@@ -59,6 +59,22 @@ export function pickUnackedWarnMs(pending: number): number {
   return Math.min(PICK_UNACKED_WARN_MAX_MS, PICK_UNACKED_WARN_MS + 400 * Math.max(0, pending - 1));
 }
 
+/**
+ * The per-dir watermark key: the panel's normalizeDirPath rule (separators,
+ * drive-letter case, trailing slashes), so a pick stamped with the window's
+ * dir and the ack a row sends for its bound dir land on one key. A pick
+ * without a dir (legacy) keys ''.
+ */
+export function pickDirKey(dir: string | undefined | null): string {
+  if (!dir) return '';
+  const text = String(dir).trim().replace(/\\/g, '/');
+  const drive = /^([a-zA-Z]):\/(.)/.exec(text);
+  const base = drive ? `${drive[1]!.toLowerCase()}:${text.slice(2)}` : text;
+  let end = base.length;
+  while (end > 1 && base[end - 1] === '/') end -= 1;
+  return base.slice(0, end);
+}
+
 type Waiter = {
   since: number;
   resolve: (page: PicksPage) => void;
@@ -73,7 +89,12 @@ type Waiter = {
 export class PickQueue {
   private items: QueuedPick[] = [];
   private latest = 0;
+  /** Watchdog/toast bookkeeping only — reads floor at `ackedByDir`. */
   private acked = 0;
+  /** Per-dir ack watermarks (pickDirKey). One queue serves every chat sharing
+   *  the window, so a chat's cumulative ack must not floor another chat's held
+   *  (skipped, unacked) picks. */
+  private ackedByDir = new Map<string, number>();
   private waiters: Waiter[] = [];
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
@@ -126,13 +147,20 @@ export class PickQueue {
   }
 
   /**
-   * Record the panel's consumption of everything up to `seq`. The toast rides
-   * the same `showToast` channel; a stale/lower seq is ignored (never rewinds).
+   * Record the consumption, by the row bound to `dir`, of its picks up to `seq`.
+   * The toast rides the same `showToast` channel; a stale/lower seq for that
+   * dir is ignored (never rewinds). A dir ack also covers the legacy no-dir
+   * picks up to `seq`: a row delivers those in seq order, so it had delivered
+   * every one below its last acked seq.
    */
-  ack(seq: number, label: string): void {
+  ack(seq: number, label: string, dir?: string): void {
     if (!Number.isInteger(seq) || seq < 0) return;
-    if (seq <= this.acked) return;
-    this.acked = Math.max(this.acked, Math.min(seq, this.latest));
+    const key = pickDirKey(dir);
+    const mark = Math.min(seq, this.latest);
+    if (seq <= (this.ackedByDir.get(key) ?? 0)) return;
+    this.ackedByDir.set(key, Math.max(this.ackedByDir.get(key) ?? 0, mark));
+    if (key !== '') this.ackedByDir.set('', Math.max(this.ackedByDir.get('') ?? 0, mark));
+    this.acked = Math.max(this.acked, mark);
     // R2-fix (m12): the panel acks a multi-element send with "<N> elements"
     // (batchAckLabel); that reads as a sentence, a single element keeps its
     // label after the dot.
@@ -154,12 +182,13 @@ export class PickQueue {
   }
 
   private pageSince(since: number): QueuedPick[] {
-    // Floor every read at the ack watermark: an acked pick is delivered and must
-    // never replay — including for a remounted panel whose in-memory cursor
-    // restarted at 0 while this queue's `acked` kept the higher seq. Held
-    // (unacked) picks stay unacked, so they still read regardless of `since`.
-    const floor = Math.max(since, this.acked);
-    return this.items.filter((pick) => pick.seq > floor).slice(0, PICKS_PAGE_MAX);
+    // Floor every read at the pick's OWN dir's ack watermark: an acked pick is
+    // delivered and must never replay — including for a remounted panel whose
+    // in-memory cursor restarted at 0. Held (unacked) picks still read
+    // regardless of `since`, and another chat's ack never floors them.
+    return this.items
+      .filter((pick) => pick.seq > Math.max(since, this.ackedByDir.get(pickDirKey(pick.dir)) ?? 0))
+      .slice(0, PICKS_PAGE_MAX);
   }
 
   private flushWaiters(): void {

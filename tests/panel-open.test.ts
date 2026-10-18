@@ -765,7 +765,7 @@ test('the pick pipeline is the V4-5 queue: long-poll, ordered attach, ack after 
   assert.match(queue, /\[...picks\]\.sort\(\(a, b\) => a\.seq - b\.seq\)/, 'batches deliver in SEQ ORDER');
   assert.match(queue, /if \(!\(await addToChat\(entry\)\)\) break/, 'a failed attach stops the batch — no ack past it, the queue retries it');
   assert.match(queue, /advanceTo = entry\.seq;\s*\}\s*if \(advanceTo === pickCursor\) return false;\s*pickCursor = advanceTo;/, 'the cursor moves only past delivered (or foreign, passed-over) picks');
-  assert.match(queue, /await ackPicks\(lastDelivered\.seq, batchAckLabel\(delivered, lastDelivered\)\)/, 'ONE ack with the last delivered seq + label');
+  assert.match(queue, /await ackPicks\(lastDelivered\.seq, batchAckLabel\(delivered, lastDelivered\), state\.workspace\?\.dir \?\? ''\)/, 'ONE ack with the last delivered seq + label + the row\'s bound dir');
   assert.match(queue, /export const PICK_IDLE_POLL_MS = 150;/, 'R5: the idle pace is 150 ms');
   assert.match(queue, /if \(!pickBelongsHere\(entry\)\) \{\s*advanceTo = entry\.seq;\s*continue;\s*\}/, 'R5: a foreign-dir pick is passed over without attach or ack');
   assert.match(queue, /if \(!state\.mode\.on\) break/, 'mode-off HOLDS delivery (fence §5)');

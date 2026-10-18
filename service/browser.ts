@@ -3916,8 +3916,8 @@ export class Browser {
   }
 
   /** POST /picks/ack: records consumption and answers with the ok toast. */
-  ackPicks(seq: number, label: string): void {
-    this.pickQueue.ack(seq, label);
+  ackPicks(seq: number, label: string, dir?: string): void {
+    this.pickQueue.ack(seq, label, dir);
     // R2 (B4): close the timing line of every send this ack covers.
     for (const [lastSeq, timing] of [...this.pickTimings]) {
       if (!Number.isInteger(seq) || lastSeq > seq) continue;
