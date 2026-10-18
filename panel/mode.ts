@@ -440,21 +440,27 @@ export const FIDELITY_FOR_TYPE: Record<DesignType, Fidelity> = {
 };
 
 /**
- * Lay a free-text brief out as one bullet per line or sentence. It only
- * re-flows what the user wrote — never adds a heading, field or default — and
- * running it on its own output changes nothing.
+ * Turn a free-text brief into the senior-practice skeleton: the first sentence
+ * becomes the Goal, any remainder is kept verbatim under Notes, and every other
+ * field is left blank for the user to fill. A draft that already has a Goal line
+ * is returned untouched, so running it on its own output changes nothing.
  */
-export function structureBrief(brief: string): string {
-  const items: string[] = [];
-  for (const raw of brief.split(/\r?\n/)) {
-    const line = raw.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').replace(/\s+/g, ' ').trim();
-    if (!line) continue;
-    for (const sentence of line.split(/(?<=[.!?])\s+(?=[A-Z0-9"'(])/)) {
-      const item = sentence.trim();
-      if (item) items.push(item);
-    }
-  }
-  return items.map((item) => `- ${item}`).join('\n');
+export function structureBrief(draft: string, ctx: { devices?: readonly DeviceId[] | null } = {}): string {
+  const text = draft.trim();
+  if (/^Goal:/m.test(text)) return draft;
+  const [first = '', ...rest] = text.split(/(?<=[.!?])\s+|\n+/);
+  const devices = ctx.devices && ctx.devices.length ? ctx.devices.join(', ') : 'ask me';
+  return [
+    `Goal: ${first}`,
+    "Who it's for: ",
+    'Primary task: ',
+    'Feel / tone: ',
+    'Key screens: ',
+    `Devices: ${devices}`,
+    'Content I have (copy, data, brand assets): ',
+    'Must keep / avoid: ',
+    rest.length ? `Notes: ${rest.join(' ')}` : 'Notes: ',
+  ].join('\n');
 }
 
 /**

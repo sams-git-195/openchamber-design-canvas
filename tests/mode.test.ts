@@ -159,18 +159,47 @@ test('FIDELITY_FOR_TYPE and CRAFT_BY_TYPE cover every design type', () => {
   assert.equal(FIDELITY_FOR_TYPE.wireframe, 'wireframe');
 });
 
-test('structureBrief re-flows without inventing and is idempotent', () => {
-  const raw = 'A booking app for dog walkers. Owners book a walk in two taps!\n\n  * Phone first\n2) Real names, prices';
-  const out = structureBrief(raw);
-  assert.equal(out, '- A booking app for dog walkers.\n- Owners book a walk in two taps!\n- Phone first\n- Real names, prices');
-  assert.equal(structureBrief(out), out, 'idempotent');
-  assert.equal(structureBrief(''), '');
-  assert.equal(structureBrief('   \n '), '');
-  for (const sample of ['- 1. Foo. Bar', '- - x', 'one. 2. Two', 'Plain text with no stop', 'Hi. "Quoted" next. (paren) last']) {
-    const once = structureBrief(sample);
-    assert.equal(structureBrief(once), once, `idempotent for ${JSON.stringify(sample)}`);
-    const words = (s: string) => s.replace(/^\s*(?:[-*•]|\d+[.)])\s+/gm, '').split(/\s+/).filter((w) => !/^(?:[-*•]|\d+[.)])$/.test(w));
-    for (const word of words(once)) assert.ok(sample.includes(word), `never invents: ${word}`);
+test('structureBrief is idempotent', () => {
+  for (const sample of ['', '   \n ', 'One sentence.', 'A booking app. Phone first! Real names?\nSecond line.']) {
+    for (const devices of [null, ['phone', 'desktop']] as const) {
+      const once = structureBrief(sample, { devices });
+      assert.equal(structureBrief(once, { devices }), once, `idempotent for ${JSON.stringify(sample)}`);
+    }
+  }
+});
+
+test('structureBrief: an empty draft yields the skeleton with an empty Goal', () => {
+  const out = structureBrief('', { devices: null });
+  assert.ok(out.startsWith('Goal: \n'), 'empty Goal line');
+  assert.ok(out.includes('\nDevices: ask me\n'));
+  assert.ok(out.endsWith('\nNotes: '));
+  assert.equal(structureBrief('  \n ', { devices: null }), out);
+});
+
+test('structureBrief: a one-sentence draft lands in Goal and nothing is lost', () => {
+  const out = structureBrief('A booking app for dog walkers.', { devices: null });
+  assert.ok(out.startsWith('Goal: A booking app for dog walkers.\n'));
+  assert.ok(out.endsWith('\nNotes: '));
+});
+
+test('structureBrief: the remainder of a multi-sentence draft stays in Notes verbatim', () => {
+  const out = structureBrief('A booking app for dog walkers. Owners book a walk in two taps! Phone first?\nReal names, prices', { devices: null });
+  assert.ok(out.startsWith('Goal: A booking app for dog walkers.\n'));
+  assert.ok(out.endsWith('\nNotes: Owners book a walk in two taps! Phone first? Real names, prices'));
+});
+
+test('structureBrief: devices fill the Devices line', () => {
+  assert.ok(structureBrief('x', { devices: ['phone', 'desktop'] }).includes('\nDevices: phone, desktop\n'));
+  assert.ok(structureBrief('x', { devices: [] }).includes('\nDevices: ask me\n'));
+});
+
+test('structureBrief: always carries the Feel / tone and Primary task lines and never drops user words', () => {
+  const sentences = ['A fintech dashboard.', 'Calm and trustworthy!', 'Show balances first?', 'Use our teal brand colour.'];
+  for (const sample of ['', 'Short', sentences.join(' '), sentences.join('\n')]) {
+    const out = structureBrief(sample, { devices: ['tablet'] });
+    assert.ok(out.includes('Feel / tone: '), 'Feel / tone line');
+    assert.ok(out.includes('Primary task: '), 'Primary task line');
+    for (const part of sample.split(/(?<=[.!?])\s+|\n+/).filter(Boolean)) assert.ok(out.includes(part), `kept: ${part}`);
   }
 });
 
