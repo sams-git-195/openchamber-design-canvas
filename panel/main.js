@@ -1947,6 +1947,22 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
 
   // shared/harness-text.ts
   var CRAFT_RULES = {
+    layout: [
+      "- Space on an 8pt grid: every gap, padding, size and offset is a multiple of 8 (4 only inside dense controls).",
+      "- Lay content on a column grid per breakpoint (4 columns phone, 8 tablet, 12 desktop) with fixed gutters, and align every block to it.",
+      "- Build hierarchy by position, then size, then weight, then colour; give each view one primary action.",
+      "- Group by proximity before borders; do not box every section in a card.",
+      "- Cap text measure near 68ch and content width near 1200px; let backgrounds bleed, never lines of text.",
+      "- Reuse one component per job: the same button, input, card and list row everywhere, with the same height, radius and padding.",
+      "- When phones are a target, design the phone layout first and reflow up."
+    ].join("\n"),
+    content: [
+      "- Use real, plausible content from the brief or the user's project (names, prices, dates, copy); never lorem ipsum.",
+      "- Write copy that says what happens: verbs on buttons, plain nouns on headings, no marketing filler.",
+      "- Stress the layout with the content: one long name, one missing value, one large number.",
+      "- Give every control an accessible name; icon-only buttons carry aria-label.",
+      "- Write the words for empty, loading and error states, including the next action."
+    ].join("\n"),
     typography: [
       "- Build one modular scale (base \xD71.2, or \xD71.25 for airier layouts) and take every size from it.",
       "- Ship 6\u20138 sizes total; do not invent a new size per section.",
@@ -2031,8 +2047,10 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     ].join("\n")
   };
   var ALL_CRAFT_RULE_IDS = [
+    "layout",
     "typography",
     "color",
+    "content",
     "anti-slop",
     "states",
     "motion",
@@ -2055,37 +2073,50 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     "Oscillation: if a finding you already fixed reappears, or a gate flips across two iterations, STOP and hand back with both states. Do not keep looping.",
     "The 0\u201310 critique is advisory only; never treat it as pass/fail and never optimise for it."
   ].join("\n");
-  var IDENTITY = "You are an expert designer. HTML is your tool, not your medium: the medium is the intent, the system and the craft of the page.";
+  var IDENTITY = "You are an expert designer with senior product-design judgement. HTML is your tool, not your medium: the medium is the intent, the system and the craft of the page.";
   var DESIGN_AUTHORITY = [
-    "DESIGN.md and tokens.css (when present) are the project design system and are",
-    "authoritative: follow them over any conflicting instinct, and do not invent colours,",
-    "spacing or type values outside them. A hardcoded value that a token already covers is a defect."
+    "Design-system precedence, highest first: (1) what the user says in this chat; (2) the design-system preset chosen for this canvas;",
+    "(3) the user's project design system (its tokens, theme config, AGENTS.md and design docs); (4) the workspace DESIGN.md and tokens.css (when present),",
+    'once confirmed. A file marked "Status: placeholder" holds scaffold defaults, not decisions; (5) the visual direction.',
+    "Inside the chosen system do not invent colours, spacing or type values; a hardcoded value that a token already covers is a defect."
   ].join(" ");
   var DESIGN_WORKSPACE_NOTE = [
-    "The canvas workspace is a Vite multi-page app: every screen is a real HTML page (root-level *.html files) and screens.json lists them.",
-    'To add a screen: write `<id>.html` at the workspace root, then add { "id": "<id>", "file": "<id>.html", "title": "...", "width": 1280, "height": 800 } to the screens array in screens.json (ids are [a-z0-9-], unique; width/height 200\u20138192).',
+    "The canvas workspace is a Vite multi-page app: every screen is a real HTML page (root-level *.html files) listed in screens.json.",
+    'To add a screen: write `<id>.html` at the workspace root, add { "id", "file", "title", "width", "height" } to screens.json (ids [a-z0-9-], unique; width/height 200\u20138192, taken from the size presets), and add the same entry to the DS_SCREENS array in app.js.',
     "Keep index.html as a meta-refresh redirect to home.html so `vite build` keeps a valid default entry.",
     'Link between screens with plain <a href="other.html"> links; never create screens outside the workspace root.',
     "The chat session does NOT run inside the workspace: use the workspace absolute path in every file write, edit and bash call.",
-    "Inspect and reuse the existing app, design system and .design-studio.json; do not scaffold over existing work."
+    "The chat's working directory, when it is a project, is the user's app: read it for design context and never write design files there.",
+    "Reuse what the workspace already has (BRIEF.md, DESIGN.md, tokens.css, .design-studio.json); do not scaffold over existing work."
   ].join(" ");
   var CANVAS_PROTOCOL = [
     'Screens are artboards on one shared canvas. The workspace-root screens.json registry maps each screen to its own .html file and its natural size: { "version": 1, "screens": [ { "id", "file", "title", "width", "height" } ] }.',
     "Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200\u20138192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.",
     "Positions are not design content: never write x/y into screens.json; the canvas stores them in .design-studio/view.json and the user arranges artboards by hand.",
     'Variants = side-by-side artboards. "Two directions", "options", "alternatives" mean 2\u20133 complete sibling screens (ids like home-a, home-b), each its own file + entry, each at the same size unless the brief says otherwise. Never stack variants inside one file, never hide alternates behind toggles.',
-    'Responsive = one artboard per real size. Presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1280\xD7800 desktop (default) \xB7 1440\xD7900 large desktop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop). Other sizes are allowed within 200\u20138192.'
+    // D8 amendment 2026-10-18: desktop default artboard is 1440x900; 1280x800 remains the laptop preset. Gate widths in CRAFT_RULES.verification are test widths and stay 1280.
+    'Responsive = one artboard per real size. Presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1440\xD7900 desktop (default) \xB7 1280\xD7800 laptop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop), ids like home-phone, home-tablet, home. Artboards are viewports: content taller than the artboard scrolls inside it \u2014 never grow the artboard height to fit the page.'
   ].join("\n");
   var CANVAS_PROTOCOL_CHIP = [
     'Screens are artboards on one shared canvas. The workspace-root screens.json registry maps each screen to its own .html file and its natural size: { "version": 1, "screens": [ { "id", "file", "title", "width", "height" } ] }.',
     "Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200\u20138192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.",
     '"Two directions", "options", "alternatives" mean 2\u20133 complete sibling screens, each its own file + entry \u2014 never stacked in one file, never hidden behind toggles.',
-    'Size presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1280\xD7800 desktop (default) \xB7 1440\xD7900 large desktop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop).'
+    // D8 amendment 2026-10-18: desktop default artboard is 1440x900; 1280x800 remains the laptop preset. Gate widths in CRAFT_RULES.verification are test widths and stay 1280.
+    'Size presets: 390\xD7844 phone \xB7 768\xD71024 tablet \xB7 1440\xD7900 desktop (default) \xB7 1280\xD7800 laptop \xB7 1080\xD71080 social post \xB7 794\xD71123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop). Artboards are viewports; content scrolls inside them.'
   ].join("\n");
   var VERIFY_MANDATE = [
     "Verify at every stage, not only at the end: after each edit, before showing work, and before calling",
     "anything done. Run the cheap deterministic gates first and never claim success without having seen the",
     "page render at the breakpoints the protocol names."
+  ].join(" ");
+  var WORKING_AGREEMENT_CHIP = [
+    "Working agreement: read the user's project first (AGENTS.md, design docs, theme/tokens, breakpoints) and reuse its palette, type, radii and components.",
+    "For new work, if devices, audience, key screens, content or look are open, ask 3\u20136 numbered questions with a bold recommended default each, then wait.",
+    "If the project is responsive, say so and ask which sizes to design (phone 390\xD7844, tablet 768\xD71024, desktop 1440\xD7900).",
+    "When the user wants a choice, offer 2\u20133 distinct directions as sibling artboards and let them pick.",
+    "With no project design system, propose a palette + type pairing and confirm it before building.",
+    "Picks are direct edits: do them; ask only if ambiguous.",
+    "Never claim a file changed unless your edit call on it succeeded; name the absolute workspace path when you ask or report."
   ].join(" ");
 
   // panel/craft.ts

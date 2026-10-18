@@ -325,7 +325,7 @@ test('CANVAS_PROTOCOL ships the D8 wording verbatim: five lines, exact openings'
   assert.match(lines[1]!, /sizes 200–8192/);
   assert.match(lines[2]!, /\.design-studio\/view\.json/);
   assert.match(lines[3]!, /2–3 complete sibling screens/);
-  assert.match(lines[4]!, /390×844 phone · 768×1024 tablet · 1280×800 desktop \(default\) · 1440×900 large desktop · 1080×1080 social post · 794×1123 A4 print at 96 dpi/);
+  assert.match(lines[4]!, /390×844 phone · 768×1024 tablet · 1440×900 desktop \(default\) · 1280×800 laptop · 1080×1080 social post · 794×1123 A4 print at 96 dpi/);
   assert.match(lines[4]!, /three artboards of the same screen \(phone, tablet, desktop\)/);
 });
 
@@ -339,7 +339,7 @@ test('the full protocol ships in the session prompt; the trimmed copy ships in t
   assert.ok((chip.text ?? '').includes('Screens are artboards on one shared canvas.'));
   assert.ok((chip.text ?? '').includes('^[a-z0-9][a-z0-9-]{0,30}$'));
   assert.ok((chip.text ?? '').includes('mean 2–3 complete sibling screens'));
-  assert.ok((chip.text ?? '').includes('390×844 phone · 768×1024 tablet · 1280×800 desktop (default)'));
+  assert.ok((chip.text ?? '').includes('390×844 phone · 768×1024 tablet · 1440×900 desktop (default)'));
   assert.doesNotMatch(chip.text ?? '', /Positions are not design content/, 'the view.json positions line is not chip text');
   // The chip order (audit #16): protocol → screens → IDENTITY → authority → VERIFY_PROTOCOL.
   const t = chip.text ?? '';
