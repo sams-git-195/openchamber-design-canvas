@@ -1284,6 +1284,11 @@ type ScreenRecord = {
    *  activeScreen. Preserved across a registry rebuild only while the url is
    *  unchanged (same document); a service-driven navigation clears it. */
   bootSettled: boolean;
+  /** B1: the last board state actually pushed to the CURRENT shell document
+   *  (setScreenState). undefined = nothing pushed yet — a fresh launch or a
+   *  shell reload boots every board as 'loading', so the ready push is gated
+   *  on this, never on the service-side `state` (which can outlive a shell). */
+  shellState?: 'loading' | 'ready' | 'error';
 };
 
 
@@ -1791,6 +1796,8 @@ export class Browser {
         // F13 boot-grace: a url change (or a brand-new board) means a fresh
         // document boot — the follow disarms until that boot's 'load' settles.
         bootSettled: moved ? false : previous?.bootSettled ?? false,
+        // B1: a moved board re-boots in the shell too — re-push its state.
+        ...(!moved && previous?.shellState !== undefined ? { shellState: previous.shellState } : {}),
       });
       order.push(id);
     }
@@ -1847,11 +1854,16 @@ export class Browser {
     await this.shellEvalSettled(`__dsCanvas.setActive(${JSON.stringify(this.activeScreenId)})`);
   }
 
-  /** Best-effort settle pass over every artboard still without a live URL:
-   *  discovery/arm retries keep new frames from hanging in `loading`. */
+  /** Best-effort settle pass over every artboard still without a live URL —
+   *  or whose shell has not been told its current state (B1) — so
+   *  discovery/arm retries keep frames from hanging in `loading`. */
   private async refreshUnsettled(): Promise<void> {
     if (!this.cdp) return;
-    const pending = this.screenOrder.filter((id) => !this.screens.get(id)?.liveUrl);
+    const unsettled = (id: string): boolean => {
+      const record = this.screens.get(id);
+      return !!record && (!record.liveUrl || record.shellState !== record.state);
+    };
+    const pending = this.screenOrder.filter(unsettled);
     if (!pending.length) return;
     const deadline = Date.now() + 4000;
     while (Date.now() < deadline && this.cdp) {
@@ -1860,7 +1872,7 @@ export class Browser {
         await this.contexts?.discover().catch(() => undefined);
         await this.contexts?.initializeArtifact().catch(() => undefined);
         await this.refreshScreen(id).catch(() => undefined);
-        if (!this.screens.get(id)?.liveUrl && this.screens.get(id)?.state !== 'error') allSettled = false;
+        if (unsettled(id) && this.screens.get(id)?.state !== 'error') allSettled = false;
       }
       if (allSettled) return;
       await delay(150);
@@ -1982,6 +1994,8 @@ export class Browser {
       this.applyScreenRegistry([{ id: LEGACY_SCREEN_ID, url: this.requestedUrl }]);
       if (!this.workspaceDir) this.mode = 'play';
     }
+    // B1: the new shell boots every board as 'loading' — nothing pushed yet.
+    for (const record of this.screens.values()) record.shellState = undefined;
     // Spec §C ViewerConfig: screens/viewport/mode baked at launch; the panel
     // and routes join screen URLs before calling in (spec §B).
     this.viewer = await startViewerServer({
@@ -2782,6 +2796,9 @@ export class Browser {
     const screen=typeof value.screen==='string'&&SCREEN_ID_RE.test(value.screen)?value.screen:undefined;
     const isActive=(target?:string)=>!target||target===(this.activeScreenId??undefined);
     if(value.type==='ready'){
+      // B1: this shell document (first boot or a reload) shows every board as
+      // 'loading' — forget what the previous document was told.
+      for(const record of this.screens.values())record.shellState=undefined;
       await this.shellBridgeSettled();
       await this.contexts?.discover();
       await this.contexts?.initializeArtifact();
@@ -2790,6 +2807,10 @@ export class Browser {
       // pushes below are the only path back to truth (the baked setScreens
       // list is current because every warm mutation pushes as it records).
       if(this.screenOrder.length&&this.activeScreenId&&this.activeScreenId!==this.screenOrder[0])await this.pushShellActive();
+      // B1 re-sync: re-tell the fresh shell every board's state in the
+      // background (the shellState gate makes each ready push happen once).
+      for(const id of this.screenOrder)void this.refreshScreen(id).catch(()=>undefined);
+      void this.refreshUnsettled().catch(()=>undefined);
     }
     // V4-1: in workspace mode the legacy layout machinery is RETIRED. The
     // §3 contract removed layout/fit-size/viewport from shell emission; the
@@ -3092,7 +3113,9 @@ export class Browser {
     const dir = this.workspaceDir;
     if (!handler || !dir) return;
     const pending = handler(dir);
+    const record = screen ? this.screens.get(screen) : undefined;
     if (screen) {
+      if (record) record.shellState = 'loading';
       await this.shellEvalSettled(
         `__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: 'loading', message: 'Starting the dev server…' })})`,
         2000,
@@ -3100,6 +3123,7 @@ export class Browser {
     }
     const result = await pending.catch(() => ({ up: false, error: 'dev-server check failed' }));
     if (!result.up && screen) {
+      if (record) record.shellState = 'error';
       await this.shellEvalSettled(
         `__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: 'error', message: result.error ?? 'The dev server is not reachable' })})`,
         2000,
@@ -3223,9 +3247,12 @@ export class Browser {
         }else if(info.url!==navigation.target||context!==navigation.previous||contexts.artifactSameDocumentVersion(screen)<=navigation.sameDocumentVersion)return;
       }
       if(!isWebSafeUrl(info.url)){
-        if(info.url.startsWith('chrome-error:')&&record.state!=='error'){
-          record.state='error';
-          record.message='The preview could not be displayed. Check the dev server and CSP/X-Frame-Options embedding permissions.';
+        if(info.url.startsWith('chrome-error:')&&(record.state!=='error'||record.shellState!=='error')){
+          if(record.state!=='error'){
+            record.state='error';
+            record.message='The preview could not be displayed. Check the dev server and CSP/X-Frame-Options embedding permissions.';
+          }
+          record.shellState='error';
           await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({state:'error',message:record.message})})`).catch(()=>undefined);
           if(screen===this.activeScreenId)await this.shellEvalSettled(`__dsCanvas.setStatus({state:'error',message:${JSON.stringify(record.message)}})`).catch(()=>undefined);
         }
@@ -3240,8 +3267,12 @@ export class Browser {
       // Board state is per screen in v2 (audit #8): the artboard overlay only
       // hides when setScreenState(ready) arrives — the global setStatus does
       // not clear it — and a live-but-visible overlay silently eats clicks and
-      // captures. Push it for EVERY screen, transition-gated to stay quiet.
-      if(!wasReady){
+      // captures. Push it for EVERY screen on a real loading→ready transition
+      // OR whenever THIS shell was not last told 'ready' (B1: a fresh/reloaded
+      // shell boots boards 'loading' even when the service record still reads
+      // 'ready'; shell-local loading flips — Retry — ride the transition).
+      if(!wasReady||record.shellState!=='ready'){
+        record.shellState='ready';
         await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({state:'ready'})})`,2000).catch(()=>undefined);
       }
       if(screen===this.activeScreenId){
@@ -3279,6 +3310,7 @@ export class Browser {
     if(record&&!record.liveUrl&&record.state!=='error'){
       record.state='error';
       record.message='The preview did not become available. Check the dev server and whether CSP/X-Frame-Options permits embedding, then retry.';
+      record.shellState='error';
       await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({state:'error',message:record.message})})`).catch(()=>undefined);
       if(screen===this.activeScreenId)await this.shellEvalSettled(`__dsCanvas.setStatus({state:'error',message:${JSON.stringify(record.message)}})`).catch(()=>undefined);
     }
@@ -3361,6 +3393,7 @@ export class Browser {
         // frame's CDP session. Metadata must never independently assign src.
         // The v1 shell chrome (setStatus/setPage) belongs to the ACTIVE
         // artboard; others get setScreenState (spec §C).
+        if(target!==this.activeScreenId)record.shellState='loading';
         await this.shellEvalSettled(target===this.activeScreenId
           ? `__dsCanvas.setStatus({state:'loading'});__dsCanvas.setPage({url:${JSON.stringify(this.requestedUrl)},pages:${JSON.stringify(this.pages)},navigate:false})`
           : `__dsCanvas.setScreenState(${JSON.stringify(target)},${JSON.stringify({state:'loading'})})`);
@@ -3368,7 +3401,7 @@ export class Browser {
         const result=await this.requireCdp().send('Page.navigate',{url:this.requestedUrl,frameId:previous.frame},previous.session);
         navigation.loaderId=typeof result.loaderId==='string'?result.loaderId:undefined;navigation.responded=true;
         if(typeof result.errorText==='string'&&result.errorText){
-          record.state='error';record.message='The preview navigation failed: '+result.errorText;
+          record.state='error';record.message='The preview navigation failed: '+result.errorText;record.shellState='error';
           await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(target)},${JSON.stringify({state:'error',message:record.message})})`).catch(()=>undefined);
           if(target===this.activeScreenId)await this.shellEvalSettled(`__dsCanvas.setStatus({state:'error',message:${JSON.stringify(record.message)}})`).catch(()=>undefined);
           return {url:this.requestedUrl,title:'',settled:false};
@@ -4093,7 +4126,8 @@ export class Browser {
     // 'load' re-arms). Without this, a /close → re-/open on the SAME Browser
     // instance inherits armed records and the second boot's dom/load storm
     // would flip the restored activeScreen exactly like the original finding.
-    for (const record of this.screens.values()) record.bootSettled = false;
+    // B1: and every board's live state goes with it (resetLiveScreenState).
+    this.resetLiveScreenState();
     // F1: the handshake-recovery loop and the binding-replay queue belong to
     // the dying window — and the heartbeat starts clean for the next launch
     // (the fresh-queue comment above already claimed this intent for the
@@ -4155,6 +4189,27 @@ export class Browser {
     await this.viewer?.close();this.viewer=null;
   }
 
+  /**
+   * B1: board live state is window-scoped. A reopen takes the cold path and
+   * applyScreenRegistry keeps state/liveUrl for an unchanged url, so without
+   * this the relaunched boards come back 'ready' from the DEAD window while
+   * the fresh shell shows them 'loading' — and nothing ever re-tells it.
+   */
+  private resetLiveScreenState(): void {
+    for (const record of this.screens.values()) {
+      record.state = 'loading';
+      record.message = '';
+      record.liveUrl = '';
+      record.liveTitle = '';
+      record.bootSettled = false;
+      record.shellState = undefined;
+    }
+    this.pendingNavigations.clear();
+    this.refreshingScreens.clear();
+    this.layoutContext = null;
+    this.pages = [];
+  }
+
   /** Resolve once the child has exited or `timeoutMs` elapses. */
   private waitForExit(chrome: ChildProcess, timeoutMs: number): Promise<void> {
     if (chrome.exitCode !== null || chrome.signalCode !== null) return Promise.resolve();
@@ -4210,6 +4265,7 @@ export class Browser {
       this.shellReplayPump = null;
     }
     this.lastShellCommandAt = null;
+    this.resetLiveScreenState();
     // Join an in-flight window-close teardown so a relaunch never races it.
     if (this.quitPromise) {
       await this.quitPromise;

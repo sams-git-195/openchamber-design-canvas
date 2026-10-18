@@ -4139,7 +4139,9 @@ var Browser = class {
         message: moved ? "" : previous?.message ?? "",
         // F13 boot-grace: a url change (or a brand-new board) means a fresh
         // document boot — the follow disarms until that boot's 'load' settles.
-        bootSettled: moved ? false : previous?.bootSettled ?? false
+        bootSettled: moved ? false : previous?.bootSettled ?? false,
+        // B1: a moved board re-boots in the shell too — re-push its state.
+        ...!moved && previous?.shellState !== void 0 ? { shellState: previous.shellState } : {}
       });
       order.push(id);
     }
@@ -4190,11 +4192,16 @@ var Browser = class {
     if (!this.activeScreenId) return;
     await this.shellEvalSettled(`__dsCanvas.setActive(${JSON.stringify(this.activeScreenId)})`);
   }
-  /** Best-effort settle pass over every artboard still without a live URL:
-   *  discovery/arm retries keep new frames from hanging in `loading`. */
+  /** Best-effort settle pass over every artboard still without a live URL —
+   *  or whose shell has not been told its current state (B1) — so
+   *  discovery/arm retries keep frames from hanging in `loading`. */
   async refreshUnsettled() {
     if (!this.cdp) return;
-    const pending = this.screenOrder.filter((id) => !this.screens.get(id)?.liveUrl);
+    const unsettled = (id) => {
+      const record = this.screens.get(id);
+      return !!record && (!record.liveUrl || record.shellState !== record.state);
+    };
+    const pending = this.screenOrder.filter(unsettled);
     if (!pending.length) return;
     const deadline = Date.now() + 4e3;
     while (Date.now() < deadline && this.cdp) {
@@ -4203,7 +4210,7 @@ var Browser = class {
         await this.contexts?.discover().catch(() => void 0);
         await this.contexts?.initializeArtifact().catch(() => void 0);
         await this.refreshScreen(id).catch(() => void 0);
-        if (!this.screens.get(id)?.liveUrl && this.screens.get(id)?.state !== "error") allSettled = false;
+        if (unsettled(id) && this.screens.get(id)?.state !== "error") allSettled = false;
       }
       if (allSettled) return;
       await delay(150);
@@ -4299,6 +4306,7 @@ var Browser = class {
       this.applyScreenRegistry([{ id: LEGACY_SCREEN_ID, url: this.requestedUrl }]);
       if (!this.workspaceDir) this.mode = "play";
     }
+    for (const record of this.screens.values()) record.shellState = void 0;
     this.viewer = await startViewerServer({
       screens: this.viewerScreens(),
       viewport: this.viewport(),
@@ -4944,10 +4952,13 @@ var Browser = class {
     const screen = typeof value.screen === "string" && SCREEN_ID_RE.test(value.screen) ? value.screen : void 0;
     const isActive = (target) => !target || target === (this.activeScreenId ?? void 0);
     if (value.type === "ready") {
+      for (const record of this.screens.values()) record.shellState = void 0;
       await this.shellBridgeSettled();
       await this.contexts?.discover();
       await this.contexts?.initializeArtifact();
       if (this.screenOrder.length && this.activeScreenId && this.activeScreenId !== this.screenOrder[0]) await this.pushShellActive();
+      for (const id of this.screenOrder) void this.refreshScreen(id).catch(() => void 0);
+      void this.refreshUnsettled().catch(() => void 0);
     } else if (this.workspaceMode && (value.type === "layout" || value.type === "fit-size" || value.type === "viewport")) {
     } else if (value.type === "viewport" && isActive(screen) && [value.width, value.height].every((n) => typeof n === "number" && Number.isInteger(n) && n >= 100 && n <= 8192)) {
       ++this.layoutGeneration;
@@ -5163,7 +5174,9 @@ var Browser = class {
     const dir = this.workspaceDir;
     if (!handler || !dir) return;
     const pending = handler(dir);
+    const record = screen ? this.screens.get(screen) : void 0;
     if (screen) {
+      if (record) record.shellState = "loading";
       await this.shellEvalSettled(
         `__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: "loading", message: "Starting the dev server\u2026" })})`,
         2e3
@@ -5171,6 +5184,7 @@ var Browser = class {
     }
     const result = await pending.catch(() => ({ up: false, error: "dev-server check failed" }));
     if (!result.up && screen) {
+      if (record) record.shellState = "error";
       await this.shellEvalSettled(
         `__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: "error", message: result.error ?? "The dev server is not reachable" })})`,
         2e3
@@ -5280,9 +5294,12 @@ var Browser = class {
         } else if (info.url !== navigation.target || context !== navigation.previous || contexts.artifactSameDocumentVersion(screen) <= navigation.sameDocumentVersion) return;
       }
       if (!isWebSafeUrl(info.url)) {
-        if (info.url.startsWith("chrome-error:") && record.state !== "error") {
-          record.state = "error";
-          record.message = "The preview could not be displayed. Check the dev server and CSP/X-Frame-Options embedding permissions.";
+        if (info.url.startsWith("chrome-error:") && (record.state !== "error" || record.shellState !== "error")) {
+          if (record.state !== "error") {
+            record.state = "error";
+            record.message = "The preview could not be displayed. Check the dev server and CSP/X-Frame-Options embedding permissions.";
+          }
+          record.shellState = "error";
           await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: "error", message: record.message })})`).catch(() => void 0);
           if (screen === this.activeScreenId) await this.shellEvalSettled(`__dsCanvas.setStatus({state:'error',message:${JSON.stringify(record.message)}})`).catch(() => void 0);
         }
@@ -5296,7 +5313,8 @@ var Browser = class {
       if (info.title) record.liveTitle = info.title;
       if (!this.pages.some((page) => page.url === info.url)) this.pages.push({ id: "page-" + (this.pages.length + 1), url: info.url, label: info.title || new URL(info.url).pathname });
       else this.pages = this.pages.map((page) => page.url === info.url ? { ...page, label: info.title || page.label } : page);
-      if (!wasReady) {
+      if (!wasReady || record.shellState !== "ready") {
+        record.shellState = "ready";
         await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: "ready" })})`, 2e3).catch(() => void 0);
       }
       if (screen === this.activeScreenId) {
@@ -5328,6 +5346,7 @@ var Browser = class {
     if (record && !record.liveUrl && record.state !== "error") {
       record.state = "error";
       record.message = "The preview did not become available. Check the dev server and whether CSP/X-Frame-Options permits embedding, then retry.";
+      record.shellState = "error";
       await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: "error", message: record.message })})`).catch(() => void 0);
       if (screen === this.activeScreenId) await this.shellEvalSettled(`__dsCanvas.setStatus({state:'error',message:${JSON.stringify(record.message)}})`).catch(() => void 0);
     }
@@ -5404,6 +5423,7 @@ var Browser = class {
       record.message = "";
       record.bootSettled = false;
       try {
+        if (target !== this.activeScreenId) record.shellState = "loading";
         await this.shellEvalSettled(target === this.activeScreenId ? `__dsCanvas.setStatus({state:'loading'});__dsCanvas.setPage({url:${JSON.stringify(this.requestedUrl)},pages:${JSON.stringify(this.pages)},navigate:false})` : `__dsCanvas.setScreenState(${JSON.stringify(target)},${JSON.stringify({ state: "loading" })})`);
         if (authority && !this.contexts?.shellAuthorityCurrent(authority)) return { url: record.liveUrl, title: record.liveTitle || record.title, settled: false };
         const result = await this.requireCdp().send("Page.navigate", { url: this.requestedUrl, frameId: previous.frame }, previous.session);
@@ -5412,6 +5432,7 @@ var Browser = class {
         if (typeof result.errorText === "string" && result.errorText) {
           record.state = "error";
           record.message = "The preview navigation failed: " + result.errorText;
+          record.shellState = "error";
           await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(target)},${JSON.stringify({ state: "error", message: record.message })})`).catch(() => void 0);
           if (target === this.activeScreenId) await this.shellEvalSettled(`__dsCanvas.setStatus({state:'error',message:${JSON.stringify(record.message)}})`).catch(() => void 0);
           return { url: this.requestedUrl, title: "", settled: false };
@@ -6049,7 +6070,7 @@ var Browser = class {
     });
     this.hoverPending = null;
     this.lastHoverScreen = null;
-    for (const record of this.screens.values()) record.bootSettled = false;
+    this.resetLiveScreenState();
     this.stopShellHandshakeRecovery();
     this.stopArtifactBindingSweep();
     this.shellReplay = [];
@@ -6099,6 +6120,26 @@ var Browser = class {
     this.contexts = null;
     await this.viewer?.close();
     this.viewer = null;
+  }
+  /**
+   * B1: board live state is window-scoped. A reopen takes the cold path and
+   * applyScreenRegistry keeps state/liveUrl for an unchanged url, so without
+   * this the relaunched boards come back 'ready' from the DEAD window while
+   * the fresh shell shows them 'loading' — and nothing ever re-tells it.
+   */
+  resetLiveScreenState() {
+    for (const record of this.screens.values()) {
+      record.state = "loading";
+      record.message = "";
+      record.liveUrl = "";
+      record.liveTitle = "";
+      record.bootSettled = false;
+      record.shellState = void 0;
+    }
+    this.pendingNavigations.clear();
+    this.refreshingScreens.clear();
+    this.layoutContext = null;
+    this.pages = [];
   }
   /** Resolve once the child has exited or `timeoutMs` elapses. */
   waitForExit(chrome, timeoutMs) {
@@ -6152,6 +6193,7 @@ var Browser = class {
       this.shellReplayPump = null;
     }
     this.lastShellCommandAt = null;
+    this.resetLiveScreenState();
     if (this.quitPromise) {
       await this.quitPromise;
       this.quitPromise = null;
