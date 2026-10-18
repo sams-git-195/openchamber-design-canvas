@@ -1864,7 +1864,6 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   var DESIGN_READY_BADGE = "Canvas ready";
   var NO_CONFIG_BADGE = "No dev server yet";
   var NO_DESIGN_WORK_MESSAGE = "No canvas workspaces yet \u2014 /canvas creates one.";
-  var PANEL_SIDEBAR_HINT = "Design Canvas opens from the sidebar.";
   var NO_WORKSPACE_MESSAGE = "No canvas workspace yet \u2014 Start creates one.";
   function canvasSessionStatus(state2) {
     if (!state2.modeOn) return "Design Mode is off \u2014 turn it on to open the canvas";
@@ -4254,6 +4253,15 @@ ${TRUNCATED_MARKUP}` };
     /** The chosen design-system preset id, or null for "No design system". */
     pageDesignSystemId: null
   };
+  var REAL_PANE_MIN_PX = 64;
+  function isRealPane() {
+    const width = typeof window.innerWidth === "number" ? window.innerWidth : 0;
+    const height = typeof window.innerHeight === "number" ? window.innerHeight : 0;
+    return width >= REAL_PANE_MIN_PX && height >= REAL_PANE_MIN_PX;
+  }
+  function isHiddenResolvePane() {
+    return state.surface === "panel" && !isRealPane();
+  }
   var hintEl;
   var sessionLineEl = null;
   var pageBody = null;
@@ -4672,15 +4680,17 @@ ${TRUNCATED_MARKUP}` };
     const record = value;
     return typeof record.dir === "string" && record.dir.trim() !== "" && (record.jobId === null || typeof record.jobId === "string") && typeof record.at === "number" && Number.isFinite(record.at);
   }
-  async function armDesignModeForRow(ws, type, brief) {
-    const key = openHandoffKey(state.sessionId);
-    if (key) {
-      const handoff = { dir: ws.record.dir, jobId: ws.jobId, at: Date.now() };
-      try {
-        await host.storage.set(key, handoff);
-      } catch {
-      }
+  async function writeOpenHandoff(sessionId, dir, jobId) {
+    const key = openHandoffKey(sessionId);
+    if (!key) return;
+    const handoff = { dir, jobId, at: Date.now() };
+    try {
+      await host.storage.set(key, handoff);
+    } catch {
     }
+  }
+  async function armDesignModeForRow(ws, type, brief) {
+    await writeOpenHandoff(state.sessionId, ws.record.dir, ws.jobId);
     state.mode.on = true;
     if (type) state.mode.type = type;
     if (brief !== void 0 && brief !== "") state.mode.brief = brief;
@@ -4700,6 +4710,7 @@ ${TRUNCATED_MARKUP}` };
   var handoffInFlight = false;
   var handoffTask = null;
   async function beginOpenHandoff(timing = {}) {
+    if (isHiddenResolvePane()) return null;
     if (handoffInFlight) return handoffTask ? { task: handoffTask } : null;
     const key = openHandoffKey(state.sessionId);
     if (!key) return null;
@@ -4890,8 +4901,11 @@ ${TRUNCATED_MARKUP}` };
         state.prompt = "";
         attachPathDraft = "";
         referenceError = "";
+      } else if (state.surface === "panel") {
+        state.prompt = "";
       }
       try {
+        if (spec.workspace) await writeOpenHandoff(result.sessionId, spec.workspace.dir, null);
         await host.storage.set(modeStorageKey(result.sessionId), seedModeValue(spec.type, spec.brief));
         await host.storage.set(designMarkerKey(result.sessionId), designMarkerValue());
         if (spec.workspace) await saveWorkspaceRecord(result.sessionId, spec.workspace);
@@ -4901,7 +4915,7 @@ ${TRUNCATED_MARKUP}` };
         await host.toast({ kind: "success", message: "Design session started \u2014 its controls are in Work Status." });
       } catch {
       }
-      if (state.surface === "page") void loadDesignHome();
+      if (canLoadDesignWork()) void loadDesignHome();
       try {
         await host.openSession(result.sessionId);
       } catch (error) {
@@ -5317,7 +5331,7 @@ ${TRUNCATED_MARKUP}` };
     const wasBusy = state.sessionBusy;
     state.sessionId = session?.id ?? null;
     state.sessionBusy = session?.busy ?? false;
-    if (wasBusy !== state.sessionBusy) await reportAgentStatus(state.sessionBusy);
+    if (wasBusy !== state.sessionBusy && !isHiddenResolvePane()) await reportAgentStatus(state.sessionBusy);
     if (state.sessionBusy) {
       if (state.pendingStop) {
         state.pendingStop = null;
@@ -5329,14 +5343,16 @@ ${TRUNCATED_MARKUP}` };
       reportHonouredStop(result, request.dir);
     }
     if (changed) {
+      if (state.surface === "panel") state.workspace = null;
       await loadWorkspace();
       renderRow();
     }
     await loadMode();
+    if (state.surface === "panel") renderRail();
   }
   async function handleSessionLifecycle(event) {
     if (event.phase === "completed") {
-      void syncRegistryBackstop();
+      if (!isHiddenResolvePane()) void syncRegistryBackstop();
       if (state.pendingStop && !state.sessionBusy) {
         const request = state.pendingStop;
         const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
@@ -5555,6 +5571,7 @@ ${TRUNCATED_MARKUP}` };
   async function readStudioConfig(reportErrors) {
     const dir = workspaceDir();
     if (!dir) return;
+    if (isHiddenResolvePane()) return;
     if (configReadInFlight) return;
     configReadInFlight = true;
     try {
@@ -5577,6 +5594,10 @@ ${TRUNCATED_MARKUP}` };
   }
   function rerender() {
     if (state.surface === "page") renderPage();
+    else if (state.surface === "panel") renderRail();
+  }
+  function canLoadDesignWork() {
+    return state.surface === "page" || state.surface === "panel" && railWorkEl !== null && isRealPane();
   }
   async function loadProjects() {
     let snapshot;
@@ -6641,10 +6662,11 @@ Source: ${reference.sourceDirectory}`;
       modeToggleBtn.classList.toggle("on", state.mode.on);
     }
     renderSessionStatus();
+    renderRailControls();
   }
   function surfaceKind(surface) {
     if (surface === "status") return "row";
-    if (surface === "panel") return "note";
+    if (surface === "panel") return "rail";
     if (surface === "page") return "page";
     return "none";
   }
@@ -6751,18 +6773,212 @@ Source: ${reference.sourceDirectory}`;
       buildRow(root);
       return;
     }
-    if (kind === "note") {
-      buildPanelNote(root);
+    if (kind === "rail") {
+      buildRail(root);
       return;
     }
     if (kind === "page") {
       buildPage(root);
     }
   }
-  function buildPanelNote(root) {
-    const wrap = q("div", "ds ds-panel-note");
-    wrap.append(q("p", "ds-panel-note-line", PANEL_SIDEBAR_HINT));
+  var RAIL_POLL_MS = 2e3;
+  var RAIL_CLAIM_DELAY_MS = 4e3;
+  var railClaimDelayMs = RAIL_CLAIM_DELAY_MS;
+  var RAIL_FOOTER_HINT = "Full home: Design Canvas in the sidebar.";
+  var railStatusEl = null;
+  var railPrimaryBtn = null;
+  var railPrimaryHintEl = null;
+  var railPromptEl = null;
+  var railStartBtn = null;
+  var railErrorEl = null;
+  var railWorkEl = null;
+  var railBusy = false;
+  var railLive = false;
+  var railWorkLoaded = false;
+  function buildRail(root) {
+    const wrap = q("div", "ds ds-rail");
+    railStatusEl = q("div", "ds-rail-status");
+    railStatusEl.setAttribute("role", "status");
+    railPrimaryBtn = q("button", "primary ds-rail-primary");
+    railPrimaryBtn.addEventListener("click", () => void onRailPrimaryClick());
+    railPrimaryHintEl = q("div", "ds-rail-hint");
+    const brief = q("div", "ds-rail-brief");
+    railPromptEl = q("textarea", "ds-rail-input");
+    railPromptEl.rows = 3;
+    railPromptEl.placeholder = "Describe a new design\u2026";
+    railPromptEl.setAttribute("aria-label", "Design brief");
+    railPromptEl.value = state.prompt;
+    railPromptEl.addEventListener("input", () => {
+      state.prompt = railPromptEl?.value ?? "";
+      renderRailControls();
+    });
+    railPromptEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        void onRailStartDesign();
+      }
+    });
+    railStartBtn = q("button", "ds-rail-start", "Start design");
+    railStartBtn.title = "Start a new design chat with this brief";
+    railStartBtn.addEventListener("click", () => void onRailStartDesign());
+    railErrorEl = q("div", "ds-home-warn ds-rail-error");
+    railErrorEl.setAttribute("role", "alert");
+    brief.append(railPromptEl, railStartBtn, railErrorEl);
+    railWorkEl = q("div", "ds-rail-work");
+    const footer = q("div", "ds-rail-footer", RAIL_FOOTER_HINT);
+    wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, footer);
     root.append(wrap);
+    window.addEventListener("resize", onRailWake);
+    window.addEventListener("focus", onRailWake);
+    document.addEventListener("visibilitychange", onRailWake);
+    renderRail();
+  }
+  function railStatusText() {
+    if (!state.sessionId) return "This chat has not started yet.";
+    const ws = state.workspace;
+    if (!ws) return "No canvas for this chat yet.";
+    return canvasSessionStatus({ modeOn: state.mode.on, workspaceDir: ws.dir, wsReady: projectReady(currentConfig()) });
+  }
+  function renderRailControls() {
+    if (!railPrimaryBtn) return;
+    if (railStatusEl) {
+      railStatusEl.textContent = railStatusText();
+      railStatusEl.classList.toggle("off", !state.workspace || !state.mode.on);
+    }
+    const working = railBusy || state.serverPending;
+    railPrimaryBtn.textContent = working ? "Working\u2026" : state.workspace ? "Open canvas" : "Create canvas";
+    railPrimaryBtn.disabled = working || !state.sessionId;
+    railPrimaryBtn.title = !state.sessionId ? NO_SESSION_HINT : state.workspace ? state.windowOpen ? "Raise the live canvas window" : "Open the live canvas for this chat" : "Create a Design Canvas workspace for this chat";
+    if (railPrimaryHintEl) {
+      railPrimaryHintEl.textContent = state.sessionId ? "" : NO_SESSION_HINT;
+      railPrimaryHintEl.hidden = Boolean(state.sessionId);
+    }
+    if (railPromptEl) {
+      if (railPromptEl.value !== state.prompt) railPromptEl.value = state.prompt;
+      railPromptEl.disabled = state.pageBusy;
+    }
+    if (railStartBtn) {
+      const ready = canSend();
+      railStartBtn.disabled = !ready;
+      railStartBtn.textContent = state.pageBusy ? "Starting\u2026" : "Start design";
+      railStartBtn.setAttribute("aria-busy", String(state.pageBusy));
+    }
+    if (railErrorEl) {
+      railErrorEl.textContent = state.pageError;
+      railErrorEl.hidden = state.pageError === "";
+    }
+  }
+  function renderRailWork() {
+    if (!railWorkEl) return;
+    if (!isRealPane() || !railWorkLoaded) {
+      railWorkEl.replaceChildren();
+      return;
+    }
+    railWorkEl.replaceChildren(renderCanvasSection());
+  }
+  function renderRail() {
+    renderRailControls();
+    renderRailWork();
+  }
+  async function onRailPrimaryClick() {
+    if (railBusy || state.serverPending || !isRealPane()) return;
+    if (!state.sessionId) {
+      await host.toast({ kind: "error", message: NO_SESSION_MESSAGE });
+      return;
+    }
+    railBusy = true;
+    renderRailControls();
+    try {
+      if (state.workspace) {
+        if (state.windowOpen) {
+          try {
+            await focusLive();
+          } catch (error) {
+            setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          }
+          return;
+        }
+        await handRailOpenToRow({ record: state.workspace, jobId: null });
+        return;
+      }
+      const prepared = await prepareCanvasWorkspace("", state.sessionId, modeScaffoldChoice());
+      if ("error" in prepared) {
+        if (prepared.noSession) await host.toast({ kind: "error", message: NO_SESSION_MESSAGE });
+        return;
+      }
+      await handRailOpenToRow(prepared);
+    } finally {
+      railBusy = false;
+      renderRail();
+    }
+  }
+  async function handRailOpenToRow(ws) {
+    const sessionId = state.sessionId;
+    await armDesignModeForRow(ws, null, void 0);
+    renderRailControls();
+    await sleep(railClaimDelayMs);
+    if (!isRealPane() || state.sessionId !== sessionId) return;
+    const claimed = await beginOpenHandoff();
+    if (claimed) await claimed.task;
+  }
+  async function onRailStartDesign() {
+    if (!canSend()) return;
+    await startNewDesign();
+    renderRail();
+  }
+  async function refreshRail() {
+    if (!isRealPane() || document.visibilityState !== "visible") return;
+    const sessionId = state.sessionId;
+    if (sessionId) {
+      const record = await readStoredWorkspace(sessionId);
+      if (sessionId === state.sessionId) {
+        if (record && !(state.workspace && sameDirPath(state.workspace.dir, record.dir))) bindWorkspace(record);
+        else if (!record && state.workspace && !railBusy) state.workspace = null;
+      }
+      await syncModeFromStorage();
+    }
+    try {
+      state.windowOpen = (await getState()).windowOpen === true;
+    } catch {
+    }
+    renderRailControls();
+  }
+  async function loadRailWork() {
+    if (!isRealPane()) return;
+    railWorkLoaded = true;
+    await loadDesignHome();
+  }
+  function startRailLive() {
+    if (railLive || state.surface !== "panel" || !isRealPane()) return;
+    railLive = true;
+    void refreshRail();
+    void loadRailWork();
+    setInterval(() => void refreshRail(), RAIL_POLL_MS);
+  }
+  function onRailWake() {
+    if (!isRealPane()) return;
+    if (!railLive) {
+      startRailLive();
+      return;
+    }
+    if (document.visibilityState !== "visible") return;
+    void refreshRail();
+    void loadRailWork();
+  }
+  function mountSurface(root) {
+    build(root);
+    setStatus("Loading\u2026");
+    void loadMode();
+    void loadWorkspace();
+    void loadStudioConfig();
+    const kind = surfaceKind(state.surface);
+    if (kind === "row") {
+      void poll();
+      setInterval(() => void poll(), POLL_MS);
+      startPickLoop();
+    } else if (kind === "rail") {
+      startRailLive();
+    }
   }
   async function main() {
     const root = document.getElementById("root");
@@ -6777,17 +6993,7 @@ Source: ${reference.sourceDirectory}`;
       state.resolveAllowed = context.surface === "panel" || context.surface === "page";
       if (started) return;
       started = true;
-      build(root);
-      setStatus("Loading\u2026");
-      void loadMode();
-      void loadWorkspace();
-      void loadStudioConfig();
-      const kind = surfaceKind(state.surface);
-      if (kind === "row") {
-        void poll();
-        setInterval(() => void poll(), POLL_MS);
-        startPickLoop();
-      }
+      mountSurface(root);
     });
     host.onSession((session) => {
       void applySessionSnapshot(session);
@@ -6887,6 +7093,9 @@ Source: ${reference.sourceDirectory}`;
   }
   function resetServerAnnouncements() {
     serverAnnouncements.length = 0;
+  }
+  function setRailClaimDelay(ms) {
+    railClaimDelayMs = ms ?? RAIL_CLAIM_DELAY_MS;
   }
   void main();
 })();

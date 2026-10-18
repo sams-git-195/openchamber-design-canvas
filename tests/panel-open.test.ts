@@ -9,7 +9,11 @@ import { readFile } from 'node:fs/promises';
 
 type ServiceRequest = { method: string; path: string; query?: Record<string, string>; body?: string };
 
+// A real-sized frame (the rail tab / the row): the hidden 1×1 `/canvas`
+// resolve pane is exercised on its own in rail.test.ts.
 const shim = {
+  innerWidth: 1024,
+  innerHeight: 768,
   addEventListener: () => undefined,
   removeEventListener: () => undefined,
   parent: { postMessage: () => undefined },
@@ -24,7 +28,7 @@ const api = await import('../panel/api.ts');
 const main = await import('../panel/main.ts');
 const {
   ATTACH_NEEDS_URL, DESIGN_READY_BADGE, NO_CONFIG_BADGE, NO_DESIGN_WORK_MESSAGE, NO_PROJECT_URL_MESSAGE,
-  NO_WORKSPACE_MESSAGE, PANEL_SIDEBAR_HINT, PICK_HINT, WORKSPACE_SLUG_LIMIT,
+  NO_WORKSPACE_MESSAGE, PICK_HINT, WORKSPACE_SLUG_LIMIT,
   ackPicks, allProjectsFromSnapshot, canvasSessionStatus, canvasSlug, closeLive, contrastRatio, countOtherActiveDesignSessions,
   focusLive, formatOpenStatus, formatWindowStatus, getPicks, getScreens, getScaffoldStatus, getState, getWorkspaces,
   isLoopbackUrl, isModeChipData, isWorkspaceRecord, joinWorkspaceDir, joinWorkspaceSessions, normalizeDirPath,
@@ -350,7 +354,6 @@ test('the list copy is fixed', () => {
   assert.equal(DESIGN_READY_BADGE, 'Canvas ready');
   assert.equal(NO_CONFIG_BADGE, 'No dev server yet');
   assert.equal(NO_DESIGN_WORK_MESSAGE, 'No canvas workspaces yet — /canvas creates one.');
-  assert.equal(PANEL_SIDEBAR_HINT, 'Design Canvas opens from the sidebar.');
   assert.equal(NO_WORKSPACE_MESSAGE, 'No canvas workspace yet — Start creates one.');
   assert.match(PICK_HINT, /^Click an element in edit mode to add a reference$/, 'V4: edit-mode click is the pick gesture (no ⌘ needed with hover outlines, V4-6)');
   assert.match(ATTACH_NEEDS_URL, /http\(s\)/);
@@ -500,11 +503,11 @@ test('referenceText stamps the local pick time when given a date', () => {
   assert.equal((text.match(/Picked at/g) ?? []).length, 1, 'the moment line appears once');
 });
 
-// ---- surface dispatch + panel note ----
+// ---- surface dispatch + the rail ----
 
-test('surfaceKind maps status to the row, panel to its note, page to the home', () => {
+test('surfaceKind maps status to the row, panel to the rail, page to the home', () => {
   assert.equal(surfaceKind('status'), 'row');
-  assert.equal(surfaceKind('panel'), 'note');
+  assert.equal(surfaceKind('panel'), 'rail');
   assert.equal(surfaceKind('background'), 'none');
   assert.equal(surfaceKind('dialog'), 'none');
   assert.equal(surfaceKind('popover'), 'none');
@@ -512,11 +515,19 @@ test('surfaceKind maps status to the row, panel to its note, page to the home', 
   assert.equal(surfaceKind(''), 'none');
 });
 
-test('the rail panel surface renders only its one-line pointer', async () => {
+test('the rail panel surface builds the rail: primary button, brief box, work list, sidebar pointer', async () => {
   const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
-  assert.match(text, /function buildPanelNote\(/, 'a dedicated panel-note builder');
-  assert.match(text, /q\('p', 'ds-panel-note-line', PANEL_SIDEBAR_HINT\)/, 'the one line is the whole panel surface');
-  assert.match(text, /kind === 'note'[\s\S]*buildPanelNote\(root\)/, 'the panel surface draws the note');
+  assert.doesNotMatch(text, /buildPanelNote|PANEL_SIDEBAR_HINT|ds-panel-note/, 'the note-only panel is gone');
+  assert.match(text, /kind === 'rail'[\s\S]*buildRail\(root\)/, 'the panel surface draws the rail');
+  const rail = text.slice(text.indexOf('export function buildRail('), text.indexOf("/** The rail's one status line"));
+  assert.match(rail, /railPrimaryBtn = q<HTMLButtonElement>\('button', 'primary ds-rail-primary'\)/, 'one full-width primary action');
+  assert.match(rail, /railPromptEl = q<HTMLTextAreaElement>\('textarea', 'ds-rail-input'\)/, 'a compact brief box');
+  assert.match(rail, /railPromptEl\.rows = 3/);
+  assert.match(rail, /railWorkEl = q\('div', 'ds-rail-work'\)/, 'the work list container');
+  assert.match(text, /const RAIL_FOOTER_HINT = 'Full home: Design Canvas in the sidebar\.'/, 'a text hint, not a button (openSurface cannot open the sidebar page)');
+  const css = await readFile(new URL('../panel/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.ds-rail \{/, 'the rail has its own styles');
+  assert.doesNotMatch(css, /\.ds-panel-note/, 'the dead note styles are gone');
 });
 
 test('the row surfaces share one builder, the page has its own, and no mount opens a window', async () => {
@@ -535,6 +546,17 @@ test('the row surfaces share one builder, the page has its own, and no mount ope
     assert.doesNotMatch(region, /openWorkspace\(/, 'no service open in a builder');
     assert.doesNotMatch(region, /openCanvasWindow\(/, 'no window open in a builder');
   }
+  // The rail is the panel surface — the same one the hidden 1×1 resolve pane
+  // mounts. Its builder opens nothing either; the behavioral proof (a 1×1
+  // frame mounts with ZERO service calls, storage writes or opens) is the
+  // real-mount test in rail.test.ts.
+  assert.match(dispatch, /kind === 'rail'[\s\S]*buildRail\(root\)/, 'the panel surface draws the rail');
+  const railBuilder = source.slice(source.indexOf('export function buildRail('), source.indexOf("/** The rail's one status line"));
+  assert.doesNotMatch(railBuilder, /openWorkspace\(|openCanvasWindow\(|focusLive\(|beginOpenHandoff\(|setInterval\(/, 'the rail shell opens, claims and schedules nothing');
+  const mount = source.slice(source.indexOf('function mountSurface('), mainStart);
+  assert.match(mount, /kind === 'rail'\) \{\s*startRailLive\(\)/, 'the rail goes live only through startRailLive');
+  const live = source.slice(source.indexOf('function startRailLive('), source.indexOf('function onRailWake('));
+  assert.match(live, /!isRealPane\(\)\) return/, 'startRailLive refuses a 1×1 frame');
 });
 
 // ---- the canvas row (spec §F: Start/Stop + play/edit + screen dropdown + Focus) ----

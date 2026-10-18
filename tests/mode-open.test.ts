@@ -13,7 +13,11 @@ type ServiceRequest = { method: string; path: string; query?: Record<string, str
 type StubResult = { status: number; body: string };
 type Toast = { kind: string; message: string };
 
+// A real-sized frame: the row (and a real rail tab). The hidden 1×1 resolve
+// pane is simulated per test by shrinking these.
 const shim = {
+  innerWidth: 1024,
+  innerHeight: 768,
   addEventListener: () => undefined,
   removeEventListener: () => undefined,
   parent: { postMessage: () => undefined },
@@ -1770,5 +1774,107 @@ test('F4/F8: the page flow scaffolds with the PAGE selections, and a failed job 
     main.setSurface('panel');
     main.setPrompt('');
     setWorkspace(null);
+  }
+});
+
+// =====================================================================
+// F9 + the hidden-pane safety net (rail package).
+// =====================================================================
+
+test('F9: a page-started session gets a FRESH canvas-open handoff before mode/, so its row opens the window instead of turning mode OFF', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  const store = stubStorage();
+  const order: string[] = [];
+  const set = (api.host as unknown as { storage: { set: (key: string, value: unknown) => Promise<void> } }).storage.set;
+  (api.host as unknown as { storage: { set: (key: string, value: unknown) => Promise<void> } }).storage.set = async (key, value) => {
+    order.push(key);
+    await set(key, value);
+  };
+  stubToast();
+  stubStartSession();
+  stubListProjects([]);
+  // Chrome takes a while to come up: the open stays in flight until released,
+  // which is exactly when a closed-window /state read could flip the mode.
+  let releaseOpen: () => void = () => undefined;
+  const openGate = new Promise<void>((resolve) => { releaseOpen = resolve; });
+  const calls = stubService(async (request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (IS_SCAFFOLD_PATH(request.path)) return scaffoldJob(request);
+    if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
+    if (request.path === '/open') {
+      await openGate;
+      return { status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/home.html', title: 'Site', settled: true }) };
+    }
+    return { status: 200, body: JSON.stringify({ ok: true }) };
+  });
+  await resetToClosedWindow();
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  main.setPrompt('A pricing page');
+  const before = Date.now();
+  try {
+    await startNewDesign();
+    const handoff = store.get(main.openHandoffKey('s1')!) as { dir?: string; jobId?: unknown; at?: number } | undefined;
+    const ws = store.get(workspaceStorageKey('s1')!) as { dir: string };
+    assert.ok(handoff, 'the new session carries a canvas-open handoff');
+    assert.equal(handoff!.dir, ws.dir, 'it names the workspace the session was bound to');
+    assert.equal(handoff!.jobId, null, 'the page already waited out the job');
+    assert.ok((handoff!.at ?? 0) >= before, 'written fresh (the 5-minute staleness rule)');
+    assert.ok(order.indexOf(main.openHandoffKey('s1')!) < order.indexOf(modeStorageKey('s1')!), 'the handoff lands BEFORE mode/ turns ON');
+
+    // The new session's row mounts: it adopts ON and claims the handoff
+    // BEFORE /state can read "ON, no window" as the user closing it.
+    main.setSurface('status');
+    setWorkspace(null);
+    await applySessionSnapshot({ id: 's1', busy: false });
+    assert.equal(getModeState().on, true, 'the new session is born ON');
+    await main.syncRowFromStorage();
+    assert.equal(getPendingOpen(), true, 'the claimed handoff holds the pending-open guard');
+    await flush();
+    await applyState({ url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false });
+    assert.equal(getModeState().on, true, 'the row did NOT flip the mode OFF');
+    assert.ok(calls.some((call) => call.path === '/open'), 'the row is opening the canvas window');
+    releaseOpen();
+    await flush();
+    await flush();
+    assert.equal(store.has(main.openHandoffKey('s1')!), false, 'the handoff is consumed');
+  } finally {
+    main.setSurface('panel');
+    main.setPrompt('');
+    setWorkspace(null);
+    setSessionId(null);
+  }
+});
+
+test('isRealPane safety net: in a 1×1 panel frame (the hidden resolve pane) beginOpenHandoff claims nothing and opens nothing', async () => {
+  setWorkspace(null);
+  setSessionId('ses_tiny');
+  stubToast();
+  const store = stubStorage();
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/', title: '', settled: true }) }));
+  store.set(workspaceStorageKey('ses_tiny')!, { dir: '/p/site', name: 'Site' });
+  store.set(main.openHandoffKey('ses_tiny')!, { dir: '/p/site', jobId: null, at: Date.now() });
+  store.set(modeStorageKey('ses_tiny')!, { on: true, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' });
+  const frame = shim as { innerWidth: number; innerHeight: number };
+  frame.innerWidth = 1;
+  frame.innerHeight = 1;
+  main.setSurface('panel');
+  try {
+    assert.equal(main.isRealPane(), false);
+    assert.equal(await main.runOpenHandoff(), 'none', 'the hidden pane never claims');
+    await main.syncRowFromStorage();
+    await flush();
+    assert.ok(store.has(main.openHandoffKey('ses_tiny')!), 'the record is LEFT for the row');
+    assert.equal(calls.length, 0, 'no /open, /focus or job poll from a 1×1 frame');
+    // The row is exempt from the size gate (its section may be 24 px tall).
+    main.setSurface('status');
+    assert.equal(await main.runOpenHandoff(), 'opened', 'the row still claims in a small frame');
+  } finally {
+    frame.innerWidth = 1024;
+    frame.innerHeight = 768;
+    main.setSurface('panel');
+    setWorkspace(null);
+    setSessionId(null);
   }
 });

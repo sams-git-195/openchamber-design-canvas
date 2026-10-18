@@ -821,8 +821,6 @@ export const DESIGN_READY_BADGE = 'Canvas ready';
 export const NO_CONFIG_BADGE = 'No dev server yet';
 /** The workspaces list's true empty state. */
 export const NO_DESIGN_WORK_MESSAGE = 'No canvas workspaces yet — /canvas creates one.';
-/** The rail panel surface's whole content: a calm pointer to the sidebar page. */
-export const PANEL_SIDEBAR_HINT = 'Design Canvas opens from the sidebar.';
 /** The one line the row shows while this session has no canvas workspace yet. */
 export const NO_WORKSPACE_MESSAGE = 'No canvas workspace yet — Start creates one.';
 
