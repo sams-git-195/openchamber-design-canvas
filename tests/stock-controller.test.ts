@@ -291,21 +291,22 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   assert.equal(menus().length, 1, 'right-click on an artboard opens exactly one menu');
   const menu = menus()[0];
   assert.equal(menu.getAttribute('role'), 'menu');
-  // F10 + FIX-3 (F17): 9 items in 5 groups, joined by 4 role=separator
+  // F10 + FIX-3 (F17): 10 items in 5 groups, joined by 4 role=separator
   // dividers — the separators are never menuitems, so the keyboard ring skips
-  // them. Stop dev server (F17) is alone in its group before Rename.
-  assert.equal(menu.children.length, 13, '9 items + 4 group separators');
+  // them. Stop dev server (F17) is alone in its group before Rename. R3 adds
+  // Fit to device viewport at the end of the file group.
+  assert.equal(menu.children.length, 14, '10 items + 4 group separators');
   assert.deepEqual(menu.children.map((c: any) => c.getAttribute('role')),
-    ['menuitem', 'separator', 'menuitem', 'menuitem', 'separator', 'menuitem', 'menuitem', 'menuitem', 'menuitem', 'separator', 'menuitem', 'separator', 'menuitem']);
+    ['menuitem', 'separator', 'menuitem', 'menuitem', 'separator', 'menuitem', 'menuitem', 'menuitem', 'menuitem', 'menuitem', 'separator', 'menuitem', 'separator', 'menuitem']);
   const itemsOf = () => menus()[0].children.filter((c: any) => c.getAttribute('role') === 'menuitem');
   // Every frozen §3 action maps to exactly {type:'screen-menu',screen,action}.
   const fired = (index: number) => itemsOf()[index].onclick();
   const labels = itemsOf().map((c: any) => c.textContent);
-  assert.deepEqual(labels, ['Send to chat', 'Zoom to screen', 'Reload screen', 'Reset position', 'Export PNG', 'Export PDF', 'Copy file path', 'Stop dev server', 'Rename…']);
+  assert.deepEqual(labels, ['Send to chat', 'Zoom to screen', 'Reload screen', 'Reset position', 'Export PNG', 'Export PDF', 'Copy file path', 'Fit to device viewport', 'Stop dev server', 'Rename…']);
   assert.deepEqual(itemsOf().map((c: any) => c.dataset.action),
-    ['send-to-chat', 'zoom', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path', 'stop-server', 'rename'],
+    ['send-to-chat', 'zoom', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path', 'fit-viewport', 'stop-server', 'rename'],
     'data-action drives the subtle CSS icons; Rename… stays last, in its own group');
-  for (const [index, action] of [[0, 'send-to-chat'], [2, 'reload'], [3, 'reset-position'], [4, 'export-png'], [5, 'export-pdf'], [6, 'copy-path'], [7, 'stop-server']] as const) {
+  for (const [index, action] of [[0, 'send-to-chat'], [2, 'reload'], [3, 'reset-position'], [4, 'export-png'], [5, 'export-pdf'], [6, 'copy-path'], [7, 'fit-viewport'], [8, 'stop-server']] as const) {
     openVia(section);
     assert.equal(menus().length, 1);
     fired(index);
@@ -318,7 +319,7 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   assert.equal(e.commands.length, before, "'zoom' is local focus, no message");
   assert.equal(e.api.getCamera().mode, 'manual');
   // Rename (V4-17): inline input over the header; Enter commits <=120 chars.
-  openVia(section); fired(8);
+  openVia(section); fired(9);
   const input = e.elementOf('home', '.ds-ab-rename');
   assert.ok(input, 'the menu Rename… opens the inline header input');
   assert.equal(input.value, 'Home');
@@ -326,13 +327,13 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   e.fire(input.id, 'keydown', { key: 'Enter', preventDefault() {} });
   assert.deepEqual(e.commands.at(-1), { type: 'screen-rename', screen: 'home', title: 'Landing' });
   assert.equal(e.elementOf('home', '.ds-ab-rename'), null, 'committing removes the input');
-  openVia(section); fired(8);
+  openVia(section); fired(9);
   const input2 = e.elementOf('home', '.ds-ab-rename');
   input2.value = 'x'.repeat(160);
   e.fire(input2.id, 'keydown', { key: 'Enter', preventDefault() {} });
   assert.equal(e.commands.at(-1).title.length, 120, 'titles clamp to 120');
   const count = e.commands.length;
-  openVia(section); fired(8);
+  openVia(section); fired(9);
   const input3 = e.elementOf('home', '.ds-ab-rename');
   e.fire(input3.id, 'keydown', { key: 'Escape', preventDefault() {} });
   assert.equal(e.commands.length, count, 'Escape cancels without emitting');
@@ -873,6 +874,23 @@ test('camera-changed emits once, debounced 400ms after the last paint, never ech
   assert.equal(changed().length, 2);
   const panned = changed()[1].camera;
   assert.ok(Math.abs(panned.panY + 63.2) < 1e-12);
+});
+
+test('R3 wheel routing: edit wheel over an artboard is a screen-scroll (no pan); background pans; ctrl+wheel zooms', () => {
+  const e = environment();
+  e.api.setStatus({ state: 'ready' });
+  const cam = () => JSON.stringify(e.api.getCamera());
+  const before = cam();
+  e.fire('canvas', 'wheel', { ctrlKey: false, deltaX: 0, deltaY: 60, clientX: 50, clientY: 50, defaultPrevented: false, target: e.sectionOf('home'), preventDefault() {} });
+  assert.equal(cam(), before, 'the camera does not pan over an artboard');
+  assert.equal(e.commands.at(-1).type, 'screen-scroll');
+  assert.equal(e.commands.at(-1).deltaY, 60);
+  e.fire('canvas', 'wheel', { ctrlKey: false, deltaX: 0, deltaY: 60, clientX: 50, clientY: 50, defaultPrevented: false, target: e.$('canvas'), preventDefault() {} });
+  assert.notEqual(cam(), before, 'the background still pans');
+  const panned = e.api.getCamera();
+  e.fire('canvas', 'wheel', { ctrlKey: true, deltaX: 0, deltaY: -60, clientX: 50, clientY: 50, defaultPrevented: false, target: e.sectionOf('home'), preventDefault() {}, stopPropagation() {} });
+  assert.ok(e.api.getCamera().scale > panned.scale, 'ctrl+wheel over an artboard zooms');
+  assert.equal(e.commands.filter((c: any) => c.type === 'screen-scroll').length, 1);
 });
 
 test('an in-frame navigation synced on load never triggers a duplicate same-URL load (seam 3)', () => {

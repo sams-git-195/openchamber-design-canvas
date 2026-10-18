@@ -280,7 +280,7 @@ function initCanvas(initialConfig) {
   const SCREEN_ID3 = /^[a-z0-9][a-z0-9-]{0,30}$/;
   const BOARD_COPY = { loading: "Loading this screen.", ready: "", error: "Dev server unreachable \u2014 Reload to restart it." };
   const EMBED_HINT = "If it is running, check CSP / X-Frame-Options embedding permissions.";
-  const SCREEN_MENU = [[["send-to-chat", "Send to chat"]], [["zoom", "Zoom to screen"], ["reload", "Reload screen"]], [["reset-position", "Reset position"], ["export-png", "Export PNG"], ["export-pdf", "Export PDF"], ["copy-path", "Copy file path"]], [["stop-server", "Stop dev server"]], [["rename", "Rename\u2026"]]];
+  const SCREEN_MENU = [[["send-to-chat", "Send to chat"]], [["zoom", "Zoom to screen"], ["reload", "Reload screen"]], [["reset-position", "Reset position"], ["export-png", "Export PNG"], ["export-pdf", "Export PDF"], ["copy-path", "Copy file path"], ["fit-viewport", "Fit to device viewport"]], [["stop-server", "Stop dev server"]], [["rename", "Rename\u2026"]]];
   const bootConfig = initialConfig || {};
   let pages = [], currentUrl = "", currentTitle = "Preview";
   let screens = [], active = "", shellMode = "edit", cellCenters = /* @__PURE__ */ new Map();
@@ -296,6 +296,8 @@ function initCanvas(initialConfig) {
   let modePending = null, modeTimer = null;
   let contextMenu = null, renaming = null;
   const hover = { screen: "", x: NaN, y: NaN, pending: null, raf: 0 };
+  const scroll = { pending: null, raf: 0 };
+  const screenMeta = /* @__PURE__ */ new Map();
   const newPulseTimers = /* @__PURE__ */ new Map();
   let hadScreens = false;
   const NO_SELECTION = Object.freeze({ count: 0, screens: Object.freeze([]), screen: "", label: "" });
@@ -557,6 +559,20 @@ function initCanvas(initialConfig) {
     wireBoard(id, board);
     return board;
   }
+  function sizeLabel(s) {
+    const meta = screenMeta.get(s.id);
+    return s.width + "\xD7" + s.height + (meta && meta.scrollable ? " \u2195" : "");
+  }
+  function setScreenMetaCore(id, info) {
+    if (typeof id !== "string" || !SCREEN_ID3.test(id) || !info || typeof info !== "object" || typeof info.scrollable !== "boolean") return false;
+    screenMeta.set(id, { scrollable: info.scrollable });
+    const s = screens.find((v) => v.id === id), b = boards.get(id);
+    if (s && b) {
+      b.size.textContent = sizeLabel(s);
+      b.section.dataset.scrollable = info.scrollable ? "true" : "false";
+    }
+    return true;
+  }
   function relayout() {
     const layout = placeScreens(screens);
     view.width = clampExtent(layout.width);
@@ -598,7 +614,7 @@ function initCanvas(initialConfig) {
       b.section.dataset.active = s.id === active ? "true" : "false";
       if (b.label) b.label.textContent = i + 1 + " \xB7 " + s.title;
       else b.title.textContent = i + 1 + " \xB7 " + s.title;
-      b.size.textContent = s.width + "\xD7" + s.height;
+      b.size.textContent = sizeLabel(s);
       if (s.url && s.src !== s.url) {
         const current = typeof b.frame.src === "string" ? b.frame.src : "";
         if (current === s.url) {
@@ -609,7 +625,10 @@ function initCanvas(initialConfig) {
         }
       }
       renderBoardState(b, s);
+      const meta = screenMeta.get(s.id);
+      b.section.dataset.scrollable = meta && meta.scrollable ? "true" : "false";
     });
+    for (const id of [...screenMeta.keys()]) if (!live.has(id)) screenMeta.delete(id);
     view.ready = screens.length > 0;
   }
   function paint() {
@@ -935,6 +954,34 @@ function initCanvas(initialConfig) {
     }
     hover.pending = p;
     if (!hover.raf) hover.raf = requestAnimationFrame(flushHover);
+  }
+  function flushScroll() {
+    scroll.raf = 0;
+    const p = scroll.pending;
+    scroll.pending = null;
+    if (!p || !p.deltaX && !p.deltaY || captureState || view.agentInput) return;
+    const clamp2 = (n) => Math.max(-8192, Math.min(8192, Math.round(n)));
+    send({ type: "screen-scroll", screen: p.screen, x: p.x, y: p.y, deltaX: clamp2(p.deltaX), deltaY: clamp2(p.deltaY) });
+  }
+  function queueScroll(section, e) {
+    const p = framePoint(section, e);
+    if (!p) return false;
+    const s = screens.find((v) => v.id === p.screen);
+    const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? s ? s.height : 800 : 1;
+    const dx = (Number(e.deltaX) || 0) * unit, dy = (Number(e.deltaY) || 0) * unit;
+    if (scroll.pending && scroll.pending.screen !== p.screen) flushScroll();
+    if (scroll.pending) {
+      scroll.pending.deltaX += dx;
+      scroll.pending.deltaY += dy;
+      scroll.pending.x = p.x;
+      scroll.pending.y = p.y;
+    } else scroll.pending = { screen: p.screen, x: p.x, y: p.y, deltaX: dx, deltaY: dy };
+    if (!scroll.raf) {
+      scroll.raf = -1;
+      const id = requestAnimationFrame(flushScroll);
+      if (scroll.raf === -1) scroll.raf = id;
+    }
+    return true;
   }
   function closeScreenMenu(refocus) {
     if (!contextMenu) return false;
@@ -1705,6 +1752,10 @@ function initCanvas(initialConfig) {
     }
     if (!view.ready || view.layoutMode === "fit" || e.target.closest(".state")) return;
     e.preventDefault();
+    if (bootConfig.workspace !== false && shellMode === "edit" && !view.pan && !view.space && !captureState) {
+      const section = e.target.closest(".ds-artboard");
+      if (section && !e.target.closest(".ds-ab-title") && !e.target.closest(".ds-ab-menu") && !e.target.closest(".ds-ab-size") && !e.target.closest(".ds-ab-state") && !e.target.closest(".ds-ab-rename") && queueScroll(section, e)) return;
+    }
     wheelInput(e.deltaX, e.deltaY, e.clientX - b.left, e.clientY - b.top, false);
   }, { passive: false });
   document.addEventListener("wheel", (e) => {
@@ -1768,6 +1819,7 @@ function initCanvas(initialConfig) {
     setAgentInput: (on) => transaction(() => setAgentInputCore(on)),
     revealScreen: (id) => transaction(() => revealScreenCore(id)),
     setSelection: (info) => transaction(() => setSelectionCore(info)),
+    setScreenMeta: (id, info) => setScreenMetaCore(id, info),
     getCamera: () => ({ mode: view.mode, scale: view.scale, panX: view.panX, panY: view.panY, width: screens.find((s) => s.id === active)?.width ?? view.width, height: screens.find((s) => s.id === active)?.height ?? view.height, preset: view.preset, layoutMode: view.layoutMode, nominalHeight: view.nominalHeight, reason: view.reason, gridWidth: view.width, gridHeight: view.height }),
     // width/height round-trip the ACTIVE screen size (like the old single frame);
     // the grid extent is derived from the screens list and never restored.
@@ -2091,6 +2143,7 @@ iframe{display:block;border:0;width:100%;height:100%}
 .ds-menu-item[data-action=export-png]::before{content:"⇩"}
 .ds-menu-item[data-action=export-pdf]::before{content:"⇩"}
 .ds-menu-item[data-action=copy-path]::before{content:"⧉"}
+.ds-menu-item[data-action=fit-viewport]::before{content:"▯"}
 .ds-menu-item[data-action=stop-server]::before{content:"⏹"}
 .ds-menu-item[data-action=rename]::before{content:"✎"}
 .state{position:absolute;inset:0;display:grid;place-items:center;text-align:center;background:var(--background)}
@@ -2673,6 +2726,58 @@ async function renameScreen(root, id, title) {
   } catch (error) {
     await fs2.rm(tmp, { force: true }).catch(() => void 0);
     throw new ScreenRenameError(`could not write ${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return normalizeScreens(parsed, root);
+}
+function viewportPresetHeight(width) {
+  if (width === 1280) return 800;
+  if (width <= 480) return 844;
+  if (width <= 900) return 1024;
+  return 900;
+}
+var ScreenResizeError = class extends Error {
+};
+async function resizeScreen(root, id, width, height) {
+  if (!SCREEN_ID_PATTERN.test(id)) throw new ScreenResizeError(`id must match ${SCREEN_ID_PATTERN.source}`);
+  for (const value of [width, height]) {
+    if (!Number.isInteger(value) || value < SCREEN_MIN_SIZE || value > SCREEN_MAX_SIZE) {
+      throw new ScreenResizeError(`size must be an integer ${SCREEN_MIN_SIZE}\u2013${SCREEN_MAX_SIZE}`);
+    }
+  }
+  const abs = path2.join(path2.resolve(root), SCREENS_FILENAME);
+  let text;
+  try {
+    text = await fs2.readFile(abs, "utf8");
+  } catch {
+    throw new ScreenResizeError(`${SCREENS_FILENAME} not found`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new ScreenResizeError(`${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new ScreenResizeError(`${SCREENS_FILENAME} is not an object`);
+  const list = parsed.screens;
+  if (!Array.isArray(list)) throw new ScreenResizeError(`${SCREENS_FILENAME} has no "screens" array`);
+  let found = false;
+  for (const entry of list) {
+    if (entry && typeof entry === "object" && !Array.isArray(entry) && entry.id === id) {
+      entry.width = width;
+      entry.height = height;
+      found = true;
+      break;
+    }
+  }
+  if (!found) throw new ScreenResizeError(`screen "${id}" is not in ${SCREENS_FILENAME}`);
+  const tmp = path2.join(path2.resolve(root), `.${SCREENS_FILENAME}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  try {
+    await fs2.writeFile(tmp, `${JSON.stringify(parsed, null, 2)}
+`, "utf8");
+    await fs2.rename(tmp, abs);
+  } catch (error) {
+    await fs2.rm(tmp, { force: true }).catch(() => void 0);
+    throw new ScreenResizeError(`could not write ${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}`);
   }
   return normalizeScreens(parsed, root);
 }
@@ -3557,6 +3662,56 @@ var PICK_SCRIPT = `(() => {
     return true;
   };
 
+  // ---- R3 (B3) artboard viewport scroll (service-driven) --------------------
+  // An edit-mode wheel over an artboard arrives here (the iframe has no
+  // pointer events in edit mode). The innermost element under (x,y) that can
+  // still move in the wheel's direction scrolls, else the document scroller \u2014
+  // the native chaining rule. A text field scrolls itself only. Returns true
+  // when something actually moved; never chains anywhere outside the frame.
+  function scrollableAxis(el, cs, dx, dy) {
+    var oy = cs.overflowY, ox = cs.overflowX;
+    var canY = dy !== 0 && (oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 1
+      && (dy > 0 ? el.scrollTop + el.clientHeight < el.scrollHeight - 1 : el.scrollTop > 0);
+    var canX = dx !== 0 && (ox === 'auto' || ox === 'scroll' || ox === 'overlay') && el.scrollWidth > el.clientWidth + 1
+      && (dx > 0 ? el.scrollLeft + el.clientWidth < el.scrollWidth - 1 : el.scrollLeft > 0);
+    return canY || canX;
+  }
+
+  function scrollElementBy(el, dx, dy) {
+    var top = el.scrollTop, left = el.scrollLeft;
+    el.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+    return el.scrollTop !== top || el.scrollLeft !== left;
+  }
+
+  window.__dsScrollBy = function (dx, dy, x, y) {
+    dx = Number(dx) || 0;
+    dy = Number(dy) || 0;
+    if (!dx && !dy) return false;
+    var root = document.scrollingElement || document.documentElement;
+    var el = document.elementFromPoint(x, y);
+    if (el && el.nodeType === 1 && !inOverlay(el)) {
+      var field = el.closest ? el.closest('textarea,input') : null;
+      if (field) return scrollElementBy(field, dx, dy);
+      for (var node = el; node && node !== root && node !== document.documentElement && node.nodeType === 1; node = node.parentElement) {
+        if (node === document.body && root === document.body) break;
+        if (scrollableAxis(node, getComputedStyle(node), dx, dy)) return scrollElementBy(node, dx, dy);
+      }
+    }
+    var sx = window.scrollX, sy = window.scrollY;
+    window.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+    return window.scrollX !== sx || window.scrollY !== sy;
+  };
+
+  window.__dsScrollSnapshot = function () {
+    return { x: window.scrollX, y: window.scrollY };
+  };
+
+  window.__dsScrollRestore = function (point) {
+    if (!point || typeof point.x !== 'number' || typeof point.y !== 'number') return false;
+    window.scrollTo({ left: point.x, top: point.y, behavior: 'instant' });
+    return true;
+  };
+
   // ---- V4-2 export purity: the capture-time overlay kill switch -------------
   // The service calls __dsOverlays(false) in a frame's context right before
   // its capture, and __dsOverlays(true) in the finally. Every [data-ds-overlay]
@@ -4272,6 +4427,11 @@ var Browser = class {
   hoverInFlight = false;
   hoverPending = null;
   lastHoverScreen = null;
+  scrollInFlight = false;
+  resizedScreens = /* @__PURE__ */ new Set();
+  scrollPending = null;
+  /** R3: wall-clock of the last screen-scroll evaluate (service→frame hop). */
+  lastScrollMs = null;
   // ---- R2 (B4) selection ------------------------------------------------------
   /** Mirror of each artboard's in-frame selection (insertion = selection order). */
   selection = /* @__PURE__ */ new Map();
@@ -4329,6 +4489,7 @@ var Browser = class {
     this.pinWorkspaceLayout();
     if (this.cdp) {
       await this.pushShellScreens();
+      this.refreshResized();
       if (this.selection.size !== selected) await this.pushSelection();
       await this.setMode(this.mode);
       if (this.activeScreenId) await this.waitScreen(this.activeScreenId);
@@ -4356,12 +4517,20 @@ var Browser = class {
     this.layoutState = { mode: "viewport", preset: "custom", nominalHeight: active?.height ?? this.viewportHeight };
     this.requestedLayout = null;
   }
+  /** R3: a board whose registry size changed (fit-viewport, an agent edit)
+   *  re-measures its scroll cue once the shell has laid the new size out. */
+  refreshResized() {
+    const ids = [...this.resizedScreens];
+    this.resizedScreens.clear();
+    for (const id of ids) void delay(150).then(() => this.refreshScreen(id)).catch(() => void 0);
+  }
   /** Replace the screen registry (warm push + state re-derivation). */
   async setScreens(screens) {
     const selected = this.selection.size;
     this.applyScreenRegistry(screens);
     if (!this.cdp) return;
     await this.pushShellScreens();
+    this.refreshResized();
     if (this.selection.size !== selected) await this.pushSelection();
     if (this.activeScreenId) await this.pushShellActive();
     await this.refreshUnsettled();
@@ -4516,8 +4685,12 @@ var Browser = class {
         // document boot — the follow disarms until that boot's 'load' settles.
         bootSettled: moved ? false : previous?.bootSettled ?? false,
         // B1: a moved board re-boots in the shell too — re-push its state.
-        ...!moved && previous?.shellState !== void 0 ? { shellState: previous.shellState } : {}
+        ...!moved && previous?.shellState !== void 0 ? { shellState: previous.shellState } : {},
+        // R3: the scroll cue survives only an unchanged document AND size — a
+        // resized viewport re-measures (refreshResized) and re-pushes it.
+        ...!moved && previous && previous.width === width && previous.height === height && previous.shellScrollable !== void 0 ? { scrollable: previous.scrollable, shellScrollable: previous.shellScrollable } : {}
       });
+      if (!moved && previous && (previous.width !== width || previous.height !== height)) this.resizedScreens.add(id);
       order.push(id);
     }
     this.screens = next;
@@ -5336,7 +5509,10 @@ var Browser = class {
     const screen = typeof value.screen === "string" && SCREEN_ID_RE.test(value.screen) ? value.screen : void 0;
     const isActive = (target) => !target || target === (this.activeScreenId ?? void 0);
     if (value.type === "ready") {
-      for (const record of this.screens.values()) record.shellState = void 0;
+      for (const record of this.screens.values()) {
+        record.shellState = void 0;
+        record.shellScrollable = void 0;
+      }
       this.selection.clear();
       this.selectionScreen = null;
       this.selectPending = [];
@@ -5380,6 +5556,8 @@ var Browser = class {
       this.queueHover({ screen, x: value.x, y: value.y });
     } else if (value.type === "screen-hover-end") {
       this.queueHover("end");
+    } else if (value.type === "screen-scroll" && typeof screen === "string" && this.screens.has(screen) && [value.x, value.y].every((n) => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 8192) && [value.deltaX, value.deltaY].every((n) => typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= 8192)) {
+      this.queueScroll({ screen, x: value.x, y: value.y, deltaX: value.deltaX, deltaY: value.deltaY });
     } else if (value.type === "screen-menu" && typeof screen === "string" && this.screens.has(screen) && typeof value.action === "string") {
       await this.screenMenuAction(screen, value.action);
     } else if (value.type === "screen-rename" && typeof screen === "string" && this.screens.has(screen) && typeof value.title === "string" && value.title.trim() !== "" && value.title.length <= 120) {
@@ -5589,6 +5767,44 @@ var Browser = class {
       }
     }
   }
+  // ---- R3 (B3) artboard viewport scroll -----------------------------------------
+  /**
+   * Latest-wins scroll pump (the queueHover shape): one evaluate in flight,
+   * queued deltas for the SAME screen are summed (a high-res trackpad stream
+   * loses no distance), a different screen replaces the slot, and everything
+   * drops while a capture is in flight. The same evaluate re-runs
+   * __dsHoverAt when this screen owns the hover, so the outline follows.
+   */
+  queueScroll(job2) {
+    if (this.captureInFlight || !this.cdp) return;
+    const pending = this.scrollPending;
+    if (pending && pending.screen === job2.screen) {
+      const clamp2 = (n) => Math.max(-8192, Math.min(8192, n));
+      this.scrollPending = { ...job2, deltaX: clamp2(pending.deltaX + job2.deltaX), deltaY: clamp2(pending.deltaY + job2.deltaY) };
+    } else {
+      this.scrollPending = job2;
+    }
+    if (this.scrollInFlight) return;
+    this.scrollInFlight = true;
+    void this.runScrollLoop().finally(() => {
+      this.scrollInFlight = false;
+    });
+  }
+  async runScrollLoop() {
+    while (this.scrollPending && !this.captureInFlight && this.cdp) {
+      const job2 = this.scrollPending;
+      this.scrollPending = null;
+      const hover = this.lastHoverScreen === job2.screen ? `window.__dsHoverAt&&window.__dsHoverAt(${job2.x},${job2.y});` : "";
+      const started = Date.now();
+      await this.evalIn(
+        `(()=>{const moved=window.__dsScrollBy?window.__dsScrollBy(${job2.deltaX},${job2.deltaY},${job2.x},${job2.y}):false;${hover}return moved;})()`,
+        false,
+        job2.screen
+      ).catch(() => void 0);
+      this.lastScrollMs = Date.now() - started;
+    }
+    if (this.captureInFlight) this.scrollPending = null;
+  }
   // ---- V4-10 artboard context-menu actions ------------------------------------
   /** The frozen §3 action list plus FIX-3's 'stop-server' (F17); unknown
    *  strings are refused silently. */
@@ -5613,6 +5829,20 @@ var Browser = class {
       record.y = null;
       const list = this.viewerScreens().map((entry) => entry.id === screen ? { ...entry, x: null, y: null } : entry);
       await this.shellEvalSettled(`__dsCanvas.setScreens(${JSON.stringify(list)})`).catch(() => void 0);
+      return;
+    }
+    if (action === "fit-viewport") {
+      const dir = this.workspaceDir;
+      if (!dir) return;
+      const height = viewportPresetHeight(record.width);
+      if (record.height === height) {
+        await this.pushToast("ok", `Already a ${record.width}\xD7${height} viewport`);
+        return;
+      }
+      await resizeScreen(dir, screen, record.width, height).then(
+        () => this.pushToast("ok", `Resized to ${record.width}\xD7${height} viewport`),
+        (error) => this.pushToast("warn", `Resize failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300))
+      );
       return;
     }
     if (action === "export-png" || action === "export-pdf") {
@@ -5793,7 +6023,7 @@ var Browser = class {
     if (!context || this.refreshingScreens.has(screen)) return;
     this.refreshingScreens.add(screen);
     try {
-      const info = await contexts.evaluate(context, "({url:location.href,title:document.title,ready:document.readyState,layout:document.documentElement.getBoundingClientRect().width>0})");
+      const info = await contexts.evaluate(context, "({url:location.href,title:document.title,ready:document.readyState,layout:document.documentElement.getBoundingClientRect().width>0,scrollable:!!document.scrollingElement&&document.scrollingElement.scrollHeight>innerHeight+1})");
       const record = this.screens.get(screen);
       if (!record || contexts.artifact(screen) !== context) return;
       const navigation = this.pendingNavigations.get(screen);
@@ -5826,6 +6056,12 @@ var Browser = class {
       if (!wasReady || record.shellState !== "ready") {
         record.shellState = "ready";
         await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({ state: "ready" })})`, 2e3).catch(() => void 0);
+      }
+      const scrollable = info.scrollable === true;
+      record.scrollable = scrollable;
+      if (this.workspaceMode && record.shellScrollable !== scrollable) {
+        record.shellScrollable = scrollable;
+        await this.pushGuardedShell(`typeof __dsCanvas.setScreenMeta==='function'&&__dsCanvas.setScreenMeta(${JSON.stringify(screen)},${JSON.stringify({ scrollable })})`).catch(() => void 0);
       }
       if (screen === this.activeScreenId) {
         await this.shellEvalSettled(`__dsCanvas.setPage({url:${JSON.stringify(info.url)},title:${JSON.stringify(info.title)},pages:${JSON.stringify(this.pages)},navigate:false})`);
@@ -6273,7 +6509,7 @@ var Browser = class {
    * the shell frames THAT artboard; geometry checks only bind the active
    * screen because the per-screen layout machinery is active-only in v1.
    */
-  async capture(requestedScreen) {
+  async capture(requestedScreen, opts = {}) {
     return this.transaction(async () => {
       const cdp = this.requireCdp();
       const session = this.requireSession();
@@ -6282,8 +6518,10 @@ var Browser = class {
       const token = await this.shellEvalSettled(`__dsCanvas.beginCapture(${requestedScreen !== void 0 ? JSON.stringify(requestedScreen) : ""})`);
       this.captureInFlight = true;
       let overrideApplied = false;
+      let savedScroll = null;
       try {
         await this.evalIn("window.__dsOverlays&&window.__dsOverlays(false)", false, screen).catch(() => void 0);
+        if (opts.top) savedScroll = await this.evalIn("window.__dsScrollSnapshot?(()=>{const at=window.__dsScrollSnapshot();window.scrollTo({left:0,top:0,behavior:'instant'});return at;})():null", false, screen).catch(() => null);
         await cdp.send("Emulation.setDeviceMetricsOverride", { width: Math.max(1e3, this.viewportWidth + 48), height: this.viewportHeight + 256, deviceScaleFactor: 1, mobile: false }, session);
         overrideApplied = true;
         const bounds = await this.shellEvalSettled(`__dsCanvas.normalizeCapture(${JSON.stringify(token)})`, 4e3, true);
@@ -6301,6 +6539,7 @@ var Browser = class {
           height: isActive ? this.viewportHeight : bounds.height
         };
       } finally {
+        if (savedScroll) await this.evalIn(`window.__dsScrollRestore&&window.__dsScrollRestore(${JSON.stringify(savedScroll)})`, false, screen).catch(() => void 0);
         await this.evalIn("window.__dsOverlays&&window.__dsOverlays(true)", false, screen).catch(() => void 0);
         if (!overrideApplied) {
           try {
@@ -11210,7 +11449,7 @@ async function runJob(current, browser2) {
   }
 }
 async function captureScreen(browser2, dir, screen) {
-  const shot = await browser2.capture(screen.id);
+  const shot = await browser2.capture(screen.id, { top: true });
   const file = path13.join(dir, EXPORTS_DIRNAME, `${screen.id}.png`);
   await atomicWrite(file, shot.png);
   return { ok: true, file };

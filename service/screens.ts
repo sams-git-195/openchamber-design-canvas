@@ -322,6 +322,72 @@ export async function renameScreen(root: string, id: string, title: string): Pro
   return normalizeScreens(parsed, root);
 }
 
+/**
+ * R3 (B3): the device-viewport height for a board's width class — the
+ * fit-viewport migration target. 1280 wide is the desktop preset (800); else
+ * phone (≤ 480 → 844), tablet (≤ 900 → 1024), desktop (900).
+ */
+export function viewportPresetHeight(width: number): number {
+  if (width === 1280) return 800;
+  if (width <= 480) return 844;
+  if (width <= 900) return 1024;
+  return 900;
+}
+
+/** Errors resizeScreen throws; the menu answers them as toasts, never crashes. */
+export class ScreenResizeError extends Error {}
+
+/**
+ * Resize one registry entry IN PLACE (R3 fit-viewport) with renameScreen's
+ * minimal-edit contract: re-read, change ONLY the first matching entry's
+ * `width`/`height`, keep every other parsed byte (unknown keys, siblings the
+ * reader would drop), write atomically (tmp+rename). The V4-4 watcher then
+ * pushes the new size to open shells.
+ */
+export async function resizeScreen(root: string, id: string, width: number, height: number): Promise<ScreensRegistry> {
+  if (!SCREEN_ID_PATTERN.test(id)) throw new ScreenResizeError(`id must match ${SCREEN_ID_PATTERN.source}`);
+  for (const value of [width, height]) {
+    if (!Number.isInteger(value) || value < SCREEN_MIN_SIZE || value > SCREEN_MAX_SIZE) {
+      throw new ScreenResizeError(`size must be an integer ${SCREEN_MIN_SIZE}–${SCREEN_MAX_SIZE}`);
+    }
+  }
+  const abs = path.join(path.resolve(root), SCREENS_FILENAME);
+  let text: string;
+  try {
+    text = await fs.readFile(abs, 'utf8');
+  } catch {
+    throw new ScreenResizeError(`${SCREENS_FILENAME} not found`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new ScreenResizeError(`${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ScreenResizeError(`${SCREENS_FILENAME} is not an object`);
+  const list = (parsed as { screens?: unknown }).screens;
+  if (!Array.isArray(list)) throw new ScreenResizeError(`${SCREENS_FILENAME} has no "screens" array`);
+  let found = false;
+  for (const entry of list) {
+    if (entry && typeof entry === 'object' && !Array.isArray(entry) && (entry as { id?: unknown }).id === id) {
+      (entry as Record<string, unknown>).width = width;
+      (entry as Record<string, unknown>).height = height;
+      found = true;
+      break;
+    }
+  }
+  if (!found) throw new ScreenResizeError(`screen "${id}" is not in ${SCREENS_FILENAME}`);
+  const tmp = path.join(path.resolve(root), `.${SCREENS_FILENAME}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  try {
+    await fs.writeFile(tmp, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+    await fs.rename(tmp, abs);
+  } catch (error) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw new ScreenResizeError(`could not write ${SCREENS_FILENAME}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return normalizeScreens(parsed, root);
+}
+
 /** True when a screens.json file exists at the workspace root. */
 export async function hasScreensFile(root: string): Promise<boolean> {
   try {

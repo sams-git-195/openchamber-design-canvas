@@ -183,13 +183,15 @@ async function runJob(current: ExportJob, browser: Browser): Promise<void> {
   }
 }
 
-/** PNG per screen via the shell capture trio, at the artboard's natural size (D2). */
+/** PNG per screen via the shell capture trio, at the artboard's natural size
+ *  (D2), always from the top of the page (R3: the artboard is a scrolled
+ *  viewport; the capture restores the live scroll afterwards). */
 async function captureScreen(
   browser: Browser,
   dir: string,
   screen: ExportScreen,
 ): Promise<FileResult> {
-  const shot = await browser.capture(screen.id);
+  const shot = await browser.capture(screen.id, { top: true });
   const file = path.join(dir, EXPORTS_DIRNAME, `${screen.id}.png`);
   await atomicWrite(file, shot.png);
   return { ok: true, file };

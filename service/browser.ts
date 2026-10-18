@@ -25,7 +25,7 @@ import { ArtifactContexts } from './artifact-context.ts';
 import type { ShellAuthority, DefaultContext } from './artifact-context.ts';
 import type { ViewerPage } from './viewer-ui.ts';
 import { mergeView, mergeViewCoalesced, sanitizeCamera } from './view-state.ts';
-import { renameScreen, SCREENS_FILENAME } from './screens.ts';
+import { renameScreen, resizeScreen, SCREENS_FILENAME, viewportPresetHeight } from './screens.ts';
 import { updateLastWorkspaceView } from './last-workspace.ts';
 import { PickQueue } from './pick-queue.ts';
 import type { QueuedPick } from './pick-queue.ts';
@@ -857,6 +857,56 @@ export const PICK_SCRIPT = `(() => {
     return true;
   };
 
+  // ---- R3 (B3) artboard viewport scroll (service-driven) --------------------
+  // An edit-mode wheel over an artboard arrives here (the iframe has no
+  // pointer events in edit mode). The innermost element under (x,y) that can
+  // still move in the wheel's direction scrolls, else the document scroller —
+  // the native chaining rule. A text field scrolls itself only. Returns true
+  // when something actually moved; never chains anywhere outside the frame.
+  function scrollableAxis(el, cs, dx, dy) {
+    var oy = cs.overflowY, ox = cs.overflowX;
+    var canY = dy !== 0 && (oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 1
+      && (dy > 0 ? el.scrollTop + el.clientHeight < el.scrollHeight - 1 : el.scrollTop > 0);
+    var canX = dx !== 0 && (ox === 'auto' || ox === 'scroll' || ox === 'overlay') && el.scrollWidth > el.clientWidth + 1
+      && (dx > 0 ? el.scrollLeft + el.clientWidth < el.scrollWidth - 1 : el.scrollLeft > 0);
+    return canY || canX;
+  }
+
+  function scrollElementBy(el, dx, dy) {
+    var top = el.scrollTop, left = el.scrollLeft;
+    el.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+    return el.scrollTop !== top || el.scrollLeft !== left;
+  }
+
+  window.__dsScrollBy = function (dx, dy, x, y) {
+    dx = Number(dx) || 0;
+    dy = Number(dy) || 0;
+    if (!dx && !dy) return false;
+    var root = document.scrollingElement || document.documentElement;
+    var el = document.elementFromPoint(x, y);
+    if (el && el.nodeType === 1 && !inOverlay(el)) {
+      var field = el.closest ? el.closest('textarea,input') : null;
+      if (field) return scrollElementBy(field, dx, dy);
+      for (var node = el; node && node !== root && node !== document.documentElement && node.nodeType === 1; node = node.parentElement) {
+        if (node === document.body && root === document.body) break;
+        if (scrollableAxis(node, getComputedStyle(node), dx, dy)) return scrollElementBy(node, dx, dy);
+      }
+    }
+    var sx = window.scrollX, sy = window.scrollY;
+    window.scrollBy({ left: dx, top: dy, behavior: 'instant' });
+    return window.scrollX !== sx || window.scrollY !== sy;
+  };
+
+  window.__dsScrollSnapshot = function () {
+    return { x: window.scrollX, y: window.scrollY };
+  };
+
+  window.__dsScrollRestore = function (point) {
+    if (!point || typeof point.x !== 'number' || typeof point.y !== 'number') return false;
+    window.scrollTo({ left: point.x, top: point.y, behavior: 'instant' });
+    return true;
+  };
+
   // ---- V4-2 export purity: the capture-time overlay kill switch -------------
   // The service calls __dsOverlays(false) in a frame's context right before
   // its capture, and __dsOverlays(true) in the finally. Every [data-ds-overlay]
@@ -1471,6 +1521,10 @@ type ScreenRecord = {
    *  shell reload boots every board as 'loading', so the ready push is gated
    *  on this, never on the service-side `state` (which can outlive a shell). */
   shellState?: 'loading' | 'ready' | 'error';
+  /** R3 (B3): the document overflows the artboard viewport (refreshScreen).
+   *  shellScrollable is what the CURRENT shell document was last told. */
+  scrollable?: boolean;
+  shellScrollable?: boolean;
 };
 
 
@@ -1710,6 +1764,11 @@ export class Browser {
   private hoverInFlight = false;
   private hoverPending: { screen: string; x: number; y: number } | 'end' | null = null;
   private lastHoverScreen: string | null = null;
+  private scrollInFlight = false;
+  private resizedScreens = new Set<string>();
+  private scrollPending: { screen: string; x: number; y: number; deltaX: number; deltaY: number } | null = null;
+  /** R3: wall-clock of the last screen-scroll evaluate (service→frame hop). */
+  private lastScrollMs: number | null = null;
   // ---- R2 (B4) selection ------------------------------------------------------
   /** Mirror of each artboard's in-frame selection (insertion = selection order). */
   private selection = new Map<string, { count: number; label: string }>();
@@ -1780,6 +1839,7 @@ export class Browser {
       // Warm path: push everything into the live shell, then settle the
       // (possibly new) active screen. No new capability URL is created.
       await this.pushShellScreens();
+      this.refreshResized();
       if (this.selection.size !== selected) await this.pushSelection();
       await this.setMode(this.mode);
       if (this.activeScreenId) await this.waitScreen(this.activeScreenId);
@@ -1811,12 +1871,21 @@ export class Browser {
     this.requestedLayout = null;
   }
 
+  /** R3: a board whose registry size changed (fit-viewport, an agent edit)
+   *  re-measures its scroll cue once the shell has laid the new size out. */
+  private refreshResized(): void {
+    const ids = [...this.resizedScreens];
+    this.resizedScreens.clear();
+    for (const id of ids) void delay(150).then(() => this.refreshScreen(id)).catch(() => undefined);
+  }
+
   /** Replace the screen registry (warm push + state re-derivation). */
   async setScreens(screens: CanvasScreenInput[]): Promise<void> {
     const selected = this.selection.size;
     this.applyScreenRegistry(screens);
     if (!this.cdp) return; // cold: openWorkspace bakes the registry at launch
     await this.pushShellScreens();
+    this.refreshResized();
     if (this.selection.size !== selected) await this.pushSelection();
     if (this.activeScreenId) await this.pushShellActive();
     await this.refreshUnsettled();
@@ -2001,7 +2070,13 @@ export class Browser {
         bootSettled: moved ? false : previous?.bootSettled ?? false,
         // B1: a moved board re-boots in the shell too — re-push its state.
         ...(!moved && previous?.shellState !== undefined ? { shellState: previous.shellState } : {}),
+        // R3: the scroll cue survives only an unchanged document AND size — a
+        // resized viewport re-measures (refreshResized) and re-pushes it.
+        ...(!moved && previous && previous.width === width && previous.height === height && previous.shellScrollable !== undefined
+          ? { scrollable: previous.scrollable, shellScrollable: previous.shellScrollable }
+          : {}),
       });
+      if (!moved && previous && (previous.width !== width || previous.height !== height)) this.resizedScreens.add(id);
       order.push(id);
     }
     this.screens = next;
@@ -3007,7 +3082,7 @@ export class Browser {
       this.logHandshake(`recovery stopped: first honoured shell command (${String((command as {type?:unknown}).type??'unknown')}) after ${this.handshakeAttempts} retry(ies)`);
       this.stopShellHandshakeRecovery();
     }
-    const value=command as {type?:string;width?:number;height?:number;id?:string;mode?:string;preset?:string;screen?:string;x?:number;y?:number;camera?:unknown;additive?:unknown;action?:unknown;title?:unknown;clickAt?:unknown;sentAt?:unknown};
+    const value=command as {type?:string;width?:number;height?:number;id?:string;mode?:string;preset?:string;screen?:string;x?:number;y?:number;camera?:unknown;additive?:unknown;action?:unknown;title?:unknown;clickAt?:unknown;sentAt?:unknown;deltaX?:unknown;deltaY?:unknown};
     // Per-screen layout machinery is active-screen-only in v1 (spec §C): a
     // message naming another screen is accepted but applied only when it is
     // the active artboard.
@@ -3016,7 +3091,7 @@ export class Browser {
     if(value.type==='ready'){
       // B1: this shell document (first boot or a reload) shows every board as
       // 'loading' — forget what the previous document was told.
-      for(const record of this.screens.values())record.shellState=undefined;
+      for(const record of this.screens.values()){record.shellState=undefined;record.shellScrollable=undefined;}
       // R2 (B4): a fresh shell document has fresh artboard documents — no
       // selection survives it, and a stale toolbar count must clear.
       this.selection.clear();this.selectionScreen=null;this.selectPending=[];
@@ -3092,11 +3167,17 @@ export class Browser {
     else if(value.type==='screen-hover-end'){
       this.queueHover('end');
     }
+    // R3 (B3): an edit-mode wheel over an artboard scrolls THAT frame (the
+    // artboard is a device viewport). Same latest-wins pump shape as hover,
+    // deltas summed; dropped while a capture owns the frame.
+    else if(value.type==='screen-scroll'&&typeof screen==='string'&&this.screens.has(screen)&&[value.x,value.y].every(n=>typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=8192)&&[value.deltaX,value.deltaY].every(n=>typeof n==='number'&&Number.isFinite(n)&&Math.abs(n)<=8192)){
+      this.queueScroll({screen,x:value.x!,y:value.y!,deltaX:value.deltaX as number,deltaY:value.deltaY as number});
+    }
     // V4-10: the artboard context menu (B renders it; the service owns every
     // action's meaning — the frozen §3 action list, plus FIX-3's F17
     // 'stop-server' which rides the same {type:'screen-menu'} contract).
     else if(value.type==='screen-menu'&&typeof screen==='string'&&this.screens.has(screen)&&typeof value.action==='string'){
-      await this.screenMenuAction(screen,value.action as 'send-to-chat'|'reload'|'reset-position'|'export-png'|'export-pdf'|'copy-path'|'stop-server');
+      await this.screenMenuAction(screen,value.action as 'send-to-chat'|'reload'|'reset-position'|'fit-viewport'|'export-png'|'export-pdf'|'copy-path'|'stop-server');
     }
     // V4-17 (P2): inline rename. The registry title is agent-owned; this is a
     // single-entry read-modify-write of screens.json — the V4-4 watcher then
@@ -3350,13 +3431,54 @@ export class Browser {
     }
   }
 
+  // ---- R3 (B3) artboard viewport scroll -----------------------------------------
+
+  /**
+   * Latest-wins scroll pump (the queueHover shape): one evaluate in flight,
+   * queued deltas for the SAME screen are summed (a high-res trackpad stream
+   * loses no distance), a different screen replaces the slot, and everything
+   * drops while a capture is in flight. The same evaluate re-runs
+   * __dsHoverAt when this screen owns the hover, so the outline follows.
+   */
+  private queueScroll(job: { screen: string; x: number; y: number; deltaX: number; deltaY: number }): void {
+    if (this.captureInFlight || !this.cdp) return;
+    const pending = this.scrollPending;
+    if (pending && pending.screen === job.screen) {
+      const clamp = (n: number) => Math.max(-8192, Math.min(8192, n));
+      this.scrollPending = { ...job, deltaX: clamp(pending.deltaX + job.deltaX), deltaY: clamp(pending.deltaY + job.deltaY) };
+    } else {
+      this.scrollPending = job;
+    }
+    if (this.scrollInFlight) return;
+    this.scrollInFlight = true;
+    void this.runScrollLoop().finally(() => {
+      this.scrollInFlight = false;
+    });
+  }
+
+  private async runScrollLoop(): Promise<void> {
+    while (this.scrollPending && !this.captureInFlight && this.cdp) {
+      const job = this.scrollPending;
+      this.scrollPending = null;
+      const hover = this.lastHoverScreen === job.screen ? `window.__dsHoverAt&&window.__dsHoverAt(${job.x},${job.y});` : '';
+      const started = Date.now();
+      await this.evalIn(
+        `(()=>{const moved=window.__dsScrollBy?window.__dsScrollBy(${job.deltaX},${job.deltaY},${job.x},${job.y}):false;${hover}return moved;})()`,
+        false,
+        job.screen,
+      ).catch(() => undefined);
+      this.lastScrollMs = Date.now() - started;
+    }
+    if (this.captureInFlight) this.scrollPending = null;
+  }
+
   // ---- V4-10 artboard context-menu actions ------------------------------------
 
   /** The frozen §3 action list plus FIX-3's 'stop-server' (F17); unknown
    *  strings are refused silently. */
   private async screenMenuAction(
     screen: string,
-    action: 'send-to-chat' | 'reload' | 'reset-position' | 'export-png' | 'export-pdf' | 'copy-path' | 'stop-server',
+    action: 'send-to-chat' | 'reload' | 'reset-position' | 'fit-viewport' | 'export-png' | 'export-pdf' | 'copy-path' | 'stop-server',
   ): Promise<void> {
     const record = this.screens.get(screen);
     if (!record) return;
@@ -3383,6 +3505,23 @@ export class Browser {
       record.y = null;
       const list = this.viewerScreens().map((entry) => (entry.id === screen ? { ...entry, x: null, y: null } : entry));
       await this.shellEvalSettled(`__dsCanvas.setScreens(${JSON.stringify(list)})`).catch(() => undefined);
+      return;
+    }
+    if (action === 'fit-viewport') {
+      // R3 (B3) migration: a board sized to its full content height becomes a
+      // device viewport (preset height for its width class). Only that
+      // screens.json entry changes; the V4-4 watcher pushes the new size.
+      const dir = this.workspaceDir;
+      if (!dir) return;
+      const height = viewportPresetHeight(record.width);
+      if (record.height === height) {
+        await this.pushToast('ok', `Already a ${record.width}×${height} viewport`);
+        return;
+      }
+      await resizeScreen(dir, screen, record.width, height).then(
+        () => this.pushToast('ok', `Resized to ${record.width}×${height} viewport`),
+        (error) => this.pushToast('warn', `Resize failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300)),
+      );
       return;
     }
     if (action === 'export-png' || action === 'export-pdf') {
@@ -3591,7 +3730,7 @@ export class Browser {
     if(!context||this.refreshingScreens.has(screen))return;
     this.refreshingScreens.add(screen);
     try{
-      const info=await contexts.evaluate(context,'({url:location.href,title:document.title,ready:document.readyState,layout:document.documentElement.getBoundingClientRect().width>0})') as {url:string;title:string;ready:string;layout:boolean};
+      const info=await contexts.evaluate(context,'({url:location.href,title:document.title,ready:document.readyState,layout:document.documentElement.getBoundingClientRect().width>0,scrollable:!!document.scrollingElement&&document.scrollingElement.scrollHeight>innerHeight+1})') as {url:string;title:string;ready:string;layout:boolean;scrollable?:boolean};
       const record=this.screens.get(screen);
       if(!record||contexts.artifact(screen)!==context)return;
       const navigation=this.pendingNavigations.get(screen);
@@ -3631,6 +3770,14 @@ export class Browser {
       if(!wasReady||record.shellState!=='ready'){
         record.shellState='ready';
         await this.shellEvalSettled(`__dsCanvas.setScreenState(${JSON.stringify(screen)},${JSON.stringify({state:'ready'})})`,2000).catch(()=>undefined);
+      }
+      // R3 (B3) scroll cue: the shell marks the size label when the document
+      // overflows the artboard viewport (additive bridge call, old shells skip).
+      const scrollable=info.scrollable===true;
+      record.scrollable=scrollable;
+      if(this.workspaceMode&&record.shellScrollable!==scrollable){
+        record.shellScrollable=scrollable;
+        await this.pushGuardedShell(`typeof __dsCanvas.setScreenMeta==='function'&&__dsCanvas.setScreenMeta(${JSON.stringify(screen)},${JSON.stringify({scrollable})})`).catch(()=>undefined);
       }
       if(screen===this.activeScreenId){
         // Confirm actual native/SPA URLs without mutating src or replacing the DOM.
@@ -4123,7 +4270,7 @@ export class Browser {
    * the shell frames THAT artboard; geometry checks only bind the active
    * screen because the per-screen layout machinery is active-only in v1.
    */
-  async capture(requestedScreen?: string): Promise<{ png: Buffer; width: number; height: number }> {
+  async capture(requestedScreen?: string, opts: { top?: boolean } = {}): Promise<{ png: Buffer; width: number; height: number }> {
     return this.transaction(async()=>{
     const cdp = this.requireCdp();
     const session = this.requireSession();
@@ -4132,12 +4279,16 @@ export class Browser {
     const token=await this.shellEvalSettled(`__dsCanvas.beginCapture(${requestedScreen!==undefined?JSON.stringify(requestedScreen):''})`);
     this.captureInFlight=true;
     let overrideApplied=false;
+    let savedScroll:unknown=null;
     try{
     // V4-2 (E4): NOTHING tool-owned may ride into an export. Hide every
     // [data-ds-overlay] in THIS frame (pick outline, hover outline) before the
     // normalize, restore in the finally — a pick seconds ago cannot leak its
     // green outline into the PNG.
     await this.evalIn('window.__dsOverlays&&window.__dsOverlays(false)',false,screen).catch(()=>undefined);
+    // R3 (B3): an export is deterministic top-of-page — the artboard is a
+    // scrolled viewport, so save its scroll, render from (0,0), restore after.
+    if(opts.top)savedScroll=await this.evalIn("window.__dsScrollSnapshot?(()=>{const at=window.__dsScrollSnapshot();window.scrollTo({left:0,top:0,behavior:'instant'});return at;})():null",false,screen).catch(()=>null);
     await cdp.send('Emulation.setDeviceMetricsOverride',{width:Math.max(1000,this.viewportWidth+48),height:this.viewportHeight+256,deviceScaleFactor:1,mobile:false},session);
     overrideApplied=true;
     const bounds=await this.shellEvalSettled(`__dsCanvas.normalizeCapture(${JSON.stringify(token)})`,4000,true) as {x:number;y:number;width:number;height:number};
@@ -4157,6 +4308,7 @@ export class Browser {
     }finally{
       // V4-2: overlays come back exactly as they were (a pick outline inside
       // its 1500 ms fade window re-appears; a faded one stays hidden).
+      if(savedScroll)await this.evalIn(`window.__dsScrollRestore&&window.__dsScrollRestore(${JSON.stringify(savedScroll)})`,false,screen).catch(()=>undefined);
       await this.evalIn('window.__dsOverlays&&window.__dsOverlays(true)',false,screen).catch(()=>undefined);
       // The override must end CLEARED on every path, including when the SET
       // itself failed. A bare clear after a rejected set leaves Chromium's

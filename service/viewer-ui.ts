@@ -245,6 +245,7 @@ iframe{display:block;border:0;width:100%;height:100%}
 .ds-menu-item[data-action=export-png]::before{content:"⇩"}
 .ds-menu-item[data-action=export-pdf]::before{content:"⇩"}
 .ds-menu-item[data-action=copy-path]::before{content:"⧉"}
+.ds-menu-item[data-action=fit-viewport]::before{content:"▯"}
 .ds-menu-item[data-action=stop-server]::before{content:"⏹"}
 .ds-menu-item[data-action=rename]::before{content:"✎"}
 .state{position:absolute;inset:0;display:grid;place-items:center;text-align:center;background:var(--background)}
