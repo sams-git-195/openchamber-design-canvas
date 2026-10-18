@@ -10,11 +10,11 @@
 // require `Authorization: Bearer OPENCHAMBER_SERVICE_TOKEN` on every request
 // including /health, and answer GET /health with 200 once ready.
 import http from 'node:http';
-import { promises as fs } from 'node:fs';
+import { promises as fs, type Dirent } from 'node:fs';
 import path from 'node:path';
 
-import { readStudioConfig, resolveConfigPath, writeStudioConfig } from './studio-config.ts';
-import { ensureDevServer, getDevServerStatus, isLoopbackUrl, stopDevServer } from './project-server.ts';
+import { readStudioConfig, renameWorkspaceConfig, resolveConfigPath, writeStudioConfig } from './studio-config.ts';
+import { ensureDevServer, getDevServerStatus, isLoopbackUrl, peekDevServer, stopDevServer } from './project-server.ts';
 import { ensureBrowser, getBrowser, stopBrowser } from './surface.ts';
 import { dockPlacement, reapOrphanChrome } from './browser.ts';
 import { handleBrowserControl } from './browser-control.ts';
@@ -32,7 +32,7 @@ import {
   type CanvasMode,
 } from './screens.ts';
 import { watchRegistry, type RegistryChange } from './screens-watch.ts';
-import { resolveWorkspaceRoot } from './workspace-root.ts';
+import { resolveWorkspaceRootInfo, sameAbsoluteDir, setWorkspaceRoot } from './workspace-root.ts';
 import {
   getLastWorkspace,
   setLastWorkspace,
@@ -448,6 +448,10 @@ function scaffoldSplit(): ScaffoldSplit | null {
   return null;
 }
 
+/** R4: artboard device presets the scaffold may seed (seeding lands in P3). */
+const SCAFFOLD_DEVICES = ['phone', 'tablet', 'desktop'] as const;
+type ScaffoldDevice = (typeof SCAFFOLD_DEVICES)[number];
+
 export type ScaffoldAsyncOutcome =
   | { ok: true; jobId: string; dir: string; url: string }
   | { ok: false; error: string };
@@ -467,6 +471,8 @@ async function startAsyncScaffold(options: {
   designSystemId?: string;
   install?: boolean;
   boot?: boolean;
+  devices?: ScaffoldDevice[];
+  projectDir?: string;
 }): Promise<ScaffoldAsyncOutcome> {
   const split = scaffoldSplit();
   if (split) {
@@ -534,14 +540,6 @@ async function startAsyncScaffold(options: {
     }
   })();
   return { ok: true, jobId: job.id, dir: job.dir, url: job.url };
-}
-
-/** Cross-platform absolute-dir equality for the F10 job/dir match (win32 is
- *  case-insensitive; separators normalize through path.resolve). */
-function sameAbsoluteDir(a: string, b: string): boolean {
-  const left = path.resolve(a);
-  const right = path.resolve(b);
-  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 
 /** GET /scaffold/status body (unknown job = 200 business failure, house rule).
@@ -627,7 +625,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const body = parsed as
-        | { dir?: unknown; type?: unknown; direction?: unknown; fidelity?: unknown; brief?: unknown; designSystemId?: unknown; async?: unknown; install?: unknown; boot?: unknown }
+        | { dir?: unknown; type?: unknown; direction?: unknown; fidelity?: unknown; brief?: unknown; designSystemId?: unknown; async?: unknown; install?: unknown; boot?: unknown; devices?: unknown; projectDir?: unknown }
         | null;
       const dir = body?.dir;
       const type = body?.type;
@@ -660,6 +658,20 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'boot must be a boolean' });
         return;
       }
+      // R4: devices/projectDir are forwarded to scaffold.ts as-is (its P3
+      // seeding consumes them); only their SHAPE is validated here.
+      if (
+        body?.devices !== undefined &&
+        (!Array.isArray(body.devices) ||
+          !body.devices.every((d) => typeof d === 'string' && (SCAFFOLD_DEVICES as readonly string[]).includes(d)))
+      ) {
+        sendJson(res, 400, { error: 'devices must be an array of "phone", "tablet" or "desktop"' });
+        return;
+      }
+      if (body?.projectDir !== undefined && (typeof body.projectDir !== 'string' || !path.isAbsolute(body.projectDir))) {
+        sendJson(res, 400, { error: 'projectDir must be an absolute path' });
+        return;
+      }
       const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
       const options = {
         dir,
@@ -670,6 +682,8 @@ const server = http.createServer(async (req, res) => {
         designSystemId: str(body?.designSystemId),
         ...(typeof body?.install === 'boolean' ? { install: body.install } : {}),
         ...(typeof body?.boot === 'boolean' ? { boot: body.boot } : {}),
+        ...(Array.isArray(body?.devices) ? { devices: body.devices as ScaffoldDevice[] } : {}),
+        ...(typeof body?.projectDir === 'string' ? { projectDir: body.projectDir } : {}),
       };
       if (body?.async === true) {
         // V4-11 (E15): npm install + dev boot continue in a single-slot job;
@@ -985,31 +999,139 @@ const server = http.createServer(async (req, res) => {
     // service-side, NEVER by the panel) and every child containing a
     // .design-studio.json — with the config's name/url, and screens when
     // screens.json exists. A missing workspace root answers an empty list,
-    // never an error.
+    // never an error. R4: earlier roots from settings (previousRoots) are
+    // scanned too — their items carry legacyRoot:true — and every item carries
+    // its `root` plus a cheap dev-server peek. `root` stays the CURRENT root
+    // (the panel builds new workspace dirs from it); `roots` lists all scanned.
     if (url.pathname === '/workspaces') {
-      const rootDir = await resolveWorkspaceRoot();
+      const info = await resolveWorkspaceRootInfo();
+      const rootDir = info.root;
+      const roots = [rootDir, ...info.previousRoots];
       const workspaces: Json[] = [];
-      try {
-        for (const entry of await fs.readdir(rootDir, { withFileTypes: true })) {
-          if (!entry.isDirectory()) continue;
-          const dir = path.join(rootDir, entry.name);
-          if ((await resolveConfigPath(dir)) === null) continue;
-          const { config } = await readStudioConfig(dir);
-          const name =
-            typeof config?.name === 'string' && config.name.trim() !== '' ? config.name.trim() : entry.name;
-          const item: Json = { dir, name };
-          if (typeof config?.url === 'string' && config.url.trim() !== '') item.url = config.url.trim();
-          if (await hasScreensFile(dir)) {
-            const registry = await readScreens(dir);
-            item.screens = registry.screens as unknown as Json;
+      const rootError: Record<string, string> = {};
+      for (const scanRoot of roots) {
+        const legacyRoot = scanRoot !== rootDir;
+        let entries: Dirent[];
+        try {
+          entries = await fs.readdir(scanRoot, { withFileTypes: true });
+        } catch (error) {
+          // A root that does not exist yet is simply empty; anything else is
+          // reported so the panel can say why a folder's designs are missing.
+          const code = (error as NodeJS.ErrnoException | null)?.code;
+          if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+            rootError[scanRoot] = error instanceof Error ? error.message : String(error);
           }
-          workspaces.push(item);
+          continue;
         }
-      } catch {
-        /* no workspace root yet: answer the root with an empty list */
+        const found = await Promise.all(
+          entries
+            .filter((entry) => entry.isDirectory())
+            .map(async (entry): Promise<Json | null> => {
+              const dir = path.join(scanRoot, entry.name);
+              try {
+                if ((await resolveConfigPath(dir)) === null) return null;
+                const { config } = await readStudioConfig(dir);
+                const name =
+                  typeof config?.name === 'string' && config.name.trim() !== '' ? config.name.trim() : entry.name;
+                const item: Json = { dir, name };
+                if (typeof config?.url === 'string' && config.url.trim() !== '') item.url = config.url.trim();
+                if (await hasScreensFile(dir)) {
+                  const registry = await readScreens(dir);
+                  item.screens = registry.screens as unknown as Json;
+                }
+                item.root = scanRoot;
+                item.legacyRoot = legacyRoot;
+                item.server = (await peekDevServer(dir).catch(() => ({ recorded: false, up: false, port: null }))) as unknown as Json;
+                return item;
+              } catch {
+                return null;
+              }
+            }),
+        );
+        for (const item of found) {
+          if (item && !workspaces.some((seen) => sameAbsoluteDir(String(seen.dir), String(item.dir)))) workspaces.push(item);
+        }
       }
       workspaces.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-      sendJson(res, 200, { root: rootDir, workspaces });
+      sendJson(res, 200, {
+        root: rootDir,
+        roots,
+        workspaces,
+        ...(Object.keys(rootError).length > 0 ? { rootError } : {}),
+      });
+      return;
+    }
+
+    // R4 (F1): rename a workspace — sets ONLY the config's `name`. Malformed
+    // input and a non-workspace dir are 400s; an invalid name, an unparseable
+    // config or a failed write are 200 {ok:false,error} (house rule).
+    if (url.pathname === '/workspaces/rename') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'POST required' });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'body must be JSON' });
+        return;
+      }
+      const body = parsed as { dir?: unknown; name?: unknown } | null;
+      if (typeof body?.dir !== 'string' || !path.isAbsolute(body.dir)) {
+        sendJson(res, 400, { error: 'dir must be an absolute workspace path' });
+        return;
+      }
+      if (typeof body.name !== 'string') {
+        sendJson(res, 400, { error: 'name must be a string' });
+        return;
+      }
+      if (!(await isDesignWorkspace(body.dir))) {
+        sendNotAWorkspace(res);
+        return;
+      }
+      try {
+        const renamed = await renameWorkspaceConfig(body.dir, body.name);
+        sendJson(res, 200, { ok: true, name: renamed.name });
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'rename failed' });
+      }
+      return;
+    }
+
+    // R4 (F4): the designs location. GET answers the resolved root and where
+    // it came from; PUT {workspaceRoot:string|null} chooses (or, with null,
+    // resets) it. A malformed body is a 400; every refusal is 200
+    // {ok:false,code,error} (codes in workspace-root.ts setWorkspaceRoot).
+    if (url.pathname === '/settings') {
+      if (req.method === 'PUT') {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(await readBody(req));
+        } catch {
+          sendJson(res, 400, { error: 'body must be JSON' });
+          return;
+        }
+        const value = (parsed as { workspaceRoot?: unknown } | null)?.workspaceRoot;
+        if (value !== null && typeof value !== 'string') {
+          sendJson(res, 400, { error: 'workspaceRoot must be a string or null' });
+          return;
+        }
+        sendJson(res, 200, (await setWorkspaceRoot(value)) as unknown as Json);
+        return;
+      }
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'GET or PUT required' });
+        return;
+      }
+      const info = await resolveWorkspaceRootInfo();
+      sendJson(res, 200, {
+        workspaceRoot: info.root,
+        source: info.source,
+        defaultRoot: info.defaultRoot,
+        envOverride: info.source === 'env',
+        previousRoots: info.previousRoots,
+      });
       return;
     }
 

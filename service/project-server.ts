@@ -596,6 +596,23 @@ async function stopDevServerWin32(key: string, record: DevServerRecord): Promise
   return { stopped: true };
 }
 
+export type DevServerPeek = { recorded: boolean; up: boolean; port: number | null };
+
+/**
+ * R4 (F2): a cheap look at a workspace's dev server for the GET /workspaces
+ * list — the in-memory or on-disk record plus a loopback reachability probe
+ * of its port. Deliberately NO process-identity check (the Windows tasklist
+ * call is too slow for a list); `up` only says the recorded port answers.
+ * POST /server/stop still runs the full verification before killing anything.
+ */
+export async function peekDevServer(dir: string): Promise<DevServerPeek> {
+  const key = path.resolve(dir);
+  const record = serverRecords.get(key) ?? (await readServerRecord(key));
+  if (!record) return { recorded: false, up: false, port: null };
+  const up = record.port !== null ? await isReachable(`http://127.0.0.1:${record.port}/`) : false;
+  return { recorded: true, up, port: record.port };
+}
+
 /**
  * Status of the dev server recorded for `dir`: whether the recorded port answers
  * and the group leader's pid. With no record the status stays silent

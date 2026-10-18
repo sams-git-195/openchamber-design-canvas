@@ -7,8 +7,8 @@ var __export = (target, all) => {
 
 // service/main.ts
 import http from "node:http";
-import { promises as fs12 } from "node:fs";
-import path13 from "node:path";
+import { promises as fs13 } from "node:fs";
+import path14 from "node:path";
 
 // service/studio-config.ts
 import { promises as fs } from "node:fs";
@@ -49,6 +49,42 @@ async function writeStudioConfig(root, rel, text) {
   await fs.mkdir(path.dirname(abs), { recursive: true });
   await fs.writeFile(abs, text, "utf8");
   return { path: relPath };
+}
+var WorkspaceRenameError = class extends Error {
+};
+var MAX_WORKSPACE_NAME = 80;
+function cleanWorkspaceName(raw) {
+  const name = raw.trim();
+  if (name.length < 1 || name.length > MAX_WORKSPACE_NAME) return null;
+  if (/[\u0000-\u001f\u007f]/.test(name)) return null;
+  return name;
+}
+async function renameWorkspaceConfig(root, rawName) {
+  const name = cleanWorkspaceName(rawName);
+  if (name === null) {
+    throw new WorkspaceRenameError(`name must be 1\u2013${MAX_WORKSPACE_NAME} characters with no control characters`);
+  }
+  const abs = await resolveConfigPath(root);
+  if (!abs) throw new WorkspaceRenameError("no design-studio config found");
+  const rel = path.relative(root, abs);
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.readFile(abs, "utf8"));
+  } catch (error) {
+    throw new WorkspaceRenameError(`${rel} could not be read as JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new WorkspaceRenameError(`${rel} is not a JSON object`);
+  parsed.name = name;
+  const tmp = path.join(path.dirname(abs), `.${path.basename(abs)}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  try {
+    await fs.writeFile(tmp, `${JSON.stringify(parsed, null, 2)}
+`, "utf8");
+    await fs.rename(tmp, abs);
+  } catch (error) {
+    await fs.rm(tmp, { force: true }).catch(() => void 0);
+    throw new WorkspaceRenameError(`could not write ${rel}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { name };
 }
 
 // service/project-server.ts
@@ -2811,8 +2847,8 @@ var PickQueue = class {
 
 // service/browser.ts
 function resolveChromePath() {
-  const envOverride = process.env.DS_CHROME_PATH;
-  if (envOverride) return envOverride;
+  const envOverride2 = process.env.DS_CHROME_PATH;
+  if (envOverride2) return envOverride2;
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA ?? "";
     const probes = [
@@ -6510,6 +6546,13 @@ async function stopDevServerWin32(key, record) {
   await clearRecordIfSame(key, pid);
   return { stopped: true };
 }
+async function peekDevServer(dir) {
+  const key = path5.resolve(dir);
+  const record = serverRecords.get(key) ?? await readServerRecord(key);
+  if (!record) return { recorded: false, up: false, port: null };
+  const up = record.port !== null ? await isReachable(`http://127.0.0.1:${record.port}/`) : false;
+  return { recorded: true, up, port: record.port };
+}
 async function getDevServerStatus(dir) {
   const key = path5.resolve(dir);
   const record = serverRecords.get(key) ?? await readServerRecord(key);
@@ -8140,8 +8183,8 @@ __export(scaffold_exports, {
   writeScaffoldFiles: () => writeScaffoldFiles
 });
 import { spawn as spawn3 } from "node:child_process";
-import { promises as fs9 } from "node:fs";
-import path10 from "node:path";
+import { promises as fs10 } from "node:fs";
+import path11 from "node:path";
 
 // shared/design-systems.ts
 var DESIGN_SYSTEMS = [
@@ -9578,45 +9621,267 @@ var DESIGN_SYSTEMS = [
 ];
 
 // service/workspace-root.ts
+import { promises as fs9 } from "node:fs";
+import os2 from "node:os";
+import path10 from "node:path";
+import { fileURLToPath } from "node:url";
+
+// service/settings.ts
 import { promises as fs8 } from "node:fs";
 import os from "node:os";
 import path9 from "node:path";
+var MAX_PREVIOUS_ROOTS = 10;
+function settingsFilePath(env = process.env, platform = process.platform, homeDir = os.homedir()) {
+  const override = env.DS_SETTINGS_PATH;
+  if (typeof override === "string" && override.trim() !== "") return path9.resolve(override.trim());
+  if (platform === "win32") {
+    const appData = env.APPDATA && env.APPDATA.trim() !== "" ? env.APPDATA : path9.join(homeDir, "AppData", "Roaming");
+    return path9.join(appData, "Design Canvas", "settings.json");
+  }
+  if (platform === "darwin") {
+    return path9.join(homeDir, "Library", "Application Support", "Design Canvas", "settings.json");
+  }
+  const xdg = env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim() !== "" ? env.XDG_CONFIG_HOME : path9.join(homeDir, ".config");
+  return path9.join(xdg, "design-canvas", "settings.json");
+}
+function normalizeSettings(raw) {
+  const out = { version: 1 };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  const value = raw;
+  if (typeof value.workspaceRoot === "string" && value.workspaceRoot.trim() !== "") out.workspaceRoot = value.workspaceRoot;
+  if (Array.isArray(value.previousRoots)) {
+    const roots = value.previousRoots.filter((r) => typeof r === "string" && r.trim() !== "");
+    if (roots.length > 0) out.previousRoots = roots.slice(0, MAX_PREVIOUS_ROOTS);
+  }
+  return out;
+}
+function parseSettings(text, file) {
+  try {
+    return normalizeSettings(JSON.parse(text));
+  } catch (error) {
+    console.warn(
+      `[design-canvas] ignoring corrupt settings file ${file}: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return null;
+  }
+}
+async function readSettings(env = process.env) {
+  const file = settingsFilePath(env);
+  let text;
+  try {
+    text = await fs8.readFile(file, "utf8");
+  } catch {
+    return { version: 1 };
+  }
+  return parseSettings(text, file) ?? { version: 1 };
+}
+async function writeSettings(settings, env = process.env) {
+  const file = settingsFilePath(env);
+  const clean = normalizeSettings(settings);
+  await fs8.mkdir(path9.dirname(file), { recursive: true });
+  const tmp = path9.join(path9.dirname(file), `.settings.json.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  try {
+    await fs8.writeFile(tmp, `${JSON.stringify(clean, null, 2)}
+`, "utf8");
+    await fs8.rename(tmp, file);
+  } catch (error) {
+    await fs8.rm(tmp, { force: true }).catch(() => void 0);
+    throw error;
+  }
+  return file;
+}
+
+// service/workspace-root.ts
 var WORKSPACE_FOLDER = "Design Canvas";
 function candidateWorkspaceRoots(env, platform, homeDir) {
   const candidates = [];
   if (platform === "win32") {
-    if (env.ONEDRIVE) candidates.push(path9.join(env.ONEDRIVE, "Documents", WORKSPACE_FOLDER));
-    if (env.USERPROFILE) candidates.push(path9.join(env.USERPROFILE, "Documents", WORKSPACE_FOLDER));
+    if (env.ONEDRIVE) candidates.push(path10.join(env.ONEDRIVE, "Documents", WORKSPACE_FOLDER));
+    if (env.USERPROFILE) candidates.push(path10.join(env.USERPROFILE, "Documents", WORKSPACE_FOLDER));
   }
-  candidates.push(path9.join(homeDir, "Documents", WORKSPACE_FOLDER));
+  candidates.push(path10.join(homeDir, "Documents", WORKSPACE_FOLDER));
   const seen = /* @__PURE__ */ new Set();
   const roots = [];
   for (const candidate of candidates) {
-    const abs = path9.resolve(candidate);
+    const abs = path10.resolve(candidate);
     if (seen.has(abs)) continue;
     seen.add(abs);
     roots.push(abs);
   }
   return roots;
 }
-async function resolveWorkspaceRoot(env = process.env) {
-  const override = env.DS_WORKSPACE_ROOT;
-  if (typeof override === "string" && override.trim() !== "") {
-    return path9.resolve(override.trim());
-  }
-  const candidates = candidateWorkspaceRoots(env, process.platform, os.homedir());
+async function defaultWorkspaceRoot(env = process.env) {
+  const candidates = candidateWorkspaceRoots(env, process.platform, os2.homedir());
   for (const candidate of candidates) {
     try {
-      if ((await fs8.stat(path9.dirname(candidate))).isDirectory()) return candidate;
+      if ((await fs9.stat(path10.dirname(candidate))).isDirectory()) return candidate;
     } catch {
     }
   }
-  return candidates[candidates.length - 1] ?? path9.resolve(os.homedir(), "Documents", WORKSPACE_FOLDER);
+  return candidates[candidates.length - 1] ?? path10.resolve(os2.homedir(), "Documents", WORKSPACE_FOLDER);
+}
+function sameAbsoluteDir(a, b) {
+  const left = path10.resolve(a);
+  const right = path10.resolve(b);
+  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+function envOverride(env) {
+  const override = env.DS_WORKSPACE_ROOT;
+  return typeof override === "string" && override.trim() !== "" ? path10.resolve(override.trim()) : null;
+}
+var settingsCache = null;
+async function readSettingsCached(env) {
+  const file = settingsFilePath(env);
+  let stat;
+  try {
+    stat = await fs9.stat(file);
+  } catch {
+    return { version: 1 };
+  }
+  if (settingsCache && settingsCache.file === file && settingsCache.mtimeMs === stat.mtimeMs && settingsCache.size === stat.size) {
+    return settingsCache.settings;
+  }
+  let text;
+  try {
+    text = await fs9.readFile(file, "utf8");
+  } catch {
+    return { version: 1 };
+  }
+  const settings = parseSettings(text, file) ?? { version: 1 };
+  settingsCache = { file, mtimeMs: stat.mtimeMs, size: stat.size, settings };
+  return settings;
+}
+async function resolveWorkspaceRootInfo(env = process.env) {
+  const defaultRoot = await defaultWorkspaceRoot(env);
+  const settings = await readSettingsCached(env);
+  const override = envOverride(env);
+  let root;
+  let source;
+  if (override) {
+    root = override;
+    source = "env";
+  } else if (settings.workspaceRoot && path10.isAbsolute(settings.workspaceRoot)) {
+    root = path10.resolve(settings.workspaceRoot);
+    source = "settings";
+  } else {
+    root = defaultRoot;
+    source = "default";
+  }
+  const previousRoots = [];
+  for (const candidate of settings.previousRoots ?? []) {
+    if (!path10.isAbsolute(candidate)) continue;
+    const abs = path10.resolve(candidate);
+    if (sameAbsoluteDir(abs, root) || previousRoots.some((seen) => sameAbsoluteDir(seen, abs))) continue;
+    previousRoots.push(abs);
+  }
+  return { root, source, defaultRoot, previousRoots };
+}
+async function resolveWorkspaceRoot(env = process.env) {
+  const override = envOverride(env);
+  if (override) return override;
+  return (await resolveWorkspaceRootInfo(env)).root;
+}
+async function countWorkspaces(root) {
+  let count = 0;
+  try {
+    for (const entry of await fs9.readdir(root, { withFileTypes: true })) {
+      if (entry.isDirectory() && await resolveConfigPath(path10.join(root, entry.name)) !== null) count += 1;
+    }
+  } catch {
+    return 0;
+  }
+  return count;
+}
+var EXTENSION_DIR = path10.dirname(path10.dirname(fileURLToPath(import.meta.url)));
+function insideOrEqualCaseAware(root, dir) {
+  if (process.platform !== "win32") return isInsideOrEqual(root, dir);
+  return isInsideOrEqual(path10.resolve(root).toLowerCase(), path10.resolve(dir).toLowerCase());
+}
+function expandHome(raw, homeDir) {
+  if (raw === "~") return homeDir;
+  if (raw.startsWith("~/") || raw.startsWith("~\\")) return path10.join(homeDir, raw.slice(2));
+  return raw;
+}
+async function validateWorkspaceRootCandidate(raw, opts = {}) {
+  const value = raw.trim();
+  if (value.includes("\0")) return { ok: false, code: "INVALID", error: "The folder path contains an invalid character." };
+  const expanded = expandHome(value, opts.homeDir ?? os2.homedir());
+  if (expanded === "" || !path10.isAbsolute(expanded)) {
+    return { ok: false, code: "NOT_ABSOLUTE", error: "Choose a full folder path (for example C:\\Users\\you\\Designs)." };
+  }
+  const abs = path10.resolve(expanded);
+  if (path10.parse(abs).root === abs) {
+    return { ok: false, code: "IS_FS_ROOT", error: "A drive or filesystem root cannot hold your designs \u2014 pick a folder inside it." };
+  }
+  if (insideOrEqualCaseAware(opts.extensionDir ?? EXTENSION_DIR, abs)) {
+    return { ok: false, code: "INSIDE_EXTENSION", error: "That folder is inside the Design Canvas extension itself \u2014 pick a folder elsewhere." };
+  }
+  for (let dir = abs; ; dir = path10.dirname(dir)) {
+    if (await resolveConfigPath(dir) !== null) {
+      return {
+        ok: false,
+        code: "IS_WORKSPACE",
+        error: `${dir} is a design workspace \u2014 choose the folder that should CONTAIN your workspaces instead.`
+      };
+    }
+    if (path10.dirname(dir) === dir) break;
+  }
+  try {
+    await fs9.mkdir(abs, { recursive: true });
+    const probe = path10.join(abs, `.ds-write-probe-${Math.random().toString(36).slice(2)}`);
+    await fs9.writeFile(probe, "", "utf8");
+    await fs9.rm(probe, { force: true });
+  } catch (error) {
+    return {
+      ok: false,
+      code: "NOT_WRITABLE",
+      error: `Design Canvas cannot write to ${abs}: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+  return { ok: true, workspaceRoot: abs };
+}
+async function setWorkspaceRoot(value, env = process.env, opts = {}) {
+  if (envOverride(env)) {
+    return {
+      ok: false,
+      code: "ENV_OVERRIDE",
+      error: "DS_WORKSPACE_ROOT is set for this service, so the designs location cannot be changed here."
+    };
+  }
+  const info = await resolveWorkspaceRootInfo(env);
+  let next;
+  if (value === null) {
+    next = info.defaultRoot;
+  } else {
+    const checked = await validateWorkspaceRootCandidate(value, opts);
+    if (!checked.ok) return checked;
+    next = checked.workspaceRoot;
+  }
+  const settings = await readSettings(env);
+  let previous = (settings.previousRoots ?? []).filter((r) => !sameAbsoluteDir(r, next));
+  if (!sameAbsoluteDir(info.root, next) && await countWorkspaces(info.root) > 0) {
+    previous = [info.root, ...previous.filter((r) => !sameAbsoluteDir(r, info.root))];
+  }
+  previous = previous.slice(0, MAX_PREVIOUS_ROOTS);
+  const written = { version: 1 };
+  if (value !== null) written.workspaceRoot = next;
+  if (previous.length > 0) written.previousRoots = previous;
+  try {
+    await writeSettings(written, env);
+  } catch (error) {
+    return {
+      ok: false,
+      code: "SETTINGS_WRITE_FAILED",
+      error: `Could not save the settings file: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+  settingsCache = null;
+  return { ok: true, workspaceRoot: next };
 }
 function isInsideOrEqual(root, dir) {
-  const rootAbs = path9.resolve(root);
-  const dirAbs = path9.resolve(dir);
-  return dirAbs === rootAbs || dirAbs.startsWith(rootAbs + path9.sep);
+  const rootAbs = path10.resolve(root);
+  const dirAbs = path10.resolve(dir);
+  return dirAbs === rootAbs || dirAbs.startsWith(rootAbs + path10.sep);
 }
 
 // service/scaffold.ts
@@ -9640,7 +9905,7 @@ async function findFreePort(start, end, offset) {
   return null;
 }
 function projectName(dir) {
-  const base = path10.basename(path10.resolve(dir)).toLowerCase();
+  const base = path11.basename(path11.resolve(dir)).toLowerCase();
   const slug = base.replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "");
   if (!slug) return "design-project";
   return /^[a-z0-9]/.test(slug) ? slug : `design-${slug}`;
@@ -10029,11 +10294,11 @@ ${AUTHORITY_STATEMENT}`;
 }
 async function writeScaffoldFiles(options) {
   const dir = options.dir;
-  if (!path10.isAbsolute(dir)) return { ok: false, error: "dir must be an absolute path" };
+  if (!path11.isAbsolute(dir)) return { ok: false, error: "dir must be an absolute path" };
   if (typeof options.type !== "string" || options.type.trim() === "") {
     return { ok: false, error: "type must be a non-empty string" };
   }
-  const existed = await fs9.stat(dir).then((s) => s.isDirectory()).catch(() => false);
+  const existed = await fs10.stat(dir).then((s) => s.isDirectory()).catch(() => false);
   if (!existed) {
     const root = options.workspaceRoot ?? await resolveWorkspaceRoot();
     if (!isInsideOrEqual(root, dir)) {
@@ -10044,7 +10309,7 @@ async function writeScaffoldFiles(options) {
     }
   }
   try {
-    await fs9.mkdir(dir, { recursive: true });
+    await fs10.mkdir(dir, { recursive: true });
   } catch (error) {
     return { ok: false, error: `could not create ${dir}: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -10087,7 +10352,7 @@ async function writeScaffoldFiles(options) {
   ];
   const written = [];
   try {
-    await fs9.writeFile(path10.join(dir, DEFAULT_CONFIG_PATH), `${JSON.stringify(config, null, 2)}
+    await fs10.writeFile(path11.join(dir, DEFAULT_CONFIG_PATH), `${JSON.stringify(config, null, 2)}
 `, "utf8");
     written.push(DEFAULT_CONFIG_PATH);
   } catch (error) {
@@ -10095,7 +10360,7 @@ async function writeScaffoldFiles(options) {
   }
   try {
     for (const [rel, content] of files) {
-      await fs9.writeFile(path10.join(dir, rel), content, "utf8");
+      await fs10.writeFile(path11.join(dir, rel), content, "utf8");
       written.push(rel);
     }
   } catch (error) {
@@ -10123,7 +10388,7 @@ async function installAndBoot(dir, url, options = {}) {
     opts = dir;
   }
   if (opts.install !== false) {
-    const hasModules = await fs9.stat(path10.join(targetDir, "node_modules")).then((s) => s.isDirectory()).catch(() => false);
+    const hasModules = await fs10.stat(path11.join(targetDir, "node_modules")).then((s) => s.isDirectory()).catch(() => false);
     if (!hasModules) {
       if (typeof opts.install === "function") {
         const hooked = await opts.install(targetDir);
@@ -10205,13 +10470,13 @@ ${tail(output)}` });
 }
 
 // service/screens-watch.ts
-import { watch, promises as fs10 } from "node:fs";
-import path11 from "node:path";
+import { watch, promises as fs11 } from "node:fs";
+import path12 from "node:path";
 var POLL_MS = 2e3;
 var DEBOUNCE_MS = 250;
 function watchRegistry(dir, onChange) {
-  const root = path11.resolve(dir);
-  const file = path11.join(root, SCREENS_FILENAME);
+  const root = path12.resolve(dir);
+  const file = path12.join(root, SCREENS_FILENAME);
   let closed = false;
   let debounce = null;
   let pollTimer = null;
@@ -10236,7 +10501,7 @@ function watchRegistry(dir, onChange) {
           lastReadFailed = true;
           break;
         }
-        lastMtimeMs = await fs10.stat(file).then((s) => s.mtimeMs).catch(() => -1);
+        lastMtimeMs = await fs11.stat(file).then((s) => s.mtimeMs).catch(() => -1);
         lastReadFailed = !change.ok;
         if (!closed) onChange(change);
       } while (!closed && rereadQueued);
@@ -10263,12 +10528,12 @@ function watchRegistry(dir, onChange) {
     });
   } catch {
   }
-  void fs10.stat(file).then((s) => {
+  void fs11.stat(file).then((s) => {
     if (!closed) lastMtimeMs = s.mtimeMs;
   }, () => void 0);
   pollTimer = setInterval(() => {
     if (closed) return;
-    void fs10.stat(file).then(
+    void fs11.stat(file).then(
       (stat) => {
         if (closed) return;
         if (lastReadFailed || stat.mtimeMs !== lastMtimeMs) schedule();
@@ -10299,8 +10564,8 @@ function watchRegistry(dir, onChange) {
 }
 
 // service/export.ts
-import { promises as fs11 } from "node:fs";
-import path12 from "node:path";
+import { promises as fs12 } from "node:fs";
+import path13 from "node:path";
 var EXPORTS_DIRNAME = "exports";
 var ALL_FORMATS = ["png", "pdf"];
 var job = null;
@@ -10346,7 +10611,7 @@ function startExportJob(input) {
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
   const next = {
     id,
-    dir: path12.resolve(input.dir),
+    dir: path13.resolve(input.dir),
     screens: input.screens.map((screen) => ({ ...screen })),
     formats,
     state: "running",
@@ -10394,25 +10659,25 @@ async function runJob(current, browser2) {
 }
 async function captureScreen(browser2, dir, screen) {
   const shot = await browser2.capture(screen.id);
-  const file = path12.join(dir, EXPORTS_DIRNAME, `${screen.id}.png`);
+  const file = path13.join(dir, EXPORTS_DIRNAME, `${screen.id}.png`);
   await atomicWrite(file, shot.png);
   return { ok: true, file };
 }
 async function printScreen(browser2, dir, screen) {
   const pdf = await browser2.printScreenToPdf(screen.url, screen.width, screen.height);
-  const file = path12.join(dir, EXPORTS_DIRNAME, `${screen.id}.pdf`);
+  const file = path13.join(dir, EXPORTS_DIRNAME, `${screen.id}.pdf`);
   await atomicWrite(file, pdf);
   return { ok: true, file };
 }
 async function atomicWrite(file, data) {
-  const targetDir = path12.dirname(file);
-  await fs11.mkdir(targetDir, { recursive: true });
-  const tmp = path12.join(targetDir, `.${path12.basename(file)}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
+  const targetDir = path13.dirname(file);
+  await fs12.mkdir(targetDir, { recursive: true });
+  const tmp = path13.join(targetDir, `.${path13.basename(file)}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`);
   try {
-    await fs11.writeFile(tmp, data);
-    await fs11.rename(tmp, file);
+    await fs12.writeFile(tmp, data);
+    await fs12.rename(tmp, file);
   } catch (error) {
-    await fs11.rm(tmp, { force: true }).catch(() => void 0);
+    await fs12.rm(tmp, { force: true }).catch(() => void 0);
     throw error;
   }
 }
@@ -10651,6 +10916,7 @@ function scaffoldSplit() {
   }
   return null;
 }
+var SCAFFOLD_DEVICES = ["phone", "tablet", "desktop"];
 async function startAsyncScaffold(options) {
   const split = scaffoldSplit();
   if (split) {
@@ -10716,11 +10982,6 @@ async function startAsyncScaffold(options) {
     }
   })();
   return { ok: true, jobId: job2.id, dir: job2.dir, url: job2.url };
-}
-function sameAbsoluteDir(a, b) {
-  const left = path13.resolve(a);
-  const right = path13.resolve(b);
-  return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
 }
 function scaffoldStatus(id, dir) {
   if (!scaffoldJob || scaffoldJob.id !== id || !sameAbsoluteDir(scaffoldJob.dir, dir)) {
@@ -10788,7 +11049,7 @@ var server = http.createServer(async (req, res) => {
       const body = parsed;
       const dir = body?.dir;
       const type = body?.type;
-      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+      if (typeof dir !== "string" || !path14.isAbsolute(dir)) {
         sendJson(res, 400, { error: "dir must be an absolute project path" });
         return;
       }
@@ -10812,6 +11073,14 @@ var server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: "boot must be a boolean" });
         return;
       }
+      if (body?.devices !== void 0 && (!Array.isArray(body.devices) || !body.devices.every((d) => typeof d === "string" && SCAFFOLD_DEVICES.includes(d)))) {
+        sendJson(res, 400, { error: 'devices must be an array of "phone", "tablet" or "desktop"' });
+        return;
+      }
+      if (body?.projectDir !== void 0 && (typeof body.projectDir !== "string" || !path14.isAbsolute(body.projectDir))) {
+        sendJson(res, 400, { error: "projectDir must be an absolute path" });
+        return;
+      }
       const str = (value) => typeof value === "string" ? value : void 0;
       const options = {
         dir,
@@ -10821,7 +11090,9 @@ var server = http.createServer(async (req, res) => {
         brief: str(body?.brief),
         designSystemId: str(body?.designSystemId),
         ...typeof body?.install === "boolean" ? { install: body.install } : {},
-        ...typeof body?.boot === "boolean" ? { boot: body.boot } : {}
+        ...typeof body?.boot === "boolean" ? { boot: body.boot } : {},
+        ...Array.isArray(body?.devices) ? { devices: body.devices } : {},
+        ...typeof body?.projectDir === "string" ? { projectDir: body.projectDir } : {}
       };
       if (body?.async === true) {
         const outcome = await startAsyncScaffold(options);
@@ -10834,7 +11105,7 @@ var server = http.createServer(async (req, res) => {
     if (url.pathname === "/scaffold/status") {
       const dir = params.get("dir") ?? "";
       const jobParam = params.get("job") ?? "";
-      if (!path13.isAbsolute(dir) || jobParam === "") {
+      if (!path14.isAbsolute(dir) || jobParam === "") {
         sendJson(res, 400, { error: "dir must be absolute and job is required" });
         return;
       }
@@ -10854,7 +11125,7 @@ var server = http.createServer(async (req, res) => {
         return;
       }
       const dir = parsed?.dir;
-      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+      if (typeof dir !== "string" || !path14.isAbsolute(dir)) {
         sendJson(res, 400, { error: "dir must be an absolute project path" });
         return;
       }
@@ -10898,7 +11169,7 @@ var server = http.createServer(async (req, res) => {
         return;
       }
       const dir = parsed?.dir;
-      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+      if (typeof dir !== "string" || !path14.isAbsolute(dir)) {
         sendJson(res, 400, { error: "dir must be an absolute project path" });
         return;
       }
@@ -10916,7 +11187,7 @@ var server = http.createServer(async (req, res) => {
     }
     if (url.pathname === "/server/status") {
       const dir = params.get("dir") ?? "";
-      if (!path13.isAbsolute(dir)) {
+      if (!path14.isAbsolute(dir)) {
         sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }
@@ -10929,7 +11200,7 @@ var server = http.createServer(async (req, res) => {
     }
     if (url.pathname === "/screens") {
       const dir = params.get("dir") ?? "";
-      if (!path13.isAbsolute(dir)) {
+      if (!path14.isAbsolute(dir)) {
         sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }
@@ -10968,7 +11239,7 @@ var server = http.createServer(async (req, res) => {
         return;
       }
       const dir = parsed?.dir;
-      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+      if (typeof dir !== "string" || !path14.isAbsolute(dir)) {
         sendJson(res, 400, { error: "dir must be an absolute workspace path" });
         return;
       }
@@ -10983,7 +11254,7 @@ var server = http.createServer(async (req, res) => {
           return;
         }
         const current = getLastWorkspace()?.dir ?? watchedDir ?? browser2.currentWorkspaceDir();
-        if (current && path13.resolve(current) !== path13.resolve(dir)) {
+        if (current && path14.resolve(current) !== path14.resolve(dir)) {
           sendJson(res, 200, { ok: true, pushed: false, reason: "this workspace is not the one open on the canvas" });
           return;
         }
@@ -11075,27 +11346,120 @@ var server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === "/workspaces") {
-      const rootDir = await resolveWorkspaceRoot();
+      const info = await resolveWorkspaceRootInfo();
+      const rootDir = info.root;
+      const roots = [rootDir, ...info.previousRoots];
       const workspaces = [];
-      try {
-        for (const entry of await fs12.readdir(rootDir, { withFileTypes: true })) {
-          if (!entry.isDirectory()) continue;
-          const dir = path13.join(rootDir, entry.name);
-          if (await resolveConfigPath(dir) === null) continue;
-          const { config } = await readStudioConfig(dir);
-          const name = typeof config?.name === "string" && config.name.trim() !== "" ? config.name.trim() : entry.name;
-          const item = { dir, name };
-          if (typeof config?.url === "string" && config.url.trim() !== "") item.url = config.url.trim();
-          if (await hasScreensFile(dir)) {
-            const registry = await readScreens(dir);
-            item.screens = registry.screens;
+      const rootError = {};
+      for (const scanRoot of roots) {
+        const legacyRoot = scanRoot !== rootDir;
+        let entries;
+        try {
+          entries = await fs13.readdir(scanRoot, { withFileTypes: true });
+        } catch (error) {
+          const code = error?.code;
+          if (code !== "ENOENT" && code !== "ENOTDIR") {
+            rootError[scanRoot] = error instanceof Error ? error.message : String(error);
           }
-          workspaces.push(item);
+          continue;
         }
-      } catch {
+        const found = await Promise.all(
+          entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
+            const dir = path14.join(scanRoot, entry.name);
+            try {
+              if (await resolveConfigPath(dir) === null) return null;
+              const { config } = await readStudioConfig(dir);
+              const name = typeof config?.name === "string" && config.name.trim() !== "" ? config.name.trim() : entry.name;
+              const item = { dir, name };
+              if (typeof config?.url === "string" && config.url.trim() !== "") item.url = config.url.trim();
+              if (await hasScreensFile(dir)) {
+                const registry = await readScreens(dir);
+                item.screens = registry.screens;
+              }
+              item.root = scanRoot;
+              item.legacyRoot = legacyRoot;
+              item.server = await peekDevServer(dir).catch(() => ({ recorded: false, up: false, port: null }));
+              return item;
+            } catch {
+              return null;
+            }
+          })
+        );
+        for (const item of found) {
+          if (item && !workspaces.some((seen) => sameAbsoluteDir(String(seen.dir), String(item.dir)))) workspaces.push(item);
+        }
       }
       workspaces.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-      sendJson(res, 200, { root: rootDir, workspaces });
+      sendJson(res, 200, {
+        root: rootDir,
+        roots,
+        workspaces,
+        ...Object.keys(rootError).length > 0 ? { rootError } : {}
+      });
+      return;
+    }
+    if (url.pathname === "/workspaces/rename") {
+      if (req.method !== "POST") {
+        sendJson(res, 405, { error: "POST required" });
+        return;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: "body must be JSON" });
+        return;
+      }
+      const body = parsed;
+      if (typeof body?.dir !== "string" || !path14.isAbsolute(body.dir)) {
+        sendJson(res, 400, { error: "dir must be an absolute workspace path" });
+        return;
+      }
+      if (typeof body.name !== "string") {
+        sendJson(res, 400, { error: "name must be a string" });
+        return;
+      }
+      if (!await isDesignWorkspace(body.dir)) {
+        sendNotAWorkspace(res);
+        return;
+      }
+      try {
+        const renamed = await renameWorkspaceConfig(body.dir, body.name);
+        sendJson(res, 200, { ok: true, name: renamed.name });
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : "rename failed" });
+      }
+      return;
+    }
+    if (url.pathname === "/settings") {
+      if (req.method === "PUT") {
+        let parsed;
+        try {
+          parsed = JSON.parse(await readBody(req));
+        } catch {
+          sendJson(res, 400, { error: "body must be JSON" });
+          return;
+        }
+        const value = parsed?.workspaceRoot;
+        if (value !== null && typeof value !== "string") {
+          sendJson(res, 400, { error: "workspaceRoot must be a string or null" });
+          return;
+        }
+        sendJson(res, 200, await setWorkspaceRoot(value));
+        return;
+      }
+      if (req.method !== "GET") {
+        sendJson(res, 405, { error: "GET or PUT required" });
+        return;
+      }
+      const info = await resolveWorkspaceRootInfo();
+      sendJson(res, 200, {
+        workspaceRoot: info.root,
+        source: info.source,
+        defaultRoot: info.defaultRoot,
+        envOverride: info.source === "env",
+        previousRoots: info.previousRoots
+      });
       return;
     }
     if (url.pathname === "/mode") {
@@ -11133,7 +11497,7 @@ var server = http.createServer(async (req, res) => {
     }
     if (url.pathname === "/view") {
       const dir = params.get("dir") ?? "";
-      if (!path13.isAbsolute(dir)) {
+      if (!path14.isAbsolute(dir)) {
         sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }
@@ -11180,7 +11544,7 @@ var server = http.createServer(async (req, res) => {
       }
       const body = parsed;
       const dir = body?.dir;
-      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+      if (typeof dir !== "string" || !path14.isAbsolute(dir)) {
         sendJson(res, 400, { error: "dir must be an absolute workspace path" });
         return;
       }
@@ -11253,7 +11617,7 @@ var server = http.createServer(async (req, res) => {
     if (url.pathname === "/export/status") {
       const dir = params.get("dir") ?? "";
       const jobParam = params.get("job") ?? "";
-      if (!path13.isAbsolute(dir) || jobParam === "") {
+      if (!path14.isAbsolute(dir) || jobParam === "") {
         sendJson(res, 400, { error: "dir must be absolute and job is required" });
         return;
       }
@@ -11274,7 +11638,7 @@ var server = http.createServer(async (req, res) => {
         return;
       }
       const dir = parsed?.dir;
-      if (typeof dir !== "string" || !path13.isAbsolute(dir)) {
+      if (typeof dir !== "string" || !path14.isAbsolute(dir)) {
         sendJson(res, 400, { error: "dir must be an absolute workspace path" });
         return;
       }
@@ -11351,7 +11715,7 @@ var server = http.createServer(async (req, res) => {
       const target = body?.url;
       if (typeof target === "string" && target !== "") {
         const dir = typeof body?.dir === "string" && body.dir !== "" ? body.dir : null;
-        if (dir && !path13.isAbsolute(dir)) {
+        if (dir && !path14.isAbsolute(dir)) {
           sendJson(res, 400, { error: "dir must be absolute" });
           return;
         }
@@ -11381,11 +11745,11 @@ var server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: "url is required" });
         return;
       }
-      if (!path13.isAbsolute(dirValue)) {
+      if (!path14.isAbsolute(dirValue)) {
         sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }
-      const dirExists = await fs12.stat(dirValue).then((s) => s.isDirectory(), () => false);
+      const dirExists = await fs13.stat(dirValue).then((s) => s.isDirectory(), () => false);
       if (!dirExists) {
         sendJson(res, 200, {
           ok: false,
@@ -11483,7 +11847,7 @@ var server = http.createServer(async (req, res) => {
     }
     if (url.pathname === "/config") {
       const root = params.get("dir") ?? "";
-      if (!path13.isAbsolute(root)) {
+      if (!path14.isAbsolute(root)) {
         sendJson(res, 400, { error: "dir must be absolute" });
         return;
       }

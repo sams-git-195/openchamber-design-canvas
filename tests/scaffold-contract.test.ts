@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -149,5 +149,59 @@ test('F1: an unknown job (service restart) settles the panel poll as a failure i
   } finally {
     child.kill('SIGKILL');
     await rm(wsRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test('R4: scaffold confinement follows the settings root (DS_SETTINGS_PATH, no DS_WORKSPACE_ROOT)', async () => {
+  const port = await pickFreePort(45000, 1500);
+  const base = await mkdtemp(path.join(tmpdir(), 'scaffold-settings-'));
+  const chosenRoot = path.join(base, 'chosen-designs');
+  const settingsFile = path.join(base, 'cfg', 'settings.json');
+  await mkdir(path.dirname(settingsFile), { recursive: true });
+  await writeFile(settingsFile, JSON.stringify({ version: 1, workspaceRoot: chosenRoot }));
+  const env: NodeJS.ProcessEnv = { ...process.env, DS_SETTINGS_PATH: settingsFile, OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN };
+  delete env.DS_WORKSPACE_ROOT;
+  const child = spawn(process.execPath, [path.join(root, 'service', 'main.ts')], { env, stdio: 'ignore' });
+  (api.host as unknown as { toast: (t: unknown) => Promise<void> }).toast = async () => undefined;
+  try {
+    await waitForHealth(port, child);
+    bridgeTo(port);
+    const listed = await api.getWorkspaces();
+    assert.equal(listed.root, chosenRoot, 'the panel learns the settings root from /workspaces');
+
+    const dir = api.joinWorkspaceDir(listed.root, 'settings-ws');
+    const started = await api.scaffoldProject(dir, { type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'settings root' });
+    assert.equal(started.ok, true, `a new dir under the settings root is allowed (${started.ok ? '' : started.error})`);
+    if (!started.ok) return;
+    assert.equal(await main.runScaffoldJob(started.jobId, started.dir || dir, { pollMs: 50, maxMs: 20_000 }), 'done');
+    assert.equal((await stat(path.join(dir, '.design-studio.json'))).isFile(), true, 'the scaffold landed in the settings root');
+
+    // A NEW dir outside the settings root is refused by confinement.
+    const outside = path.join(base, 'elsewhere', 'stray-ws');
+    const refused = await fetch(`http://127.0.0.1:${port}/scaffold`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ dir: outside, type: 'hi-fi', install: false, boot: false }),
+    });
+    assert.equal(refused.status, 200);
+    const refusedBody = (await refused.json()) as { ok: boolean; error?: string };
+    assert.equal(refusedBody.ok, false);
+    assert.match(refusedBody.error ?? '', /outside the Design Canvas workspace root/);
+
+    // R4 forwarding: devices/projectDir are accepted (shape-checked only).
+    const post = (body: Record<string, unknown>) => fetch(`http://127.0.0.1:${port}/scaffold`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'hi-fi', install: false, boot: false, ...body }),
+    });
+    const forwarded = await post({ dir: path.join(chosenRoot, 'devices-ws'), devices: ['phone', 'desktop'], projectDir: base });
+    assert.equal(forwarded.status, 200);
+    assert.equal(((await forwarded.json()) as { ok: boolean }).ok, true, 'unknown-to-scaffold options never break it');
+    assert.equal((await post({ dir: path.join(chosenRoot, 'x'), devices: ['watch'] })).status, 400, 'unknown device → 400');
+    assert.equal((await post({ dir: path.join(chosenRoot, 'x'), devices: 'phone' })).status, 400, 'devices not an array → 400');
+    assert.equal((await post({ dir: path.join(chosenRoot, 'x'), projectDir: 'relative' })).status, 400, 'projectDir not absolute → 400');
+  } finally {
+    child.kill('SIGKILL');
+    await rm(base, { recursive: true, force: true }).catch(() => undefined);
   }
 });

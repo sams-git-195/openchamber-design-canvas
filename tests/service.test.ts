@@ -607,10 +607,12 @@ test('resolveWorkspaceRoot probes "Documents" existence (win32 branch)', async (
   await mkdir(path.join(one, 'Documents'));
   await mkdir(path.join(two, 'Documents'));
   try {
-    const picked = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two });
+    // R4: point the settings file at nothing so a real user choice cannot leak in.
+    const noSettings = path.join(one, 'no-settings.json');
+    const picked = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two, DS_SETTINGS_PATH: noSettings });
     assert.equal(picked, path.resolve(one, 'Documents', WORKSPACE_FOLDER), 'first existing Documents wins');
     await rm(path.join(one, 'Documents'), { recursive: true });
-    const second = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two });
+    const second = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two, DS_SETTINGS_PATH: noSettings });
     assert.equal(second, path.resolve(two, 'Documents', WORKSPACE_FOLDER), 'when the first dies the next wins');
   } finally {
     await rm(one, { recursive: true, force: true }).catch(() => undefined);
@@ -737,20 +739,27 @@ test('GET /workspaces answers {root, workspaces} from the workspace root on disk
   await writeFile(path.join(beta, '.design-studio.json'), JSON.stringify({ version: 1 })); // no name → basename, no url, no screens
   await writeFile(path.join(wsRoot, 'stray.txt'), 'not a workspace'); // files are skipped
 
-  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: wsRoot });
+  // R4: a settings file that does not exist keeps previousRoots empty (hermetic).
+  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: wsRoot, DS_SETTINGS_PATH: path.join(wsRoot, 'no-settings.json') });
   try {
     const res = await fetch(`http://127.0.0.1:${port}/workspaces`, { headers: { authorization: `Bearer ${TOKEN}` } });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { root: string; workspaces: Array<Record<string, unknown>> };
+    const body = (await res.json()) as { root: string; roots: string[]; workspaces: Array<Record<string, unknown>> };
     assert.equal(body.root, wsRoot);
+    assert.deepEqual(body.roots, [wsRoot], 'R4: roots lists every scanned root, current first');
     assert.equal(body.workspaces.length, 2, 'only dirs with .design-studio.json are listed');
+    // R4 additive keys: root, legacyRoot, and the cheap server peek.
+    const noServer = { recorded: false, up: false, port: null };
     assert.deepEqual(body.workspaces[0], {
       dir: alpha,
       name: 'Alpha',
       url: 'http://localhost:5173/',
       screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }],
+      root: wsRoot,
+      legacyRoot: false,
+      server: noServer,
     });
-    assert.deepEqual(body.workspaces[1], { dir: beta, name: 'beta' }, 'no url/screens keys when absent');
+    assert.deepEqual(body.workspaces[1], { dir: beta, name: 'beta', root: wsRoot, legacyRoot: false, server: noServer }, 'no url/screens keys when absent');
     assert.equal(JSON.stringify(body.workspaces).includes('gamma'), false, 'no-config dirs are excluded');
   } finally {
     child.kill('SIGKILL');
@@ -760,11 +769,11 @@ test('GET /workspaces answers {root, workspaces} from the workspace root on disk
 
 test('GET /workspaces with a missing root answers the root with an empty list', { timeout: 60_000 }, async () => {
   const missing = path.join(await mkdtemp(path.join(tmpdir(), 'ds-wsroot-missing-')), 'never-created');
-  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: missing });
+  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: missing, DS_SETTINGS_PATH: path.join(missing, 'no-settings.json') });
   try {
     const res = await fetch(`http://127.0.0.1:${port}/workspaces`, { headers: { authorization: `Bearer ${TOKEN}` } });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { root: missing, workspaces: [] });
+    assert.deepEqual(await res.json(), { root: missing, roots: [missing], workspaces: [] }, 'a missing root is empty, not a rootError');
   } finally {
     child.kill('SIGKILL');
   }
