@@ -567,6 +567,82 @@ test('F13: a play-mode `changed` from artboard B setActive(B) with NO window rai
   assert.equal(internal.activeScreenId, 'home', 'a non-ready board never steals activation');
 });
 
+// ---- F13 boot-grace (gate finding #2): a boot IN play mode never moves the
+// restored activeScreen. ARTIFACT_BRIDGE emits 'changed' on BOTH
+// DOMContentLoaded and window load, so the old ready-only guard let the last
+// board to settle steal active from the /open-restored screen. The bridge now
+// tags each 'changed' with a reason ('dom'/'load'/'nav') and tagged events
+// only follow AFTER the board's first 'load' armed it (ScreenRecord.
+// bootSettled); the arming 'load' itself never follows.
+
+test('F13 boot-grace: a staggered play-mode boot (dom→ready→load per board) NEVER moves the restored activeScreen', async () => {
+  const { browser, internal, shellCalls } = stubbedBrowser();
+  openFakeWorkspace(internal);
+  const raised: string[] = [];
+  internal.bringToFront = async () => { raised.push('raise'); };
+  internal.mode = 'play';
+  // The /open {screen} restored value the whole boot must preserve.
+  internal.activeScreenId = 'phone';
+  const screens = internal.screens as Map<string, { state: string; bootSettled?: boolean }>;
+  const homeArtifact = { session: 'oopif-home', frame: 'f-home', id: 6, unique: 'u6', origin: 'http://localhost:9' };
+  const phoneArtifact = { session: 'oopif-phone', frame: 'f-phone', id: 7, unique: 'u7', origin: 'http://localhost:9' };
+  const contexts = {
+    screenForContext: (session: string | undefined) => (session === 'oopif-home' ? 'home' : session === 'oopif-phone' ? 'phone' : null),
+    matches: (_c: unknown, session: string | undefined, id: unknown) =>
+      (session === 'oopif-home' && id === 6) || (session === 'oopif-phone' && id === 7),
+    artifact: (id?: string) => (id === 'home' ? homeArtifact : id === 'phone' ? phoneArtifact : null),
+    shellAuthorityCurrent: () => true,
+    shell: () => null,
+  };
+  internal.contexts = contexts;
+  const dispatch = (browser as unknown as {
+    dispatchBinding: (c: unknown, name: string, value: unknown, session: string | undefined, id: unknown) => boolean;
+  }).dispatchBinding.bind(browser);
+
+  // Staggered, INTERLEAVED boot: phone (the restored active) doms first, home
+  // SETTLES LAST — the exact ordering that used to flip active to home.
+  assert.equal(dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'dom' }, 'oopif-phone', 7), true);
+  await pause(10);
+  screens.get('phone')!.state = 'ready'; // the dom-refresh marks ready (interactive passes the gate)
+  assert.equal(dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'dom' }, 'oopif-home', 6), true);
+  await pause(10);
+  screens.get('home')!.state = 'ready';
+  assert.equal(internal.activeScreenId, 'phone', 'no dom-changed moved active');
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'load' }, 'oopif-phone', 7);
+  await pause(20);
+  assert.equal(internal.activeScreenId, 'phone', 'the active board\'s own load never flips');
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'load' }, 'oopif-home', 6);
+  await pause(20);
+  assert.equal(internal.activeScreenId, 'phone', 'F13 boot-grace: the LAST board to settle did not steal the restored activeScreen');
+  assert.equal(shellCalls.includes('SETACTIVE'), false, 'no setActive push during the boot');
+  assert.equal(raised.length, 0, 'V4-8: and no window raise');
+  assert.equal(screens.get('home')!.bootSettled, true, "the boot's own load armed the follow");
+  assert.equal(screens.get('phone')!.bootSettled, true);
+
+  // Post-grace the F13 follow is fully alive: a same-document user nav
+  // ('nav') follows, and a later FULL-document user navigation (a link click:
+  // the new document's 'dom', then its arming-exempt 'load') follows too.
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'nav' }, 'oopif-home', 6);
+  await pause(30);
+  assert.equal(internal.activeScreenId, 'home', 'after boot, a same-document nav follows (F13 kept)');
+  assert.ok(shellCalls.includes('SETACTIVE'), 'the follow pushed setActive');
+  internal.activeScreenId = 'phone';
+  shellCalls.length = 0;
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'dom' }, 'oopif-home', 6);
+  await pause(30);
+  assert.equal(internal.activeScreenId, 'home', 'after boot, a full-document user navigation follows on its dom event');
+
+  // A still-unarmed board (fresh record, boot not settled) ignores even a
+  // 'nav' — an SPA router's pre-load replaceState is boot noise, not a click.
+  internal.activeScreenId = 'phone';
+  screens.get('home')!.bootSettled = false;
+  shellCalls.length = 0;
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'nav' }, 'oopif-home', 6);
+  await pause(30);
+  assert.equal(internal.activeScreenId, 'phone', 'a tagged event from an un-booted board never follows');
+  assert.equal(shellCalls.includes('SETACTIVE'), false);
+});
+
 // ---- FIX-3 (F17): stop-server context-menu action --------------------------------
 
 test('F17: screen-menu stop-server runs the injected stopper and confirms via showToast', async () => {

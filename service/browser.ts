@@ -1037,7 +1037,11 @@ const ARTIFACT_BRIDGE = `(() => {
   if (window.__dsBridgeInstalled) return; window.__dsBridgeInstalled = true;
   window.__dsViewerFlags = {menu:false,pan:false};
   let consumed = null;
-  const emit = type => {if(window.__dsArtifactEvent)window.__dsArtifactEvent(JSON.stringify({type}));};
+  // F13 boot-grace (gate finding #2): 'changed' carries an OPTIONAL reason —
+  // 'nav' = user-driven same-document navigation (pushState/replaceState/
+  // hashchange/popstate), 'dom'/'load' = a document's own boot events. The
+  // field is additive (§3): the service tolerates events without it.
+  const emit = (type,reason) => {if(window.__dsArtifactEvent)window.__dsArtifactEvent(JSON.stringify(reason?{type,reason}:{type}));};
   document.addEventListener('pointerdown', e => {
     // A new pointer sequence supersedes a stale dismissal; keyboard clicks do
     // not belong to any pointer sequence.
@@ -1052,9 +1056,9 @@ const ARTIFACT_BRIDGE = `(() => {
   window.addEventListener('blur',()=>{consumed=null;});
   document.addEventListener('click', e => {if(e.detail!==0&&matches(e)){consumed=null;e.preventDefault();e.stopImmediatePropagation();}},true);
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&window.__dsViewerFlags.menu){e.preventDefault();e.stopImmediatePropagation();emit('dismiss');}},true);
-  for(const method of ['pushState','replaceState']){const original=history[method];history[method]=function(...args){const result=original.apply(this,args);emit('changed');return result;};}
-  window.addEventListener('hashchange',()=>emit('changed'));window.addEventListener('popstate',()=>emit('changed'));
-  window.addEventListener('load',()=>emit('changed'));document.addEventListener('DOMContentLoaded',()=>emit('changed'));
+  for(const method of ['pushState','replaceState']){const original=history[method];history[method]=function(...args){const result=original.apply(this,args);emit('changed','nav');return result;};}
+  window.addEventListener('hashchange',()=>emit('changed','nav'));window.addEventListener('popstate',()=>emit('changed','nav'));
+  window.addEventListener('load',()=>emit('changed','load'));document.addEventListener('DOMContentLoaded',()=>emit('changed','dom'));
   // Bubble phase preserves target/widget-owned shortcuts. Recognized browser
   // zoom defaults are suppressed even when the renderer declines camera zoom.
   document.addEventListener('keydown',e=>{
@@ -1273,6 +1277,13 @@ type ScreenRecord = {
   y?: number | null;
   state: 'loading' | 'ready' | 'error';
   message: string;
+  /** F13 boot-grace (gate finding #2): true once this board's FIRST window
+   *  `load` ('changed' reason:'load') settled its initial document boot. The
+   *  play-mode active follow only reacts to reason-tagged events AFTER this —
+   *  a boot's own DOMContentLoaded/load storm can never steal the restored
+   *  activeScreen. Preserved across a registry rebuild only while the url is
+   *  unchanged (same document); a service-driven navigation clears it. */
+  bootSettled: boolean;
 };
 
 
@@ -1777,6 +1788,9 @@ export class Browser {
         ...(position.x !== undefined ? { x: position.x, y: position.y } : {}),
         state: moved ? 'loading' : previous?.state ?? 'loading',
         message: moved ? '' : previous?.message ?? '',
+        // F13 boot-grace: a url change (or a brand-new board) means a fresh
+        // document boot — the follow disarms until that boot's 'load' settles.
+        bootSettled: moved ? false : previous?.bootSettled ?? false,
       });
       order.push(id);
     }
@@ -2235,12 +2249,31 @@ export class Browser {
           // FIX-3 (F13): in PLAY mode the user drives the screens by clicking
           // through them, so in-frame navigation inside artboard B moves the
           // active outline to B (the 'changed' signal is already tagged per
-          // screen by the executionContextId→screenId authority). Guarded to
-          // boards that already reached 'ready' so a boot-time load storm
-          // cannot flap the active screen; camera + focus only, and NEVER a
-          // window raise (setActive does not bringToFront — V4-8 compliant).
-          // Edit mode keeps the user's explicit activation untouched.
-          if(this.mode==='play'&&screen!==this.activeScreenId&&this.screens.get(screen)?.state==='ready'){
+          // screen by the executionContextId→screenId authority); camera +
+          // focus only, and NEVER a window raise (setActive does not
+          // bringToFront — V4-8 compliant). Edit mode keeps the user's
+          // explicit activation untouched.
+          // F13 BOOT-GRACE (gate finding #2): ARTIFACT_BRIDGE emits 'changed'
+          // on BOTH DOMContentLoaded and window load, so the old ready-only
+          // guard was NOT boot-safe — a session booting in play mode let every
+          // board's load-event 'changed' steal the active slot, clobbering the
+          // /open-restored activeScreen (bounded ≤1 flip/board, but the
+          // "boot storms can't flap" invariant was false). The bridge now tags
+          // each 'changed' with a reason ('dom'/'load' = the document's own
+          // boot, 'nav' = pushState/replaceState/hashchange/popstate), and a
+          // TAGGED event only follows once the board's first 'load' settled
+          // its boot (ScreenRecord.bootSettled); that settling 'load' arms the
+          // follow but never follows itself. After the boot, user-driven
+          // navigation follows whether same-document ('nav') or a full
+          // document change ('dom'/'load' from the new document — the F13
+          // link-click pin). §3 additive-compat: a 'changed' WITHOUT a reason
+          // (legacy bridge shape) keeps the original ready-gated behavior.
+          const reason=value.reason==='dom'||value.reason==='load'||value.reason==='nav'?value.reason:undefined;
+          const record=this.screens.get(screen);
+          const armingBoot=reason==='load'&&!!record&&!record.bootSettled;
+          if(armingBoot)record!.bootSettled=true;
+          const userDriven=reason===undefined||(!armingBoot&&record?.bootSettled===true);
+          if(this.mode==='play'&&userDriven&&screen!==this.activeScreenId&&record?.state==='ready'){
             void this.setActive(screen).catch(()=>undefined);
           }
         }
@@ -3298,7 +3331,7 @@ export class Browser {
         record.url=url; // the cold bake carries the requested navigation target
       }
       const record=this.screens.get(target)!;
-      record.liveUrl='';record.liveTitle='';record.state='loading';record.message='';
+      record.liveUrl='';record.liveTitle='';record.state='loading';record.message='';record.bootSettled=false; // F13: a new document re-boots under grace
       this.requestedUrl=url;
       await this.start(url);
       return this.transaction(async()=>{
@@ -3322,7 +3355,7 @@ export class Browser {
       const previous=this.contexts?.artifact(target);
       if(!previous)throw new Error('artifact navigation context is unavailable; retry after the frame becomes available');
       const navigation={previous,target:this.requestedUrl,sameDocumentVersion:this.contexts!.artifactSameDocumentVersion(target),responded:false,loaderId:undefined as string|undefined};
-      this.pendingNavigations.set(target,navigation);record.url=this.requestedUrl;record.liveUrl='';record.liveTitle='';record.state='loading';record.message='';
+      this.pendingNavigations.set(target,navigation);record.url=this.requestedUrl;record.liveUrl='';record.liveTitle='';record.state='loading';record.message='';record.bootSettled=false; // F13: a new document re-boots under grace
       try{
         // One navigation primitive, with the loader returned by the requested
         // frame's CDP session. Metadata must never independently assign src.
@@ -4055,6 +4088,12 @@ export class Browser {
     });
     this.hoverPending = null;
     this.lastHoverScreen = null;
+    // F13 boot-grace: the follow's arming belongs to the dying window's
+    // documents — the next launch's boards boot fresh under grace (their first
+    // 'load' re-arms). Without this, a /close → re-/open on the SAME Browser
+    // instance inherits armed records and the second boot's dom/load storm
+    // would flip the restored activeScreen exactly like the original finding.
+    for (const record of this.screens.values()) record.bootSettled = false;
     // F1: the handshake-recovery loop and the binding-replay queue belong to
     // the dying window — and the heartbeat starts clean for the next launch
     // (the fresh-queue comment above already claimed this intent for the

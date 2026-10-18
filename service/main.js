@@ -3562,7 +3562,11 @@ var ARTIFACT_BRIDGE = `(() => {
   if (window.__dsBridgeInstalled) return; window.__dsBridgeInstalled = true;
   window.__dsViewerFlags = {menu:false,pan:false};
   let consumed = null;
-  const emit = type => {if(window.__dsArtifactEvent)window.__dsArtifactEvent(JSON.stringify({type}));};
+  // F13 boot-grace (gate finding #2): 'changed' carries an OPTIONAL reason \u2014
+  // 'nav' = user-driven same-document navigation (pushState/replaceState/
+  // hashchange/popstate), 'dom'/'load' = a document's own boot events. The
+  // field is additive (\xA73): the service tolerates events without it.
+  const emit = (type,reason) => {if(window.__dsArtifactEvent)window.__dsArtifactEvent(JSON.stringify(reason?{type,reason}:{type}));};
   document.addEventListener('pointerdown', e => {
     // A new pointer sequence supersedes a stale dismissal; keyboard clicks do
     // not belong to any pointer sequence.
@@ -3577,9 +3581,9 @@ var ARTIFACT_BRIDGE = `(() => {
   window.addEventListener('blur',()=>{consumed=null;});
   document.addEventListener('click', e => {if(e.detail!==0&&matches(e)){consumed=null;e.preventDefault();e.stopImmediatePropagation();}},true);
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&window.__dsViewerFlags.menu){e.preventDefault();e.stopImmediatePropagation();emit('dismiss');}},true);
-  for(const method of ['pushState','replaceState']){const original=history[method];history[method]=function(...args){const result=original.apply(this,args);emit('changed');return result;};}
-  window.addEventListener('hashchange',()=>emit('changed'));window.addEventListener('popstate',()=>emit('changed'));
-  window.addEventListener('load',()=>emit('changed'));document.addEventListener('DOMContentLoaded',()=>emit('changed'));
+  for(const method of ['pushState','replaceState']){const original=history[method];history[method]=function(...args){const result=original.apply(this,args);emit('changed','nav');return result;};}
+  window.addEventListener('hashchange',()=>emit('changed','nav'));window.addEventListener('popstate',()=>emit('changed','nav'));
+  window.addEventListener('load',()=>emit('changed','load'));document.addEventListener('DOMContentLoaded',()=>emit('changed','dom'));
   // Bubble phase preserves target/widget-owned shortcuts. Recognized browser
   // zoom defaults are suppressed even when the renderer declines camera zoom.
   document.addEventListener('keydown',e=>{
@@ -4132,7 +4136,10 @@ var Browser = class {
         ...typeof raw.file === "string" && raw.file ? { file: raw.file } : previous?.file && !moved ? { file: previous.file } : {},
         ...position.x !== void 0 ? { x: position.x, y: position.y } : {},
         state: moved ? "loading" : previous?.state ?? "loading",
-        message: moved ? "" : previous?.message ?? ""
+        message: moved ? "" : previous?.message ?? "",
+        // F13 boot-grace: a url change (or a brand-new board) means a fresh
+        // document boot — the follow disarms until that boot's 'load' settles.
+        bootSettled: moved ? false : previous?.bootSettled ?? false
       });
       order.push(id);
     }
@@ -4473,7 +4480,12 @@ var Browser = class {
         if (value.type === "dismiss" && this.canvasFlags.menu) void this.shellEval("__dsCanvas.dismissMenu()").catch(() => void 0);
         if (value.type === "changed") {
           void this.refreshScreen(screen);
-          if (this.mode === "play" && screen !== this.activeScreenId && this.screens.get(screen)?.state === "ready") {
+          const reason = value.reason === "dom" || value.reason === "load" || value.reason === "nav" ? value.reason : void 0;
+          const record = this.screens.get(screen);
+          const armingBoot = reason === "load" && !!record && !record.bootSettled;
+          if (armingBoot) record.bootSettled = true;
+          const userDriven = reason === void 0 || !armingBoot && record?.bootSettled === true;
+          if (this.mode === "play" && userDriven && screen !== this.activeScreenId && record?.state === "ready") {
             void this.setActive(screen).catch(() => void 0);
           }
         }
@@ -5363,6 +5375,7 @@ var Browser = class {
       record.liveTitle = "";
       record.state = "loading";
       record.message = "";
+      record.bootSettled = false;
       this.requestedUrl = url;
       await this.start(url);
       return this.transaction(async () => {
@@ -5389,6 +5402,7 @@ var Browser = class {
       record.liveTitle = "";
       record.state = "loading";
       record.message = "";
+      record.bootSettled = false;
       try {
         await this.shellEvalSettled(target === this.activeScreenId ? `__dsCanvas.setStatus({state:'loading'});__dsCanvas.setPage({url:${JSON.stringify(this.requestedUrl)},pages:${JSON.stringify(this.pages)},navigate:false})` : `__dsCanvas.setScreenState(${JSON.stringify(target)},${JSON.stringify({ state: "loading" })})`);
         if (authority && !this.contexts?.shellAuthorityCurrent(authority)) return { url: record.liveUrl, title: record.liveTitle || record.title, settled: false };
@@ -6035,6 +6049,7 @@ var Browser = class {
     });
     this.hoverPending = null;
     this.lastHoverScreen = null;
+    for (const record of this.screens.values()) record.bootSettled = false;
     this.stopShellHandshakeRecovery();
     this.stopArtifactBindingSweep();
     this.shellReplay = [];
