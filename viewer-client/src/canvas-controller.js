@@ -17,7 +17,7 @@ export function initCanvas(initialConfig) {
   const HEADER_COMPACT_W=140, ERROR_COMPACT_SCALE=.5, MENU_EDGE=8;
   // B1 watchdog: a board still 'loading' after this long offers its Retry.
   const LOADING_STALL_MS=20000;
-  const EDIT_HINT='Edit mode: click an element to select it. Reference in chat sends it to the composer.';
+  const EDIT_HINT='Edit mode: click an element to select it. Shift-click adds to the selection. Reference in chat sends it to the composer.';
   const SCREEN_ID=/^[a-z0-9][a-z0-9-]{0,30}$/;
   const BOARD_COPY={loading:'Loading this screen.',ready:'',error:'Dev server unreachable — Reload to restart it.'};
   const EMBED_HINT='If it is running, check CSP / X-Frame-Options embedding permissions.';
@@ -62,7 +62,9 @@ export function initCanvas(initialConfig) {
   // R2 (B4): the selection the service mirrors from the artboards (it pushes
   // setSelection); the shell only renders it and asks for send/clear.
   const NO_SELECTION=Object.freeze({count:0,screens:Object.freeze([]),screen:'',label:''});
-  let selection = NO_SELECTION, pillEl = null, pillSend = null;
+  // selectMore (R2-fix m13): the pill's "Select more" toggle — while on, a
+  // plain click (or touch tap) adds like shift-click does.
+  let selection = NO_SELECTION, pillEl = null, pillSend = null, pillMore = null, pillReason = null, selectMore = false;
   // Geometry constants from the original camera, not toolbar/theme tokens.
   const numToken = name => name === '--s7' ? 48 : name === '--pan-step' ? 32 : parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
   const finite = n => typeof n === 'number' && Number.isFinite(n);
@@ -435,11 +437,20 @@ export function initCanvas(initialConfig) {
     const label=typeof info.label==='string'?info.label.slice(0,120):'';
     const had=selection.count;
     selection=info.count?Object.freeze({count:info.count,screens:Object.freeze(list),screen:anchor,label}):NO_SELECTION;
-    if(had&&!selection.count)announce('Nothing selected');
-    else if(selection.count)announce(selection.count===1?'1 element selected. Press Enter to reference it in chat.':selection.count+' elements selected. Press Enter to reference them in chat.');
+    if(!selection.count)selectMore=false;
+    // A service notice (selection full, a partial send, nothing left to
+    // reference) is always read out; otherwise only a COUNT change is, so a
+    // re-push (setScreens, a shell re-sync) never re-announces.
+    const notice=typeof info.notice==='string'?info.notice.trim().slice(0,NOTICE_TEXT_MAX):'';
+    if(notice)announce(notice);
+    else if(had&&!selection.count)announce('Nothing selected');
+    else if(selection.count&&selection.count!==had)announce(selectionCopy(selection.count));
     renderPill();publish();return true;
   }
-  function dropLocalSelection(){if(!selection.count)return;selection=NO_SELECTION;renderPill();}
+  function selectionCopy(count){
+    return count===1?'1 element selected. With the canvas focused, press Enter to reference it in chat or Escape to clear.':count+' elements selected. With the canvas focused, press Enter to reference them in chat or Escape to clear.';
+  }
+  function dropLocalSelection(){if(!selection.count)return;selection=NO_SELECTION;selectMore=false;renderPill();}
   function referenceSelection(){
     if(captureState||view.agentInput||!selection.count)return false;
     dropLocalSelection();
@@ -458,12 +469,19 @@ export function initCanvas(initialConfig) {
   function renderPill(){
     if(!pillEl&&!selection.count)return;
     if(!pillEl){
-      pillEl=document.createElement('div');pillEl.className='ds-selection-pill';pillEl.setAttribute('role','group');pillEl.setAttribute('aria-label','Selection');
+      // Distinct group name from the toolbar's "Selection actions" (m11).
+      pillEl=document.createElement('div');pillEl.className='ds-selection-pill';pillEl.setAttribute('role','group');pillEl.setAttribute('aria-label','Selected elements');
       pillSend=document.createElement('button');pillSend.type='button';pillSend.className='ds-pill-send';pillSend.textContent='Reference in chat';
+      // Never natively disabled: aria-disabled keeps it focusable, and the
+      // reason is read through aria-describedby (referenceSelection refuses).
       pillSend.onclick=()=>transaction(()=>referenceSelection());
+      pillMore=document.createElement('button');pillMore.type='button';pillMore.className='ds-pill-more';pillMore.textContent='Select more';pillMore.setAttribute('aria-pressed','false');
+      pillMore.title='While on, a click or tap adds to the selection (like shift-click)';
+      pillMore.onclick=()=>transaction(()=>{selectMore=!selectMore;renderPill();announce(selectMore?'Select more on: clicks add to the selection.':'Select more off.');});
       const clear=document.createElement('button');clear.type='button';clear.className='ds-pill-clear';clear.textContent='×';clear.setAttribute('aria-label','Clear selection');
       clear.onclick=()=>transaction(()=>clearSelection());
-      pillEl.appendChild(pillSend);pillEl.appendChild(clear);canvas.appendChild(pillEl);
+      pillReason=document.createElement('span');pillReason.id='ds-pill-reason';pillReason.className='ds-sr-only';
+      pillEl.appendChild(pillSend);pillEl.appendChild(pillMore);pillEl.appendChild(clear);pillEl.appendChild(pillReason);canvas.appendChild(pillEl);
     }
     const s=selection.count?screens.find(v=>v.id===selection.screen):null,cell=s&&lastPositions.get(s.id);
     if(!s||!cell||captureState||!view.ready){pillEl.style.display='none';return;}
@@ -476,8 +494,14 @@ export function initCanvas(initialConfig) {
     pillEl.style.left=Math.round(w?Math.max(96,Math.min(w-96,x)):x)+'px';
     pillEl.style.top=Math.round(h?Math.max(8,Math.min(h-48,y)):y)+'px';
     pillEl.dataset.count=String(selection.count);
-    pillSend.disabled=view.agentInput;
-    pillSend.title=view.agentInput?'Available when the agent finishes using the canvas':selection.count===1?'Reference 1 element in chat (Enter)':'Reference '+selection.count+' elements in chat (Enter)';
+    pillSend.textContent='Reference in chat ('+selection.count+')';
+    const reason=view.agentInput?'The agent is using the canvas. Reference in chat is available when it finishes.':'';
+    if(reason){pillSend.setAttribute('aria-disabled','true');pillSend.setAttribute('aria-describedby','ds-pill-reason');}
+    else{pillSend.removeAttribute('aria-disabled');pillSend.removeAttribute('aria-describedby');}
+    pillReason.textContent=reason;
+    // One send references up to 20 elements; the rest stay selected.
+    pillSend.title=reason||(selection.count===1?'Reference 1 element in chat (Enter with the canvas focused)':'Reference '+selection.count+' elements in chat (Enter with the canvas focused) · up to 20 per send, the rest stay selected');
+    pillMore.setAttribute('aria-pressed',selectMore?'true':'false');
   }
   // V4-12 shell half: the toolbar chip reads agentBusy/agentLabel; on the
   // busy→idle flip an Updated toast lands only if some artboard reloaded during
@@ -1030,8 +1054,10 @@ export function initCanvas(initialConfig) {
     // R2 (B4): the click SELECTS (the service runs __dsSelectAt in the frame);
     // clickAt stamps the shell clock for the click→selected timing log.
     const command={type:'screen-pick',screen:p.screen,x:p.x,y:p.y,clickAt:Date.now()};
-    // Shift-click toggles the element in or out of the selection.
-    if(e&&e.shiftKey)command.additive=true;
+    // Shift-click toggles the element in or out of the selection; so does any
+    // click while the pill's "Select more" is on (touch has no shift key).
+    // Play-mode taps belong to the page: touch multi-select is edit-only.
+    if((e&&e.shiftKey)||(selectMore&&selection.count))command.additive=true;
     send(command);
   }
   function wheelInput(deltaX,deltaY,x,y,zoom){if(!view.ready||captureState||view.layoutMode==='fit'||![deltaX,deltaY,x,y].every(finite))return false;if(zoom)zoomTo(view.scale*Math.exp(-deltaY*.005),{x,y});else{view.mode='manual';view.panX-=deltaX;view.panY-=deltaY;paint();}return true;}

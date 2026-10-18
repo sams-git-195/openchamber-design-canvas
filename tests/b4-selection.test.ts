@@ -10,9 +10,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { inflateSync } from 'node:zlib';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
-import { Browser } from '../service/browser.ts';
+import { Browser, SELECTION_TOTAL_MAX } from '../service/browser.ts';
 import type { PickedElement } from '../service/browser.ts';
+import { PickQueue, PICK_UNACKED_WARN_MS, pickUnackedWarnMs } from '../service/pick-queue.ts';
 import { liveTest } from './helpers/chrome.ts';
 import { environment, toolbarSource } from './helpers/controller-env.ts';
 
@@ -41,52 +45,75 @@ const picked = (selector: string): PickedElement & { additive: boolean; scrollX:
   scrollY: 12,
 });
 
+type Hooks = {
+  /** Screens whose __dsSelectionTake throws a non-retryable error. */
+  failTake: Set<string>;
+  /** Screens whose take answers nothing usable (the elements went away). */
+  emptyTake: Set<string>;
+  /** Delay of every __dsSelectAt evaluate (ms), to open the click/send race. */
+  selectDelay: number;
+};
+
+const SCREENS = [
+  { id: 'home', url: 'http://localhost:9/home.html', file: 'home.html', title: 'Home', width: 1280, height: 800 },
+  { id: 'phone', url: 'http://localhost:9/phone.html', file: 'phone.html', title: 'Phone', width: 390, height: 844 },
+];
+
 /** A Browser with a fake window: frames answer __dsSelectAt from a per-screen
- *  model, __dsSelectionTake returns (and clears) that model. */
-function stub(dir: string | null = '/ws/demo'): Stub & { frames: Map<string, string[]> } {
+ *  model (10 per frame, the full flag refuses adds), __dsSelectionTake(limit)
+ *  takes the first `limit` and answers what is left. */
+function stub(dir: string | null = '/ws/demo', screens = SCREENS): Stub & { frames: Map<string, string[]>; hooks: Hooks; toasts: Array<{ kind: string; text: string }> } {
   const browser = new Browser();
   const internal = browser as any;
   const shellCalls: string[] = [];
   const evalCalls: Array<{ expr: string; screen?: string }> = [];
   const frames = new Map<string, string[]>();
+  const toasts: Array<{ kind: string; text: string }> = [];
+  const hooks: Hooks = { failTake: new Set(), emptyTake: new Set(), selectDelay: 0 };
   internal.cdp = { send: async () => ({}), on: () => () => undefined };
   internal.sessionId = 'fake-shell-session';
   internal.targetId = 'fake-target';
   internal.contexts = { shellAuthorityCurrent: () => true, shell: () => null, artifact: () => null, activeScreenId: null };
   internal.shellEvalSettled = async (expr: string) => { shellCalls.push(expr); return true; };
   internal.shellEval = async (expr: string) => { shellCalls.push(expr); return true; };
-  internal.pushToast = async () => true;
+  internal.pushToast = async (kind: string, text: string) => { toasts.push({ kind, text }); return true; };
   internal.refreshScreen = async () => {};
   internal.evalIn = async (expr: string, _await: boolean, screen?: string) => {
     evalCalls.push({ expr, screen });
     const id = screen ?? 'home';
     const list = frames.get(id) ?? [];
-    const at = /__dsSelectAt\((\d+),(\d+),(true|false)\)/.exec(expr);
+    const at = /__dsSelectAt\((\d+),(\d+),(true|false)(,true)?\)/.exec(expr);
     if (at) {
+      if (hooks.selectDelay) await pause(hooks.selectDelay);
+      const current = frames.get(id) ?? [];
       const selector = `#e${at[1]}`;
       if (at[3] === 'true') {
-        const i = list.indexOf(selector);
-        if (i >= 0) list.splice(i, 1); else list.push(selector);
-        frames.set(id, list);
+        const i = current.indexOf(selector);
+        if (i >= 0) current.splice(i, 1);
+        else if (at[4]) return { ok: true, count: current.length, label: current.at(-1) ?? '', full: true };
+        else { if (current.length >= 10) current.shift(); current.push(selector); }
+        frames.set(id, current);
       } else frames.set(id, [selector]);
       const now = frames.get(id)!;
       return { ok: true, count: now.length, label: now.at(-1) ?? '' };
     }
     if (expr.includes('__dsSelectionTake')) {
-      frames.set(id, []);
-      return list.map((selector, i) => ({ ...picked(selector), additive: i > 0 }));
+      if (hooks.failTake.has(id)) throw new Error('boom: frame unreachable');
+      const limit = Number(/__dsSelectionTake\((\d+)\)/.exec(expr)?.[1] ?? list.length);
+      const taken = hooks.emptyTake.has(id) ? [] : list.slice(0, limit);
+      const rest = hooks.emptyTake.has(id) ? [] : list.slice(limit);
+      frames.set(id, rest);
+      return { items: taken.map((selector, i) => ({ ...picked(selector), additive: i > 0 })), count: rest.length, label: rest.at(-1) ?? '' };
     }
-    if (expr.includes('__dsSelectionClear')) { frames.set(id, []); return true; }
+    if (expr.includes('__dsSelectionClear')) { frames.set(id, []); return { count: 0 }; }
+    if (expr.includes('__dsSelectionState')) return { ok: true, count: list.length, label: list.at(-1) ?? '' };
     return true;
   };
   internal.workspaceMode = true;
   internal.workspaceDir = dir;
-  internal.applyScreenRegistry([
-    { id: 'home', url: 'http://localhost:9/home.html', file: 'home.html', title: 'Home', width: 1280, height: 800 },
-    { id: 'phone', url: 'http://localhost:9/phone.html', file: 'phone.html', title: 'Phone', width: 390, height: 844 },
-  ]);
+  internal.applyScreenRegistry(screens);
   const canvasCommand = internal.canvasCommand.bind(browser) as (c: unknown, a: unknown) => Promise<void>;
-  return { browser, internal, shellCalls, evalCalls, frames, command: (value) => canvasCommand(value, {}) };
+  return { browser, internal, shellCalls, evalCalls, frames, hooks, toasts, command: (value) => canvasCommand(value, {}) };
 }
 
 /** Wait for the ordered select relay to settle. */
@@ -98,7 +125,7 @@ async function settled(s: Stub): Promise<void> {
 const lastSelectionPush = (s: Stub) => {
   const call = [...s.shellCalls].reverse().find((c) => c.includes('__dsCanvas.setSelection('));
   assert.ok(call, 'the shell received a setSelection push');
-  return JSON.parse(call.slice(call.indexOf('__dsCanvas.setSelection(') + '__dsCanvas.setSelection('.length, -1)) as { count: number; screens: Array<{ id: string; count: number }>; screen?: string; label: string };
+  return JSON.parse(call.slice(call.indexOf('__dsCanvas.setSelection(') + '__dsCanvas.setSelection('.length, -1)) as { count: number; screens: Array<{ id: string; count: number }>; screen?: string; label: string; notice?: string };
 };
 
 test('b4-click-selects-without-queueing', async () => {
@@ -292,12 +319,17 @@ test('b4-frame-reload-drops-screen-selection', async () => {
   dispatch('__dsArtifactEvent', { type: 'changed', reason: 'nav' }, 'oopif-phone');
   await pause(10);
   assert.deepEqual(s.browser.getState().selection.screens.map((x: { id: string }) => x.id), ['home', 'phone']);
-  // A new document (dom/load) drops THAT screen's selection only.
+  // A new document ('dom') drops THAT screen's selection only.
   dispatch('__dsArtifactEvent', { type: 'changed', reason: 'dom' }, 'oopif-phone');
   await pause(10);
   assert.deepEqual(s.browser.getState().selection, { count: 1, screens: [{ id: 'home', count: 1 }] });
   assert.equal(lastSelectionPush(s).count, 1);
+  // m5: the same document's 'load' (after DOMContentLoaded) keeps a selection
+  // made between the two.
   dispatch('__dsArtifactEvent', { type: 'changed', reason: 'load' }, 'oopif-home');
+  await pause(10);
+  assert.deepEqual(s.browser.getState().selection, { count: 1, screens: [{ id: 'home', count: 1 }] }, "'load' never drops a selection");
+  dispatch('__dsArtifactEvent', { type: 'changed', reason: 'dom' }, 'oopif-home');
   await pause(10);
   assert.deepEqual(s.browser.getState().selection, { count: 0, screens: [] });
   // setScreens removing a screen drops its selection too.
@@ -323,17 +355,46 @@ test('b4-close-drops-selection', async () => {
   assert.equal(s.browser.getState().selection.count, 1);
   await s.browser.close();
   assert.deepEqual(s.browser.getState().selection, { count: 0, screens: [] }, 'the closed window took its selection along');
-  // A shell reload ('ready') clears the mirror and zeroes the toolbar.
+  // A shell reload ('ready') re-reads the frames — new documents, so nothing
+  // is selected — and zeroes the toolbar.
   const t = stub();
   await t.command({ type: 'screen-pick', screen: 'home', x: 1, y: 1 });
   await settled(t);
+  t.frames.clear(); // the reloaded shell's artboards are fresh documents
   t.internal.shellBridgeSettled = async () => true;
   t.internal.contexts = { ...t.internal.contexts, discover: async () => undefined, initializeArtifact: async () => undefined };
   t.internal.refreshUnsettled = async () => {};
   await t.command({ type: 'ready' });
   await pause(10);
   assert.deepEqual(t.browser.getState().selection, { count: 0, screens: [] });
-  assert.ok(t.shellCalls.some((c) => c.includes('__dsCanvas.setSelection({count:0,screens:[]})')), 'ready pushes the zero selection');
+  assert.equal(lastSelectionPush(t).count, 0, 'ready re-syncs the toolbar to the (empty) mirror');
+});
+
+test('b4-ready-resync-never-clobbers-a-newer-select (root cause of the b4-live toolbar desync)', async () => {
+  // The shell's 'ready' used to clear the mirror, await the bridge, THEN push a
+  // hard-coded zero — a click selected in that window kept count 1 in the
+  // service and the frame while the toolbar was told 0. The re-sync now runs
+  // on the serial queue and pushes the mirror as it is.
+  const s = stub();
+  s.internal.shellBridgeSettled = async () => { await pause(40); return true; };
+  s.internal.contexts = { ...s.internal.contexts, discover: async () => undefined, initializeArtifact: async () => undefined };
+  s.internal.refreshUnsettled = async () => {};
+  const ready = s.command({ type: 'ready' });
+  await pause(5);
+  await s.command({ type: 'screen-pick', screen: 'home', x: 7, y: 7 });
+  await ready;
+  await settled(s);
+  await pause(20);
+  await settled(s);
+  assert.equal(s.browser.getState().selection.count, 1);
+  assert.equal(lastSelectionPush(s).count, 1, 'the last push agrees with the mirror');
+  // A late (replayed) 'ready' of the SAME shell document finds the frame still
+  // holding its selection and keeps it.
+  await s.command({ type: 'ready' });
+  await pause(60);
+  await settled(s);
+  assert.equal(s.browser.getState().selection.count, 1, 'a late ready never wipes a live selection');
+  assert.equal(lastSelectionPush(s).count, 1);
 });
 
 test('b4-toolbar-reference-button-visibility', () => {
@@ -345,9 +406,14 @@ test('b4-toolbar-reference-button-visibility', () => {
   assert.match(toolbarSource, /state\.selectionCount > 0 \? <div id="selection-actions"/);
   assert.match(toolbarSource, /Reference in chat \(\{state\.selectionCount\}\)/);
   assert.match(toolbarSource, /aria-label="Clear selection"/);
-  assert.match(toolbarSource, /disabled=\{state\.agentInput \|\| state\.capturing\}/, 'disabled while the agent owns input');
+  // m11: unavailable is aria-disabled + focusable, the reason described.
+  assert.match(toolbarSource, /aria-disabled=\{referenceReason \? true : undefined\} aria-describedby=\{referenceReason \? 'selection-reason' : undefined\}/, 'aria-disabled while the agent owns input');
+  assert.doesNotMatch(toolbarSource, /id="reference-selection"[^>]*\sdisabled=/, 'never natively disabled (stays focusable)');
+  assert.match(toolbarSource, /<span id="selection-reason" className="sr-only">\{referenceReason\}<\/span>/);
   assert.match(toolbarSource, /The agent is using the canvas\. Reference in chat is available when it finishes\./);
-  assert.match(toolbarSource, /Click an element to select it\. Reference in chat sends it to the composer\./);
+  assert.match(toolbarSource, /Click an element to select it\. Shift-click adds to the selection\. Reference in chat sends it to the composer\./);
+  assert.match(toolbarSource, /aria-label="Selection actions"/, 'the toolbar group is named apart from the pill');
+  assert.match(toolbarSource, /Enter with the canvas focused/);
   // Snapshot drives it.
   assert.equal(e.api.setSelection({ count: 2, screens: [{ id: 'other', count: 2 }], screen: 'other', label: 'button#pay' }), true);
   assert.deepEqual([snap().selectionCount, snap().selectionScreen, snap().selectionLabel], [2, 'other', 'button#pay']);
@@ -357,14 +423,21 @@ test('b4-toolbar-reference-button-visibility', () => {
   const pill = e.$('canvas').children.find((n: any) => n.className === 'ds-selection-pill');
   assert.ok(pill, 'the pill exists while something is selected');
   assert.equal(pill.style.display, '');
-  assert.equal(pill.children[0].textContent, 'Reference in chat');
-  // V4-7: while the agent drives input, referencing is refused (and the pill disabled).
+  assert.equal(pill.attributes['aria-label'], 'Selected elements');
+  assert.equal(pill.children[0].textContent, 'Reference in chat (2)', 'm12: the pill shows the count');
+  // V4-7: while the agent drives input, referencing is refused (and the pill
+  // aria-disabled — still focusable, the reason described).
   e.api.setAgentInput(true);
   assert.equal(snap().agentInput, true);
-  assert.equal(pill.children[0].disabled, true);
+  assert.equal(pill.children[0].disabled, undefined, 'never natively disabled');
+  assert.equal(pill.children[0].attributes['aria-disabled'], 'true');
+  assert.equal(pill.children[0].attributes['aria-describedby'], 'ds-pill-reason');
+  assert.match(pill.children.find((n: any) => n.id === 'ds-pill-reason').textContent, /The agent is using the canvas/);
   e.bridge.referenceSelection();
+  pill.children[0].onclick();
   assert.equal(e.commands.some((c) => c.type === 'selection-send'), false, 'no send during agent input');
   e.api.setAgentInput(false);
+  assert.equal(pill.children[0].attributes['aria-disabled'], undefined);
   pill.children[0].onclick();
   assert.equal(e.commands.at(-1).type, 'selection-send', 'the pill sends');
   assert.equal(snap().selectionCount, 0);
@@ -376,6 +449,300 @@ test('b4-toolbar-reference-button-visibility', () => {
   e.api.setSelection({ count: 1, screens: [{ id: 'home', count: 1 }], label: 'x' });
   e.bridge.referenceSelection();
   assert.equal(e.commands.at(-1).type, 'selection-send');
+});
+
+// ---- R2-fix ----------------------------------------------------------------------
+
+test('r2fix-selection-cap: 11 screens × 10 elements caps at 40, sends 20 per send, nothing lost', async () => {
+  const many = Array.from({ length: 11 }, (_, i) => ({ id: `s${i}`, url: `http://localhost:9/s${i}.html`, file: `s${i}.html`, title: `S${i}`, width: 400, height: 400 }));
+  const s = stub('/ws/demo', many);
+  for (const screen of many) {
+    for (let k = 0; k < 10; k += 1) await s.command({ type: 'screen-pick', screen: screen.id, x: k, y: 1, additive: true });
+    await settled(s);
+  }
+  assert.equal(SELECTION_TOTAL_MAX, 40);
+  assert.equal(s.browser.getState().selection.count, 40, 'additive selects past the cap are refused');
+  assert.deepEqual(s.browser.getState().selection.screens.map((x: { id: string; count: number }) => [x.id, x.count]), [['s0', 10], ['s1', 10], ['s2', 10], ['s3', 10]]);
+  assert.ok(s.toasts.some((t) => t.kind === 'warn' && t.text.startsWith('Selection full (40)')), 'the cap is announced');
+  assert.match(String(lastSelectionPush(s).notice), /^Selection full \(40\)/, 'and read out by the shell');
+  assert.ok(s.evalCalls.some((c) => /__dsSelectAt\(\d+,1,true,true\)/.test(c.expr)), 'the frame is told it is full (toggle-out only)');
+  // A toggle-OUT at the cap still works.
+  await s.command({ type: 'screen-pick', screen: 's0', x: 0, y: 1, additive: true });
+  await settled(s);
+  assert.equal(s.browser.getState().selection.count, 39);
+  await s.command({ type: 'screen-pick', screen: 's0', x: 0, y: 1, additive: true });
+  await settled(s);
+  assert.equal(s.browser.getState().selection.count, 40);
+  // Send #1: PICKS_PAGE_MAX (20), the rest stays selected.
+  await s.command({ type: 'selection-send', sentAt: Date.now() });
+  const first = await s.browser.getPicks(0, 0);
+  assert.equal(first.picks.length, 20);
+  assert.equal(new Set(first.picks.map((p) => p.batch)).size, 1);
+  assert.deepEqual([...new Set(first.picks.map((p) => p.screen))], ['s0', 's1']);
+  assert.equal(s.browser.getState().selection.count, 20, 'the remainder stays selected for the next send');
+  assert.match(String(lastSelectionPush(s).notice), /Referenced 20 in chat — 20 still selected/);
+  // Send #2 takes the rest; all 40 are in the ring, none overwritten.
+  await s.command({ type: 'selection-send', sentAt: Date.now() });
+  const second = await s.browser.getPicks(first.seq - 0, 0);
+  assert.equal(s.browser.getState().selection.count, 0);
+  const all = [...first.picks, ...(await s.browser.getPicks(20, 0)).picks];
+  assert.equal(all.length, 40, 'every selected element reached the queue');
+  assert.equal(all[0]!.seq, 1, 'the first entries were not lost');
+  assert.deepEqual([...new Set(all.slice(20).map((p) => p.screen))], ['s2', 's3']);
+  assert.notEqual(all[20]!.batch, all[0]!.batch, 'one batch per send');
+  assert.ok(second.seq >= 40);
+});
+
+test('r2fix-in-frame-ctrl-click-over-the-cap-is-trimmed', async () => {
+  const s = stub();
+  s.internal.selection.set('phone', { count: 38, label: 'x' });
+  s.internal.selectionScreen = 'phone';
+  await s.internal.runSelectionJob({ kind: 'note', screen: 'home', count: 4, label: 'a', additive: true, agent: false });
+  assert.ok(s.evalCalls.some((c) => c.screen === 'home' && c.expr.includes('__dsSelectionTrim(2)')), 'the frame is trimmed back under the cap');
+  assert.ok(s.toasts.some((t) => t.text.startsWith('Selection full (40)')));
+});
+
+test('r2fix-serial-queue: a send covers exactly the clicks before it; a click after a send starts fresh', async () => {
+  const s = stub();
+  s.hooks.selectDelay = 15; // every select evaluate is slow: the old relay raced the send
+  void s.command({ type: 'screen-pick', screen: 'home', x: 1, y: 1 });
+  void s.command({ type: 'screen-pick', screen: 'home', x: 2, y: 2, additive: true });
+  const sent = s.command({ type: 'selection-send', sentAt: Date.now() });
+  // Clicks AFTER the send (one additive, as a shift-click straight after Enter).
+  void s.command({ type: 'screen-pick', screen: 'phone', x: 3, y: 3, additive: true });
+  await sent;
+  const page = await s.browser.getPicks(0, 0);
+  assert.deepEqual(page.picks.map((p) => p.selector), ['#e1', '#e2'], 'the send carried exactly the earlier clicks');
+  await settled(s);
+  assert.deepEqual(s.browser.getState().selection, { count: 1, screens: [{ id: 'phone', count: 1 }] }, 'the later click is a fresh selection, no phantom count');
+  assert.equal(lastSelectionPush(s).count, 1);
+  // Clear is ordered too: a clear after a click wins, a click after a clear stands.
+  void s.command({ type: 'screen-pick', screen: 'home', x: 4, y: 4, additive: true });
+  const cleared = s.command({ type: 'selection-clear' });
+  void s.command({ type: 'screen-pick', screen: 'home', x: 5, y: 5 });
+  await cleared;
+  await settled(s);
+  assert.deepEqual(s.browser.getState().selection, { count: 1, screens: [{ id: 'home', count: 1 }] });
+  assert.deepEqual(s.frames.get('home'), ['#e5']);
+});
+
+test('r2fix-stress: send immediately after each click, never waiting', async () => {
+  const s = stub();
+  s.hooks.selectDelay = 3;
+  const sends: Array<Promise<void>> = [];
+  for (let i = 1; i <= 15; i += 1) {
+    void s.command({ type: 'screen-pick', screen: i % 2 ? 'home' : 'phone', x: i, y: i, clickAt: Date.now() });
+    sends.push(s.command({ type: 'selection-send', sentAt: Date.now() }));
+  }
+  await Promise.all(sends);
+  await settled(s);
+  const page = await s.browser.getPicks(0, 0);
+  assert.deepEqual(page.picks.map((p) => p.selector), Array.from({ length: 15 }, (_, i) => `#e${i + 1}`), 'every click referenced exactly once, in order');
+  assert.equal(new Set(page.picks.map((p) => p.batch)).size, 15, 'one batch per send');
+  assert.deepEqual(s.browser.getState().selection, { count: 0, screens: [] });
+  assert.equal(lastSelectionPush(s).count, 0, 'no phantom count after the last send');
+});
+
+test('r2fix-stranded-outlines: clears reach every registered frame; a failed read keeps the selection', async () => {
+  const s = stub();
+  // The frame holds a selection the service never heard about (dropped event).
+  s.frames.set('phone', ['#ghost']);
+  await s.command({ type: 'selection-clear' });
+  assert.deepEqual(s.frames.get('phone'), [], 'selection-clear reached a frame the mirror did not know');
+  s.frames.set('phone', ['#ghost']);
+  await s.command({ type: 'screen-pick', screen: 'home', x: 1, y: 1 });
+  await settled(s);
+  assert.deepEqual(s.frames.get('phone'), [], 'a plain select clears every other frame');
+  s.frames.set('phone', ['#ghost']);
+  await s.command({ type: 'mode-request', mode: 'play' });
+  assert.deepEqual(s.frames.get('phone'), [], 'a mode flip clears every frame');
+  assert.deepEqual(s.frames.get('home'), []);
+  // A failed read keeps the record (and the frame's outlines) for a retry.
+  s.internal.mode = 'edit';
+  await s.command({ type: 'screen-pick', screen: 'home', x: 1, y: 1 });
+  await s.command({ type: 'screen-pick', screen: 'phone', x: 2, y: 2, additive: true });
+  await settled(s);
+  s.hooks.failTake.add('phone');
+  await s.command({ type: 'selection-send' });
+  let page = await s.browser.getPicks(0, 0);
+  assert.deepEqual(page.picks.map((p) => p.selector), ['#e1'], 'the readable frame was referenced');
+  assert.deepEqual(s.browser.getState().selection, { count: 1, screens: [{ id: 'phone', count: 1 }] }, 'the unread frame stays selected');
+  assert.deepEqual(s.frames.get('phone'), ['#e2'], 'its outline is still there');
+  assert.ok(s.toasts.some((t) => t.kind === 'warn' && /Couldn't read the selection/.test(t.text)));
+  s.hooks.failTake.clear();
+  await s.command({ type: 'selection-send' });
+  page = await s.browser.getPicks(page.seq, 0);
+  assert.deepEqual(page.picks.map((p) => p.selector), ['#e2'], 'the next send picks it up');
+  assert.equal(s.browser.getState().selection.count, 0);
+});
+
+test('r2fix-zero-payload-send-announces-and-clears', async () => {
+  const s = stub();
+  await s.command({ type: 'screen-pick', screen: 'home', x: 1, y: 1 });
+  await settled(s);
+  s.hooks.emptyTake.add('home');
+  const clearsBefore = s.evalCalls.filter((c) => c.screen === 'home' && c.expr.includes('__dsSelectionClear')).length;
+  await s.command({ type: 'selection-send' });
+  assert.equal((await s.browser.getPicks(0, 0)).picks.length, 0);
+  assert.deepEqual(s.browser.getState().selection, { count: 0, screens: [] }, 'the stale record is gone');
+  assert.ok(s.evalCalls.filter((c) => c.screen === 'home' && c.expr.includes('__dsSelectionClear')).length > clearsBefore, 'and its outlines');
+  assert.ok(s.toasts.some((t) => t.text === 'Nothing to reference — the selected elements changed'));
+  assert.equal(lastSelectionPush(s).notice, 'Nothing to reference — the selected elements changed');
+});
+
+test('r2fix-late-result-never-recreates-a-removed-screen', async () => {
+  const s = stub();
+  s.hooks.selectDelay = 20;
+  s.internal.pushShellScreens = async () => {};
+  s.internal.pushShellActive = async () => {};
+  s.internal.refreshUnsettled = async () => {};
+  void s.command({ type: 'screen-pick', screen: 'phone', x: 1, y: 1 });
+  await pause(5);
+  await s.browser.setScreens([SCREENS[0]!]);
+  await settled(s);
+  assert.deepEqual(s.browser.getState().selection, { count: 0, screens: [] }, 'the in-flight select on a removed screen was discarded');
+});
+
+test('r2fix-legacy-launch-relays-screen-pick-to-__dsPickAt', async () => {
+  const s = stub(null);
+  s.internal.workspaceMode = false;
+  await s.command({ type: 'screen-pick', screen: 'home', x: 5, y: 6, additive: true });
+  await pause(10);
+  assert.ok(s.evalCalls.some((c) => c.screen === 'home' && c.expr === 'window.__dsPickAt(5,6,true)'), 'the legacy click picks directly');
+  assert.equal(s.evalCalls.some((c) => c.expr.includes('__dsSelectAt')), false, 'no selection relay in legacy');
+  assert.equal(s.browser.getState().selection.count, 0);
+});
+
+test('r2fix-agent-select-keeps-the-user-selection-on-other-boards', async () => {
+  const s = stub();
+  await s.command({ type: 'screen-pick', screen: 'phone', x: 1, y: 1 });
+  await settled(s);
+  const sessions: Record<string, string> = { 'oopif-home': 'home', 'oopif-phone': 'phone' };
+  const contexts = { screenForContext: (session: string | undefined) => (session ? sessions[session] ?? null : null), matches: () => true, artifact: () => ({}), shellAuthorityCurrent: () => true, shell: () => null };
+  s.internal.contexts = contexts;
+  // The agent's synthetic modified click (__dsPickAt) reports script:true.
+  s.internal.dispatchBinding(contexts, '__dsArtifactEvent', { type: 'selection', count: 1, label: 'a#x', additive: false, script: true }, 'oopif-home', 1);
+  await pause(10);
+  await settled(s);
+  assert.deepEqual(s.browser.getState().selection, { count: 2, screens: [{ id: 'phone', count: 1 }, { id: 'home', count: 1 }] }, 'the user selection on phone survives');
+  // During agent input the same holds for trusted (compositor) clicks.
+  s.internal.agentInputDepth = 1;
+  s.internal.dispatchBinding(contexts, '__dsArtifactEvent', { type: 'selection', count: 1, label: 'a#y', additive: false }, 'oopif-home', 1);
+  await pause(10);
+  await settled(s);
+  assert.equal(s.browser.getState().selection.count, 2);
+  // A user's own plain Ctrl-click is single-select across the canvas.
+  s.internal.agentInputDepth = 0;
+  s.internal.agentInputUntil = 0;
+  s.internal.dispatchBinding(contexts, '__dsArtifactEvent', { type: 'selection', count: 1, label: 'a#z', additive: false }, 'oopif-home', 1);
+  await pause(10);
+  await settled(s);
+  assert.deepEqual(s.browser.getState().selection, { count: 1, screens: [{ id: 'home', count: 1 }] });
+});
+
+test('r2fix-workspace-dir-change-clears-the-selection; an omitted dir stamps nothing', async () => {
+  const dirA = await mkdtemp(path.join(tmpdir(), 'r2fix-a-'));
+  const dirB = await mkdtemp(path.join(tmpdir(), 'r2fix-b-'));
+  try {
+    const s = stub(dirA);
+    s.internal.pushShellScreens = async () => {};
+    s.internal.pushShellActive = async () => {};
+    s.internal.refreshUnsettled = async () => {};
+    s.internal.waitScreen = async () => true;
+    s.internal.bringToFront = async () => {};
+    await s.command({ type: 'screen-pick', screen: 'home', x: 1, y: 1 });
+    await settled(s);
+    await s.browser.openWorkspace({ dir: dirA, screens: SCREENS, baseUrl: 'http://localhost:9/', focus: false });
+    assert.equal(s.browser.getState().selection.count, 1, 'the same workspace keeps its selection');
+    await s.browser.openWorkspace({ dir: dirB, screens: SCREENS, baseUrl: 'http://localhost:9/', focus: false });
+    assert.deepEqual(s.browser.getState().selection, { count: 0, screens: [] }, 'another workspace starts with nothing selected');
+    assert.deepEqual(s.frames.get('home'), [], 'and the old outlines are gone');
+    assert.equal(s.browser.currentWorkspaceDir(), dirB);
+    await s.browser.openWorkspace({ screens: SCREENS, baseUrl: 'http://localhost:9/', focus: false });
+    assert.equal(s.browser.currentWorkspaceDir(), null, 'an omitted dir resets — never the previous workspace');
+    await s.command({ type: 'screen-pick', screen: 'home', x: 2, y: 2 });
+    await s.command({ type: 'selection-send' });
+    assert.equal((await s.browser.getPicks(0, 0)).picks[0]!.dir, undefined, 'no stale dir on the entry');
+  } finally {
+    await pause(150); // setMode's fire-and-forget view.json persist
+    await rm(dirA, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    await rm(dirB, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test('r2fix-legacy-window-relaunches-cold-for-a-workspace', async () => {
+  const s = stub(null);
+  s.internal.workspaceMode = false;
+  const order: string[] = [];
+  s.internal.close = async () => { order.push('close'); s.internal.cdp = null; };
+  s.internal.start = async () => { order.push('start'); };
+  s.internal.waitScreen = async () => true;
+  s.internal.refreshUnsettled = async () => {};
+  s.internal.bringToFront = async () => {};
+  await s.browser.openWorkspace({ screens: SCREENS, baseUrl: 'http://localhost:9/', focus: false });
+  assert.deepEqual(order, ['close', 'start'], 'a warm legacy window is closed and relaunched cold');
+  assert.equal(s.internal.workspaceMode, true);
+});
+
+test('r2fix-batch-ack-copy and the unacked watchdog scales with the batch', async () => {
+  const toasts: Array<{ kind: string; text: string }> = [];
+  const queue = new PickQueue((kind, text) => toasts.push({ kind, text }));
+  const element = { kind: 'element' as const, screen: 'home', screenUrl: 'u', at: 1, additive: false, batch: 'b1' };
+  queue.push(element); queue.push(element); queue.push(element);
+  queue.ack(3, '3 elements');
+  assert.deepEqual(toasts.at(-1), { kind: 'ok', text: 'Added 3 elements to chat' });
+  queue.push(element);
+  queue.ack(4, 'Button #b');
+  assert.deepEqual(toasts.at(-1), { kind: 'ok', text: 'Added to chat · Button #b' }, 'a single element keeps its label');
+  queue.close();
+  assert.equal(pickUnackedWarnMs(1), PICK_UNACKED_WARN_MS);
+  assert.equal(pickUnackedWarnMs(5), 4100);
+  assert.equal(pickUnackedWarnMs(20), 8000, 'capped');
+  // Two unacked elements: no warn at 2.5 s (the single-element window), one by 3.1 s.
+  const late: Array<{ kind: string; text: string }> = [];
+  const slow = new PickQueue((kind, text) => late.push({ kind, text }));
+  slow.push(element); slow.push(element);
+  await pause(2650);
+  assert.equal(late.length, 0, 'a batch gets more time than one element');
+  await pause(450);
+  assert.equal(late.filter((t) => t.kind === 'warn').length, 1);
+  slow.close();
+});
+
+test('r2fix-shell: count-only announces, notices, Select more (touch multi-select)', () => {
+  const e = environment();
+  e.api.setStatus({ state: 'ready' });
+  e.api.restoreCamera({ mode: 'manual', scale: 1, panX: 0, panY: 0 });
+  const announced = () => e.$('announcement').textContent;
+  e.api.setSelection({ count: 1, screens: [{ id: 'home', count: 1 }], screen: 'home', label: 'x' });
+  assert.equal(announced(), '1 element selected. With the canvas focused, press Enter to reference it in chat or Escape to clear.');
+  e.$('announcement').textContent = '';
+  e.api.setSelection({ count: 1, screens: [{ id: 'home', count: 1 }], screen: 'home', label: 'x' });
+  assert.equal(announced(), '', 'a re-push with the same count is not re-announced');
+  e.api.setSelection({ count: 3, screens: [{ id: 'home', count: 3 }], screen: 'home', label: 'x' });
+  assert.match(announced(), /^3 elements selected\. With the canvas focused, press Enter to reference them in chat or Escape to clear\.$/);
+  e.api.setSelection({ count: 3, screens: [{ id: 'home', count: 3 }], screen: 'home', label: 'x', notice: 'Selection full (40) — reference it in chat first' });
+  assert.equal(announced(), 'Selection full (40) — reference it in chat first', 'a service notice is always read out');
+  // Select more: a plain click adds while it is on.
+  const pill = e.$('canvas').children.find((n: any) => n.className === 'ds-selection-pill');
+  const more = pill.children.find((n: any) => n.className === 'ds-pill-more');
+  assert.equal(more.textContent, 'Select more');
+  assert.equal(more.attributes['aria-pressed'], 'false');
+  more.onclick();
+  assert.equal(more.attributes['aria-pressed'], 'true');
+  const section = e.sectionOf('home');
+  section.rect = { x: 0, y: 0, left: 0, top: 0, width: 1280, height: 800 };
+  e.fire('canvas', 'pointerdown', { button: 0, clientX: 30, clientY: 30, pointerId: 9, target: section, preventDefault() {} });
+  e.fire('canvas', 'pointerup', { pointerId: 9, clientX: 30, clientY: 30 });
+  assert.equal(e.commands.filter((c) => c.type === 'screen-pick').at(-1)?.additive, true, 'the tap adds');
+  // Nothing selected any more → the toggle resets.
+  e.api.setSelection({ count: 0, screens: [] });
+  e.api.setSelection({ count: 1, screens: [{ id: 'home', count: 1 }], screen: 'home', label: 'x' });
+  assert.equal(more.attributes['aria-pressed'], 'false');
+  e.tick(400);
+  e.fire('canvas', 'pointerdown', { button: 0, clientX: 30, clientY: 30, pointerId: 10, target: section, preventDefault() {} });
+  e.fire('canvas', 'pointerup', { pointerId: 10, clientX: 30, clientY: 30 });
+  assert.equal(e.commands.filter((c) => c.type === 'screen-pick').at(-1)?.additive, undefined, 'a plain click replaces again');
 });
 
 test('b4-capture-hides-selection-outlines (shell pill)', () => {
@@ -488,6 +855,29 @@ test('b4-live: click selects (outline, no queue), shift toggles, send pulls with
     assert.ok(flashed.length === 2 && flashed.every((b) => b.picked === '1'), 'the outlines flash pick-green');
     await pause(1700);
     assert.equal((await boxes(browser)).length, 0, 'and fade after 1500 ms');
+  });
+});
+
+test('r2fix-live-stress: click + send in one breath, then a click after the send starts fresh', { timeout: 120_000 }, async (t) => {
+  if (!(await liveTest(t))) return;
+  await liveCanvas(async (browser) => {
+    // Both bindings fire in ONE evaluate: no wait between the click and the send.
+    await shell(browser, "__dsCanvasSend(JSON.stringify({type:'screen-pick',screen:'home',x:100,y:60}));__dsCanvasSend(JSON.stringify({type:'selection-send',sentAt:Date.now()}));true");
+    let page = await browser.getPicks(0, 3000);
+    assert.deepEqual(page.picks.map((p) => p.selector), ['#b'], 'the send carried the click made just before it');
+    // Shift-click, send, shift-click again — all at once.
+    await shell(browser, "__dsCanvasSend(JSON.stringify({type:'screen-pick',screen:'home',x:100,y:180,additive:true}));__dsCanvasSend(JSON.stringify({type:'selection-send'}));__dsCanvasSend(JSON.stringify({type:'screen-pick',screen:'home',x:100,y:60,additive:true}));true");
+    page = await browser.getPicks(page.seq, 3000);
+    assert.deepEqual(page.picks.map((p) => p.selector), ['#c']);
+    try {
+      await until(() => browser.getState().selection.count === 1, 'the click after the send is a fresh selection of one');
+    } catch (error) {
+      throw new Error(`${(error as Error).message}: ${JSON.stringify(browser.getState().selection)} boxes ${JSON.stringify(await boxes(browser))}`);
+    }
+    await until(async () => (await shell(browser, '__dsToolbarBridge.getSnapshot().selectionCount')) === 1, 'and the toolbar agrees (no phantom count)');
+    await pause(200);
+    assert.equal(browser.getState().selection.count, 1);
+    assert.equal((await boxes(browser)).filter((b) => b.picked !== '1').length, 1, 'one live (blue) outline');
   });
 });
 

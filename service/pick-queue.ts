@@ -6,7 +6,8 @@
 // panel long-polls `GET /picks?since&wait` (wait 0..12000 ms — well under the
 // host's 20 s request cap), processes picks in seq order, and acks the last
 // seq it consumed. `POST /picks/ack` answers through the shell as a
-// "Added to chat" toast; a push that is not acked within 2500 ms answers with
+// "Added to chat" toast; a push that is not acked within 2500 ms (scaled up
+// for a batch — pickUnackedWarnMs) answers with
 // a WARN toast ("open the chat with Design Mode on") — the user learns the
 // delivery died instead of staring at a silent canvas.
 //
@@ -47,6 +48,13 @@ export const PICKS_PAGE_MAX = 20;
 export const PICK_UNACKED_WARN_MS = 2500;
 export const PICK_WAIT_MAX_MS = 12_000;
 export const PICK_LABEL_MAX = 80;
+/** R2-fix (m14): the panel paces a batch (~150 ms per element) and acks once
+ *  at its end, so the watchdog scales with what is unacked: 2500 ms for one
+ *  element, +400 ms per further element, capped at 8000 ms. */
+export const PICK_UNACKED_WARN_MAX_MS = 8000;
+export function pickUnackedWarnMs(pending: number): number {
+  return Math.min(PICK_UNACKED_WARN_MAX_MS, PICK_UNACKED_WARN_MS + 400 * Math.max(0, pending - 1));
+}
 
 type Waiter = {
   since: number;
@@ -122,7 +130,11 @@ export class PickQueue {
     if (!Number.isInteger(seq) || seq < 0) return;
     if (seq <= this.acked) return;
     this.acked = Math.max(this.acked, Math.min(seq, this.latest));
-    this.emitToast('ok', `Added to chat · ${label.slice(0, PICK_LABEL_MAX)}`);
+    // R2-fix (m12): the panel acks a multi-element send with "<N> elements"
+    // (batchAckLabel); that reads as a sentence, a single element keeps its
+    // label after the dot.
+    const batch = /^(\d+) elements$/.exec(label.trim());
+    this.emitToast('ok', batch ? `Added ${batch[1]} elements to chat` : `Added to chat · ${label.slice(0, PICK_LABEL_MAX)}`);
     if (this.acked >= this.latest) this.clearWatchdog();
   }
 
@@ -164,7 +176,7 @@ export class PickQueue {
       if (!this.closed && this.acked < target) {
         this.emitToast('warn', 'Not delivered — open the chat with Design Mode on');
       }
-    }, PICK_UNACKED_WARN_MS);
+    }, pickUnackedWarnMs(target - this.acked));
     timer.unref?.();
     this.watchdog = timer;
   }

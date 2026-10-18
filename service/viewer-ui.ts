@@ -226,10 +226,14 @@ iframe{display:block;border:0;width:100%;height:100%}
    the selected artboard by the controller (left/top in canvas px). */
 .ds-selection-pill{position:absolute;z-index:5;display:flex;align-items:center;gap:2px;transform:translateX(-50%);padding:3px;border:1px solid var(--border);border-radius:9999px;background:var(--popover);box-shadow:0 12px 32px rgb(0 0 0/.35);white-space:nowrap}
 .ds-pill-send{padding:6px 12px;border:0;border-radius:9999px;background:var(--primary);color:var(--primary-foreground);font-size:13px;line-height:1.2;cursor:pointer}
-.ds-pill-send:disabled{opacity:.5;cursor:not-allowed}
+.ds-pill-send:disabled,.ds-pill-send[aria-disabled=true]{opacity:.5;cursor:not-allowed}
+.ds-pill-more{padding:6px 10px;border:0;border-radius:9999px;background:transparent;color:var(--muted-foreground);font-size:13px;line-height:1.2;cursor:pointer}
+.ds-pill-more:hover{background:var(--accent);color:var(--accent-foreground)}
+.ds-pill-more[aria-pressed=true]{background:var(--accent);color:var(--accent-foreground);box-shadow:inset 0 0 0 1px var(--border)}
 .ds-pill-clear{width:26px;height:26px;border:0;border-radius:9999px;background:transparent;color:var(--muted-foreground);font-size:15px;line-height:1;cursor:pointer}
 .ds-pill-clear:hover{background:var(--accent);color:var(--accent-foreground)}
-.ds-pill-send:focus-visible,.ds-pill-clear:focus-visible{outline:2px solid #4f8cff;outline-offset:2px}
+.ds-pill-send:focus-visible,.ds-pill-more:focus-visible,.ds-pill-clear:focus-visible{outline:2px solid #4f8cff;outline-offset:2px}
+.ds-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .ds-context-menu{position:fixed;z-index:7;min-width:180px;display:flex;flex-direction:column;gap:2px;padding:6px;border:1px solid var(--border);border-radius:var(--radius);background:var(--popover);box-shadow:0 12px 32px rgb(0 0 0/.35)}
 .ds-menu-item{display:flex;align-items:center;gap:8px;padding:6px 10px;border:0;border-radius:calc(var(--radius) * .6);background:transparent;color:var(--popover-foreground);font-size:13px;line-height:1.2;text-align:left;cursor:pointer}
 .ds-menu-item:hover,.ds-menu-item:focus{background:var(--accent);color:var(--accent-foreground);outline:none}

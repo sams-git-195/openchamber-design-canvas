@@ -69,6 +69,7 @@ export function Toolbar({ bridge }: { bridge: ToolbarBridge }) {
   const cameraDisabled = !cameraAvailable(state);
   const cameraReason = state.capturing ? 'Capture in progress. Controls are temporarily unavailable.' : !state.ready ? 'The preview is not ready.' : '';
   const pendingMode = state.modePending;
+  const referenceReason = state.agentInput ? 'The agent is using the canvas. Reference in chat is available when it finishes.' : state.capturing ? cameraReason : '';
   // F8 (design review): this slot is the WORKSPACE identity, never the active
   // screen's title — that title already lives on the highlighted chip (and in
   // the Screens▾ list), and showing it twice read as a bug. The frozen §3
@@ -91,7 +92,7 @@ export function Toolbar({ bridge }: { bridge: ToolbarBridge }) {
       {/* Workspace label (F8): workspace identity only — screen identity lives
           on the chips. Truncated at 24ch, shrinkable, never the active title. */}
       <span id="workspace-name" className="min-w-0 max-w-[24ch] shrink truncate text-sm text-muted-foreground" title={workspaceName}>{workspaceName}</span>
-      <Hint text={pendingMode ? `Switching to ${pendingMode} mode…` : cameraReason || (state.mode === 'edit' ? 'Click an element to select it. Reference in chat sends it to the composer.' : 'Play mode: screens accept real interaction. Ctrl or Cmd click selects an element.')}>
+      <Hint text={pendingMode ? `Switching to ${pendingMode} mode…` : cameraReason || (state.mode === 'edit' ? 'Click an element to select it. Shift-click adds to the selection. Reference in chat sends it to the composer.' : 'Play mode: screens accept real interaction. Ctrl or Cmd click selects an element.')}>
         <ToggleGroup aria-label="Interaction mode" variant="outline" size="sm" spacing={0} multiple={false} value={[pendingMode ?? state.mode]} onValueChange={(values) => requestMode(values, bridge)} disabled={disabled || !!pendingMode} className="shrink-0">
           <ToggleGroupItem value="edit" aria-label="Edit" className={pendingMode === 'edit' ? 'animate-pulse' : undefined}><Pencil aria-hidden="true" />Edit</ToggleGroupItem>
           <ToggleGroupItem value="play" aria-label="Play" className={pendingMode === 'play' ? 'animate-pulse' : undefined}><Play aria-hidden="true" />Play</ToggleGroupItem>
@@ -119,12 +120,16 @@ export function Toolbar({ bridge }: { bridge: ToolbarBridge }) {
       <span aria-hidden="true" className="min-w-4 flex-1 shrink" />
       {/* R2 (B4): a click selects; this is the explicit send. Visible only
           with a selection, disabled while the agent owns canvas input. */}
-      {state.selectionCount > 0 ? <div id="selection-actions" role="group" aria-label="Selection" className="flex shrink-0 items-center gap-0.5">
-        <Hint text={state.agentInput ? 'The agent is using the canvas. Reference in chat is available when it finishes.' : state.selectionLabel ? `Send ${state.selectionLabel} to the composer (Enter)` : 'Send the selection to the composer (Enter)'}>
-          <Button id="reference-selection" size="sm" variant="default" disabled={state.agentInput || state.capturing} onClick={() => { referenceSelection(bridge); }}>
+      {state.selectionCount > 0 ? <div id="selection-actions" role="group" aria-label="Selection actions" className="flex shrink-0 items-center gap-0.5">
+        {/* m11: unavailable is aria-disabled (still focusable, reason read via
+            aria-describedby); referenceSelection() refuses the click. One
+            send references up to 20 elements; the rest stay selected. */}
+        <Hint text={referenceReason || (state.selectionCount > 20 ? `Send the first 20 of ${state.selectionCount} to the composer (Enter with the canvas focused). The rest stay selected.` : state.selectionLabel && state.selectionCount === 1 ? `Send ${state.selectionLabel} to the composer (Enter with the canvas focused)` : 'Send the selection to the composer (Enter with the canvas focused)')}>
+          <Button id="reference-selection" size="sm" variant="default" aria-disabled={referenceReason ? true : undefined} aria-describedby={referenceReason ? 'selection-reason' : undefined} className={referenceReason ? 'cursor-not-allowed opacity-50' : undefined} onClick={() => { referenceSelection(bridge); }}>
             <MessageSquarePlus aria-hidden="true" />Reference in chat ({state.selectionCount})
           </Button>
         </Hint>
+        <span id="selection-reason" className="sr-only">{referenceReason}</span>
         <Hint text="Clear selection (Esc)">
           <Button id="clear-selection" size="icon-sm" variant="ghost" aria-label="Clear selection" disabled={state.capturing} onClick={() => { if (!bridge.getSnapshot().capturing) bridge.clearSelection(); }}><X aria-hidden="true" /></Button>
         </Hint>

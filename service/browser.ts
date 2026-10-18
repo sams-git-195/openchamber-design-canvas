@@ -27,7 +27,7 @@ import type { ViewerPage } from './viewer-ui.ts';
 import { mergeView, mergeViewCoalesced, sanitizeCamera } from './view-state.ts';
 import { renameScreen, resizeScreen, SCREENS_FILENAME, viewportPresetHeight } from './screens.ts';
 import { updateLastWorkspaceView } from './last-workspace.ts';
-import { PickQueue } from './pick-queue.ts';
+import { PickQueue, PICKS_PAGE_MAX } from './pick-queue.ts';
 import type { QueuedPick } from './pick-queue.ts';
 
 // FORK-WIN: `DS_CHROME_PATH` always wins; without it, standard Windows install
@@ -1024,6 +1024,10 @@ export const PICK_SCRIPT = `(() => {
     // 'additive' (V4-5): the shell's shift-click is relayed through the
     // service; re-emit it as shiftKey so the payload below records it. The
     // flag is reserved — the panel treats both paths identically today.
+    // R2: in a workspace (__dsSelectionMode) this synthetic modified click
+    // only SELECTS (the click handler below); nothing reaches the pick queue
+    // until the user references the selection. The legacy single-url launch
+    // still picks directly.
     el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,ctrlKey:true,shiftKey:!!additive}));
     return true;
   };
@@ -1151,26 +1155,54 @@ export const PICK_SCRIPT = `(() => {
     return selectionResult();
   }
 
-  window.__dsSelectAt = function (x, y, additive) {
+  // 'full' (R2-fix): the service's canvas-wide cap is reached — an additive
+  // select may still toggle an element OUT, but adds nothing (full:true).
+  window.__dsSelectAt = function (x, y, additive, full) {
     var el = document.elementFromPoint(x, y);
     if (!el || el.nodeType !== 1 || inOverlay(el)) return false;
+    if (additive && full) {
+      var known = false;
+      for (var i = 0; i < selection.length; i++) if (selection[i].el === el) known = true;
+      if (!known) {
+        var refused = selectionResult();
+        refused.full = true;
+        return refused;
+      }
+    }
     return selectElement(el, { additive: !!additive });
   };
 
-  // The pull: payloads in selection order (disconnected elements dropped),
-  // each with the document scroll; the boxes flash pick-green and fade after
-  // 1500 ms (the same window as the V4-2 pick fade), and the selection clears.
-  window.__dsSelectionTake = function () {
-    var taken = selection;
-    selection = [];
+  // Drop the newest entries beyond 'keep' (the service's canvas-wide cap
+  // answering an in-frame Ctrl/Cmd-click that overflowed it).
+  window.__dsSelectionTrim = function (keep) {
+    while (selection.length > Math.max(0, keep)) dropBox(selection.pop().box);
+    placeSelection();
+    return selectionResult();
+  };
+
+  // The pull: up to 'limit' payloads in selection order (disconnected
+  // elements dropped), each with the document scroll; the taken boxes flash
+  // pick-green and fade after 1500 ms (the same window as the V4-2 pick fade).
+  // Entries past the limit STAY selected for the next send; the answer's
+  // count/label describe what is left so the service re-syncs its mirror.
+  // Called WITHOUT a limit it keeps the pre-fix contract: take everything and
+  // answer the bare payload array.
+  window.__dsSelectionTake = function (limit) {
+    var bounded = typeof limit === 'number' && limit >= 0;
+    var max = bounded ? limit : Infinity;
+    var taken = [];
+    var left = [];
+    for (var k = 0; k < selection.length; k++) {
+      var candidate = selection[k];
+      if (!candidate.el.isConnected) dropBox(candidate.box);
+      else if (taken.length < max) taken.push(candidate);
+      else left.push(candidate);
+    }
+    selection = left;
     var out = [];
     var flashed = [];
     for (var i = 0; i < taken.length; i++) {
       var entry = taken[i];
-      if (!entry.el.isConnected) {
-        dropBox(entry.box);
-        continue;
-      }
       var payload = payloadFor(entry.el, out.length > 0);
       payload.scrollX = window.scrollX;
       payload.scrollY = window.scrollY;
@@ -1186,12 +1218,19 @@ export const PICK_SCRIPT = `(() => {
         for (var j = 0; j < flashed.length; j++) dropBox(flashed[j]);
       }, 1500);
     }
-    return out;
+    if (!bounded) return out;
+    var rest = selectionResult();
+    return { items: out, count: rest.count, label: rest.label };
   };
 
   window.__dsSelectionClear = function () {
     clearSelection();
-    return true;
+    return { count: 0 };
+  };
+
+  // The service's re-sync read (a shell 'ready'): what this document holds.
+  window.__dsSelectionState = function () {
+    return selectionResult();
   };
 
   // Registered on 'window' capture, not document capture: window precedes
@@ -1230,7 +1269,9 @@ export const PICK_SCRIPT = `(() => {
       e.preventDefault();
       e.stopPropagation();
       var result = selectElement(target, { additive: !!e.shiftKey });
-      if (window.__dsArtifactEvent) window.__dsArtifactEvent(JSON.stringify({ type: 'selection', count: result.count, label: result.label, additive: !!e.shiftKey }));
+      // 'script': a synthetic click (the agent's __dsPickAt relay) — the
+      // service then leaves the user's selection on other boards alone.
+      if (window.__dsArtifactEvent) window.__dsArtifactEvent(JSON.stringify({ type: 'selection', count: result.count, label: result.label, additive: !!e.shiftKey, script: !e.isTrusted }));
       return;
     }
     // Chrome retargets trusted clicks (and elementFromPoint) at an open
@@ -1342,8 +1383,8 @@ const ARTIFACT_BRIDGE = `(() => {
 // root scrollbar is a rendering artifact of that framing (Sonnet re-verify F16:
 // the tall artboard showed a native scrollbar across the art wall). It is
 // hidden for the ROOT scroller only (inner scrollable widgets keep theirs) and
-// ONLY in workspace canvas sessions — the legacy single-url launch keeps its
-// byte-identical script (see the two variants below), and exports are
+// ONLY in workspace canvas sessions — the legacy single-url launch never gets
+// it (see the two variants below), and exports are
 // unaffected either way: PNG capture and PDF print run against separate
 // throwaway targets that never receive this script. Scrolling itself still
 // works (wheel/keyboard/scrollBy) — only the bar hides.
@@ -1377,7 +1418,10 @@ function artifactScripts(workspace: boolean): string {
   if((window.__dsTrustedArtifact || window.name.startsWith('__dsArtifact:')) && !window.__dsProbe){${PROBE_SCRIPT}}
 }`;
 }
-/** Legacy single-url launch: byte-identical to the pre-FIX-3 script. */
+/** Legacy single-url launch: no scrollbar chrome and no __dsSelectionMode, so
+ *  a modified click still picks directly. Not byte-identical to the pre-FIX-3
+ *  script any more: PICK_SCRIPT now also carries R2's (dormant here) selection
+ *  functions, and the service relays legacy screen-picks to __dsPickAt. */
 const ARTIFACT_SCRIPTS = artifactScripts(false);
 /** Workspace canvas sessions add the F16a scrollbar chrome (canvas-only) and
  *  R2's selection mode (a modified click selects instead of picking). */
@@ -1454,6 +1498,23 @@ const SCREEN_ID_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
 
 /** The implicit single-artboard screen used by the legacy url-only launch. */
 const LEGACY_SCREEN_ID = 'preview';
+
+/** R2-fix (M1): the canvas-wide selection cap (frames still cap 10 each). It
+ *  stays under the pick ring (50) so two full sends never overwrite unread
+ *  entries; one send references at most PICKS_PAGE_MAX of it. */
+export const SELECTION_TOTAL_MAX = 40;
+
+/** One mutation in the serial selection queue (R2-fix M3). */
+type SelectionJob =
+  | { kind: 'select'; screen: string; x: number; y: number; additive: boolean; clickAt: number | null }
+  | { kind: 'note'; screen: string; count: number; label: string; additive: boolean; agent: boolean }
+  | { kind: 'send'; sentAt: number }
+  | { kind: 'clear' }
+  | { kind: 'drop'; screen: string }
+  | { kind: 'resync' };
+
+/** The lease/context error family a frame evaluate retries (F1/F2 lineage). */
+const FRAME_RETRY_RE = /artifact context is unavailable|uniqueContextId not found|execution context|authority was revoked/i;
 
 /** Spec §A url join: `baseUrl` + `/` + screen file, no double slashes. */
 function joinScreenUrl(baseUrl: string, file: string): string {
@@ -1774,9 +1835,16 @@ export class Browser {
   private selection = new Map<string, { count: number; label: string }>();
   /** The artboard the newest selection landed on (the shell anchors its pill there). */
   private selectionScreen: string | null = null;
-  /** Ordered select relays; a plain select supersedes everything still pending. */
-  private selectPending: Array<{ screen: string; x: number; y: number; additive: boolean; clickAt: number | null }> = [];
+  /** R2-fix (M3): ONE serial queue for every selection mutation — selects,
+   *  in-frame notes, sends, clears, per-screen drops and shell re-syncs — so a
+   *  send covers exactly the clicks made before it and a click after a send
+   *  starts a fresh selection. */
+  private selectPending: Array<SelectionJob & { done: () => void }> = [];
   private selectRunning: Promise<void> | null = null;
+  /** m9: agent input in flight (or just finished) — its selects never clear
+   *  the user's selection on other boards. */
+  private agentInputDepth = 0;
+  private agentInputUntil = 0;
   /** click→selected of the newest select, for the pick timing log. */
   private lastSelectMs: number | null = null;
   private batchSeq = 0;
@@ -1827,10 +1895,22 @@ export class Browser {
     focus?: boolean;
   }): Promise<void> {
     const focus = cfg.focus !== false;
-    if (typeof cfg.dir === 'string' && cfg.dir) this.workspaceDir = cfg.dir;
+    // m8 (R2-fix): a window launched by the legacy single-url path baked the
+    // legacy artifact scripts (no selection mode) and a workspace:false shell
+    // config; neither can be re-baked warm, so the cheapest safe flip is a
+    // cold relaunch. (The reverse flip cannot happen: workspaceMode is never
+    // reset once a workspace opened.)
+    if (this.cdp && !this.workspaceMode) await this.close();
+    // m10: the dir is per call — an omitted dir must not stamp the previous
+    // workspace onto this one's picks, and a different workspace starts with
+    // nothing selected.
+    const dir = typeof cfg.dir === 'string' && cfg.dir ? cfg.dir : null;
+    const dirChanged = dir !== this.workspaceDir;
+    this.workspaceDir = dir;
     if (typeof cfg.baseUrl === 'string' && cfg.baseUrl) this.baseUrl = cfg.baseUrl;
     if (cfg.mode === 'edit' || cfg.mode === 'play') this.mode = cfg.mode;
     this.workspaceMode = true;
+    if (dirChanged && this.cdp) await this.runSelectionJob({ kind: 'clear' });
     const selected = this.selection.size;
     this.applyScreenRegistry(cfg.screens ?? []);
     if (!this.screenOrder.length) throw new Error('a canvas workspace needs at least one valid screen');
@@ -1924,8 +2004,9 @@ export class Browser {
     const flipped = mode !== this.mode;
     this.mode = mode;
     this.modeApplied = this.cdp ? await this.applyModePush(mode) : true;
-    // R2 (B4): a mode flip either way drops whatever was selected.
-    if (flipped && this.selection.size) await this.clearAllSelections();
+    // R2 (B4): a mode flip either way drops whatever was selected — in every
+    // frame, not only the ones the mirror knows (R2-fix M2).
+    if (flipped && (this.cdp || this.selection.size)) await this.runSelectionJob({ kind: 'clear' });
     // D5: the canvas toolbar's mode toggle persists through the same view.json
     // funnel as camera/positions. The REQUESTED mode is what persists (user
     // intent, like the echo); modeApplied separately marks shell acceptance.
@@ -2541,18 +2622,19 @@ export class Browser {
         if(value.type==='dismiss'&&this.canvasFlags.menu)void this.shellEval('__dsCanvas.dismissMenu()').catch(()=>undefined);
         // R2 (B4): an in-frame Ctrl/Cmd-click selected locally (play mode, or
         // the agent's modified click) — mirror its count; nothing is queued.
+        // m9: 'script' (a synthetic click — the agent's __dsPickAt) or a click
+        // landing during agent input is an AGENT select.
         if(value.type==='selection'&&Number.isInteger(value.count)&&value.count>=0&&value.count<=10){
-          void this.noteFrameSelection(screen,value.count,typeof value.label==='string'?value.label.slice(0,120):'',value.additive===true);
+          const agent=value.script===true||this.agentInputDepth>0||Date.now()<this.agentInputUntil;
+          void this.runSelectionJob({kind:'note',screen,count:value.count,label:typeof value.label==='string'?value.label.slice(0,120):'',additive:value.additive===true,agent});
         }
         if(value.type==='changed'){
           void this.refreshScreen(screen);
-          // R2 (B4): a new document (dom/load) has no selection any more; a
-          // same-document 'nav' keeps it (elements are re-checked at send).
-          if((value.reason==='dom'||value.reason==='load')&&this.selection.has(screen)){
-            this.dropScreenSelection(screen);
-            void this.evalIn('window.__dsSelectionClear&&window.__dsSelectionClear()',false,screen).catch(()=>undefined);
-            void this.pushSelection();
-          }
+          // R2 (B4): a new document has no selection any more; a same-document
+          // 'nav' keeps it (elements are re-checked at send). m5 (R2-fix):
+          // only 'dom' marks the new document — its own 'load' follows later,
+          // and a selection made between the two must survive it.
+          if(value.reason==='dom'&&this.selection.has(screen))void this.runSelectionJob({kind:'drop',screen});
           // FIX-3 (F13): in PLAY mode the user drives the screens by clicking
           // through them, so in-frame navigation inside artboard B moves the
           // active outline to B (the 'changed' signal is already tagged per
@@ -3094,9 +3176,14 @@ export class Browser {
       for(const record of this.screens.values()){record.shellState=undefined;record.shellScrollable=undefined;}
       // R2 (B4): a fresh shell document has fresh artboard documents — no
       // selection survives it, and a stale toolbar count must clear.
-      this.selection.clear();this.selectionScreen=null;this.selectPending=[];
+      // R2-fix: the re-sync READS every frame's selection on the serial queue
+      // and pushes that. The old path cleared the mirror and pushed a
+      // hard-coded zero after the bridge settled — a select made in that
+      // window (or a first-boot 'ready' honoured late on replay) left the
+      // toolbar at 0 while the frame still held a selection. A reloaded
+      // shell's frames are new documents, so they simply read back empty.
       await this.shellBridgeSettled();
-      void this.pushGuardedShell(`typeof __dsCanvas.setSelection==='function'&&__dsCanvas.setSelection({count:0,screens:[]})`);
+      void this.runSelectionJob({kind:'resync'});
       await this.contexts?.discover();
       await this.contexts?.initializeArtifact();
       // A shell reload rebuilds the artboards from its baked ViewerConfig,
@@ -3144,15 +3231,18 @@ export class Browser {
       // (__dsSelectAt); nothing is queued until the user references the
       // selection (selection-send). Shift-click (`additive`) toggles. The
       // relay keeps the F1/F2 retry family (relayPickToFrame's lineage).
+      // m7 (R2-fix): the legacy single-url launch has no selection mode — its
+      // click still picks directly through __dsPickAt, as before R2.
+      if(!this.workspaceMode){void this.relayPickToFrame(screen,value.x!,value.y!,value.additive===true);return;}
       const clickAt=typeof value.clickAt==='number'&&Number.isFinite(value.clickAt)?value.clickAt:null;
       this.queueSelect({screen,x:value.x!,y:value.y!,additive:value.additive===true,clickAt});
     }
     else if(value.type==='selection-send'){
       const sentAt=typeof value.sentAt==='number'&&Number.isFinite(value.sentAt)?value.sentAt:Date.now();
-      await this.sendSelection(sentAt);
+      await this.runSelectionJob({kind:'send',sentAt});
     }
     else if(value.type==='selection-clear'){
-      await this.clearAllSelections();
+      await this.runSelectionJob({kind:'clear'});
     }
     else if(value.type==='screen-activate'&&typeof screen==='string'&&this.screens.has(screen)){
       await this.setActive(screen);
@@ -3232,12 +3322,15 @@ export class Browser {
     if (this.selectionScreen === screen) this.selectionScreen = [...this.selection.keys()].pop() ?? null;
   }
 
-  /** Service→shell: `__dsCanvas.setSelection({count,screens,screen?,label})` (boolean). */
-  private async pushSelection(): Promise<boolean> {
+  /** Service→shell: `__dsCanvas.setSelection({count,screens,screen?,label,notice?})`
+   *  (boolean). `notice` is announced by the shell (selection full, a partial
+   *  send, nothing left to reference). */
+  private async pushSelection(notice?: string): Promise<boolean> {
     const summary = this.selectionSummary();
     const anchor = this.selectionScreen ? this.selection.get(this.selectionScreen) : undefined;
     const payload = anchor ? { ...summary, screen: this.selectionScreen, label: anchor.label } : { ...summary, label: '' };
-    return (await this.pushGuardedShell(`typeof __dsCanvas.setSelection==='function'&&__dsCanvas.setSelection(${JSON.stringify(payload)})`)) === true;
+    const body = notice ? { ...payload, notice } : payload;
+    return (await this.pushGuardedShell(`typeof __dsCanvas.setSelection==='function'&&__dsCanvas.setSelection(${JSON.stringify(body)})`)) === true;
   }
 
   private applySelectionCount(screen: string, count: number, label: string): void {
@@ -3249,69 +3342,196 @@ export class Browser {
     }
   }
 
-  /** A plain (non-additive) select is single-select across the whole canvas. */
-  private async clearOtherSelections(keep: string): Promise<void> {
-    const others = [...this.selection.keys()].filter((id) => id !== keep);
-    for (const id of others) this.dropScreenSelection(id);
-    await Promise.all(others.map((id) => this.evalIn('window.__dsSelectionClear&&window.__dsSelectionClear()', false, id).catch(() => undefined)));
+  /** Re-sync one screen's mirror from a frame answer ({count,label}); a frame
+   *  that answered nothing usable counts as empty. */
+  private syncFromFrame(screen: string, answer: unknown): void {
+    if (!this.screens.has(screen)) return;
+    const value = answer as { count?: unknown; label?: unknown } | null;
+    const count = value && typeof value === 'object' && Number.isInteger(value.count) && (value.count as number) >= 0 ? value.count as number : 0;
+    const label = value && typeof value === 'object' && typeof value.label === 'string' ? value.label.slice(0, 120) : this.selection.get(screen)?.label ?? '';
+    if (count > 0 && this.selection.has(screen)) {
+      // Keep the screen's place in selection order (and the pill anchor).
+      this.selection.set(screen, { count, label });
+    } else this.applySelectionCount(screen, count, label);
   }
 
-  /** The in-frame modified click reported its new local count (no pull, no queue). */
-  private async noteFrameSelection(screen: string, count: number, label: string, additive: boolean): Promise<void> {
-    if (!additive && count > 0) await this.clearOtherSelections(screen);
-    this.applySelectionCount(screen, count, label);
-    await this.pushSelection();
+  /** __dsSelectionClear in each named frame, re-syncing the mirror from the answers. */
+  private async clearFrames(ids: string[]): Promise<void> {
+    await Promise.all(ids.map(async (id) => {
+      const answer = await this.evalIn('window.__dsSelectionClear?window.__dsSelectionClear():{count:0}', false, id).catch(() => ({ count: 0 }));
+      this.syncFromFrame(id, answer);
+    }));
+  }
+
+  /** A plain (non-additive) select is single-select across the whole canvas.
+   *  R2-fix (M2): EVERY registered screen is told, not only the ones the mirror
+   *  knows — a frame can hold a selection the service missed. */
+  private async clearOtherSelections(keep: string): Promise<void> {
+    const others = [...this.screens.keys()].filter((id) => id !== keep);
+    for (const id of [...this.selection.keys()]) if (id !== keep) this.dropScreenSelection(id);
+    await this.clearFrames(others);
   }
 
   /**
-   * Ordered select relay. Each click is one evaluate; a plain click
-   * supersedes every still-pending relay (it replaces the selection anyway),
-   * shift-clicks queue in order so no toggle is lost.
+   * Enqueue one selection mutation on the serial queue; resolves when it ran
+   * (or was superseded). A plain select or a clear supersedes the selects
+   * queued after the last other job (they would be replaced anyway); sends,
+   * clears and notes are never dropped, so a send covers exactly the clicks
+   * queued before it.
    */
-  private queueSelect(job: { screen: string; x: number; y: number; additive: boolean; clickAt: number | null }): void {
-    if (!this.cdp) return;
-    if (!job.additive) this.selectPending = [];
-    if (this.selectPending.length >= 20) this.selectPending.shift();
-    this.selectPending.push(job);
-    if (this.selectRunning) return;
-    this.selectRunning = (async () => {
-      while (this.selectPending.length && this.cdp) await this.applySelect(this.selectPending.shift()!);
-    })().finally(() => {
-      this.selectRunning = null;
+  private runSelectionJob(job: SelectionJob): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if ((job.kind === 'select' && !job.additive) || job.kind === 'clear') {
+        let at = this.selectPending.length;
+        while (at > 0 && this.selectPending[at - 1]!.kind === 'select') at -= 1;
+        for (const dropped of this.selectPending.splice(at)) dropped.done();
+      }
+      if (job.kind === 'select' && this.selectPending.filter((entry) => entry.kind === 'select').length >= 20) {
+        const oldest = this.selectPending.findIndex((entry) => entry.kind === 'select');
+        this.selectPending.splice(oldest, 1)[0]!.done();
+      }
+      this.selectPending.push({ ...job, done: resolve });
+      this.pumpSelection();
     });
   }
 
+  private pumpSelection(): void {
+    if (this.selectRunning) return;
+    this.selectRunning = (async () => {
+      while (this.selectPending.length) {
+        const job = this.selectPending.shift()!;
+        try {
+          await this.applySelectionJob(job);
+        } catch (error) {
+          console.log(`[design-canvas] selection ${job.kind} failed: ${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          job.done();
+        }
+      }
+    })().finally(() => {
+      this.selectRunning = null;
+      // A job enqueued between the loop's last check and this callback.
+      if (this.selectPending.length) this.pumpSelection();
+    });
+  }
+
+  /** Window/shell teardown: pending jobs are moot; their waiters resolve. */
+  private dropPendingSelectionJobs(): void {
+    for (const dropped of this.selectPending.splice(0)) dropped.done();
+  }
+
+  private async applySelectionJob(job: SelectionJob): Promise<void> {
+    if (job.kind === 'select') await this.applySelect(job);
+    else if (job.kind === 'note') await this.noteFrameSelection(job.screen, job.count, job.label, job.additive, job.agent);
+    else if (job.kind === 'send') await this.sendSelection(job.sentAt);
+    else if (job.kind === 'clear') await this.clearAllSelections();
+    else if (job.kind === 'drop') {
+      this.dropScreenSelection(job.screen);
+      await this.evalIn('window.__dsSelectionClear&&window.__dsSelectionClear()', false, job.screen).catch(() => undefined);
+      await this.pushSelection();
+    } else await this.resyncSelection();
+  }
+
+  /** Rebuild the mirror from what every registered frame holds, then push. */
+  private async resyncSelection(): Promise<void> {
+    const ids = [...this.screens.keys()];
+    const answers = await Promise.all(ids.map((id) => this.evalIn('window.__dsSelectionState?window.__dsSelectionState():{count:0}', false, id).catch(() => ({ count: 0 }))));
+    ids.forEach((id, index) => this.syncFromFrame(id, answers[index]));
+    for (const id of [...this.selection.keys()]) if (!this.screens.has(id)) this.dropScreenSelection(id);
+    await this.pushSelection();
+  }
+
+  /** The in-frame modified click reported its new local count (no pull, no queue). */
+  private async noteFrameSelection(screen: string, count: number, label: string, additive: boolean, agent = false): Promise<void> {
+    if (!this.screens.has(screen)) return;
+    // m9: an agent's select never clears what the user selected elsewhere.
+    if (!additive && !agent && count > 0) await this.clearOtherSelections(screen);
+    // m4: the screen may have left the registry while the clears ran.
+    if (!this.screens.has(screen)) return;
+    let notice: string | undefined;
+    const others = this.selectionSummary().count - (this.selection.get(screen)?.count ?? 0);
+    if (count > 0 && others + count > SELECTION_TOTAL_MAX) {
+      // M1: the in-frame click already selected — trim it back under the cap.
+      const keep = Math.max(0, SELECTION_TOTAL_MAX - others);
+      const trimmed = await this.evalIn(`window.__dsSelectionTrim?window.__dsSelectionTrim(${keep}):null`, false, screen).catch(() => null) as { count?: unknown; label?: unknown } | null;
+      if (!this.screens.has(screen)) return;
+      count = trimmed && Number.isInteger(trimmed.count) ? trimmed.count as number : keep;
+      if (trimmed && typeof trimmed.label === 'string') label = trimmed.label.slice(0, 120);
+      notice = this.selectionFull();
+    }
+    this.applySelectionCount(screen, count, label);
+    await this.pushSelection(notice);
+  }
+
+  /** M1: the cap's user-facing answer (toast + the notice the shell announces). */
+  private selectionFull(): string {
+    const text = `Selection full (${SELECTION_TOTAL_MAX}) — reference it in chat first`;
+    void this.pushToast('warn', text);
+    return text;
+  }
+
+  /** Ordered select relay (one evaluate per click) on the serial queue. */
+  private queueSelect(job: { screen: string; x: number; y: number; additive: boolean; clickAt: number | null }): void {
+    if (!this.cdp) return;
+    void this.runSelectionJob({ kind: 'select', ...job });
+  }
+
   /**
-   * Run __dsSelectAt inside the artboard frame. The F1/F2 lineage
-   * (relayPickToFrame): the lease/context error family retries with one
-   * rediscovery per attempt, bounded at 2.5 s, and anything undeliverable is
-   * logged loudly instead of dropped silently.
+   * One evaluate inside an artboard frame with the F1/F2 retry family
+   * (relayPickToFrame's lineage): the lease/context errors retry with one
+   * rediscovery per attempt, bounded at 2.5 s; anything else (or the
+   * deadline) is logged loudly and answered as a failure, never thrown.
    */
-  private async applySelect(job: { screen: string; x: number; y: number; additive: boolean; clickAt: number | null }): Promise<void> {
-    const { screen, x, y, additive } = job;
-    const expression = `window.__dsSelectAt?window.__dsSelectAt(${x},${y},${additive ? 'true' : 'false'}):false`;
+  private async evalInFrame(expression: string, screen: string, what: string): Promise<{ ok: true; value: unknown } | { ok: false }> {
     const deadline = Date.now() + 2500;
-    let result: unknown;
     for (;;) {
       try {
-        result = await this.evalIn(expression, false, screen);
-        break;
+        return { ok: true, value: await this.evalIn(expression, false, screen) };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!/artifact context is unavailable|uniqueContextId not found|execution context|authority was revoked/i.test(message) || Date.now() >= deadline) {
-          console.log(`[design-canvas] select relay to "${screen}" FAILED: ${message}`);
-          return;
+        if (!FRAME_RETRY_RE.test(message) || Date.now() >= deadline) {
+          console.log(`[design-canvas] ${what} to "${screen}" FAILED: ${message}`);
+          return { ok: false };
         }
         await this.contexts?.discover().catch(() => undefined);
         await delay(60);
       }
     }
-    const answer = result as { ok?: unknown; count?: unknown; label?: unknown } | null;
+  }
+
+  /**
+   * m7: the legacy single-url launch's click picks directly (no selection
+   * mode there): __dsPickAt in the frame, the __dsPick binding queues it.
+   */
+  private async relayPickToFrame(screen: string, x: number, y: number, additive: boolean): Promise<void> {
+    const result = await this.evalInFrame(`window.__dsPickAt(${x},${y},${additive ? 'true' : 'false'})`, screen, 'pick relay');
+    if (result.ok && result.value === false) console.log(`[design-canvas] pick relay: __dsPickAt found no pickable element at (${x},${y}) in "${screen}"`);
+  }
+
+  /**
+   * Run __dsSelectAt inside the artboard frame (evalInFrame's retry family).
+   * M1: an additive select at the canvas-wide cap may only toggle OUT.
+   */
+  private async applySelect(job: { screen: string; x: number; y: number; additive: boolean; clickAt: number | null }): Promise<void> {
+    const { screen, x, y, additive } = job;
+    if (!this.screens.has(screen)) return;
+    const full = additive && this.selectionSummary().count >= SELECTION_TOTAL_MAX;
+    const expression = `window.__dsSelectAt?window.__dsSelectAt(${x},${y},${additive ? 'true' : 'false'}${full ? ',true' : ''}):false`;
+    const result = await this.evalInFrame(expression, screen, 'select relay');
+    if (!result.ok) return;
+    const answer = result.value as { ok?: unknown; count?: unknown; label?: unknown; full?: unknown } | null;
     if (!answer || answer.ok !== true || !Number.isInteger(answer.count)) {
       console.log(`[design-canvas] select relay: no selectable element at (${x},${y}) in "${screen}"`);
       return;
     }
+    // m4: a screen removed while the evaluate ran must not be recreated.
+    if (!this.screens.has(screen)) return;
+    if (answer.full === true) {
+      await this.pushSelection(this.selectionFull());
+      return;
+    }
     if (!additive) await this.clearOtherSelections(screen);
+    if (!this.screens.has(screen)) return;
     this.applySelectionCount(screen, answer.count as number, typeof answer.label === 'string' ? answer.label.slice(0, 120) : '');
     if (job.clickAt !== null) {
       this.lastSelectMs = Math.max(0, Date.now() - job.clickAt);
@@ -3321,28 +3541,44 @@ export class Browser {
   }
 
   /**
-   * selection-send: PULL every selected payload straight through CDP
-   * evaluate (no binding round-trip, so the 4 s arming sweep and the relay
-   * retries are off the critical path) and queue them in selection order —
-   * one batch id per send, the window's workspace dir on every entry.
+   * selection-send: PULL the selected payloads straight through CDP evaluate
+   * (no binding round-trip, so the 4 s arming sweep is off the critical path)
+   * and queue them in selection order — one batch id per send, the window's
+   * workspace dir on every entry.
+   *
+   * R2-fix: at most PICKS_PAGE_MAX elements per send (one /picks page, so a
+   * big send can never overrun the 50-entry ring); the rest stay selected for
+   * the next send. A frame whose read fails KEEPS its record and outlines
+   * (the read already retried the lease/context family), and every read
+   * re-syncs the mirror from the frame's own remaining count.
    */
   private async sendSelection(sentAt: number): Promise<void> {
-    if (this.selectRunning) await this.selectRunning.catch(() => undefined);
     const screens = [...this.selection.keys()];
     if (!screens.length) return;
     const clickToSelected = this.lastSelectMs;
-    this.selection.clear();
-    this.selectionScreen = null;
-    const takes = await Promise.all(screens.map((id) =>
-      this.evalIn('window.__dsSelectionTake?window.__dsSelectionTake():[]', false, id)
-        .then((value) => (Array.isArray(value) ? value : []))
-        .catch(() => [] as unknown[])));
     const batch = `b${Date.now().toString(36)}-${(++this.batchSeq).toString(36)}`;
     const dir = this.workspaceDir ?? undefined;
+    let budget = PICKS_PAGE_MAX;
     let lastSeq = 0;
     let queued = 0;
-    screens.forEach((screen, index) => {
-      for (const raw of takes[index]!) {
+    let failed = 0;
+    for (const screen of screens) {
+      if (budget <= 0) break;
+      if (!this.screens.has(screen)) {
+        this.dropScreenSelection(screen);
+        continue;
+      }
+      const read = await this.evalInFrame(`window.__dsSelectionTake?window.__dsSelectionTake(${budget}):[]`, screen, 'selection read');
+      if (!read.ok) {
+        failed += 1;
+        continue;
+      }
+      // An array is the pre-fix answer shape (everything taken, nothing left).
+      const items: unknown[] = Array.isArray(read.value) ? read.value : Array.isArray((read.value as { items?: unknown } | null)?.items) ? (read.value as { items: unknown[] }).items : [];
+      const left = Array.isArray(read.value) ? { count: 0 } : read.value;
+      let fromScreen = 0;
+      for (const raw of items) {
+        if (budget <= 0) break;
         if (!validPick(raw)) continue;
         const picked: PickedElement = { selector: raw.selector, tag: raw.tag, classes: raw.classes, text: raw.text, outerHTML: raw.outerHTML, styles: raw.styles, rect: raw.rect };
         const entry = this.enqueueElementPick(screen, { ...picked, additive: queued > 0 }, { batch, ...(dir ? { dir } : {}) });
@@ -3351,24 +3587,40 @@ export class Browser {
         this.pickSeq += 1;
         lastSeq = entry.seq;
         queued += 1;
+        fromScreen += 1;
+        budget -= 1;
       }
-    });
+      this.syncFromFrame(screen, left);
+      // m6: nothing usable came back — no stale record, no stray outlines.
+      if (!fromScreen && !this.selection.has(screen)) await this.evalIn('window.__dsSelectionClear&&window.__dsSelectionClear()', false, screen).catch(() => undefined);
+    }
+    let notice: string | undefined;
+    const remaining = this.selectionSummary().count;
     if (queued) {
       const sendToQueued = Math.max(0, Date.now() - sentAt);
       console.log(`[design-canvas] pick timing send→queued ${sendToQueued}ms (${queued} element${queued === 1 ? '' : 's'}, batch ${batch})`);
       this.pickTimings.set(lastSeq, { clickToSelected, sendToQueued, queuedAt: Date.now() });
       while (this.pickTimings.size > 20) this.pickTimings.delete(this.pickTimings.keys().next().value!);
+      if (remaining) notice = `Referenced ${queued} in chat — ${remaining} still selected. Reference in chat again to send the rest.`;
+    } else if (!failed) {
+      notice = 'Nothing to reference — the selected elements changed';
+      void this.pushToast('warn', notice);
     }
-    await this.pushSelection();
+    if (failed) {
+      const text = `Couldn't read the selection on ${failed === 1 ? 'one screen' : `${failed} screens`} — it is still selected. Try Reference in chat again.`;
+      void this.pushToast('warn', text);
+      notice = notice ? `${notice} ${text}` : text;
+    }
+    await this.pushSelection(notice);
   }
 
-  /** selection-clear (and mode flips): every artboard drops its selection. */
+  /** selection-clear (and mode flips): EVERY registered artboard drops its
+   *  selection (R2-fix M2), and the mirror re-syncs from the answers. */
   private async clearAllSelections(): Promise<void> {
-    const screens = [...this.selection.keys()];
+    const known = [...this.selection.keys()];
     this.selection.clear();
     this.selectionScreen = null;
-    this.selectPending = [];
-    await Promise.all(screens.map((id) => this.evalIn('window.__dsSelectionClear&&window.__dsSelectionClear()', false, id).catch(() => undefined)));
+    await this.clearFrames([...new Set([...this.screens.keys(), ...known])].filter((id) => this.screens.has(id)));
     await this.pushSelection();
   }
 
@@ -3981,10 +4233,14 @@ export class Browser {
         }
         if (!rest.length) return;
         await this.pushGuardedShell(`typeof __dsCanvas.revealScreen==='function'&&__dsCanvas.revealScreen(${JSON.stringify(screen)})`);
+        this.agentInputDepth += 1;
         try {
           await this.pushGuardedShell(`typeof __dsCanvas.setAgentInput==='function'&&__dsCanvas.setAgentInput(true)`);
           await this.dispatchCanvasInput(screen, rest);
         } finally {
+          // m9: a 'selection' event can trail the dispatch it came from.
+          this.agentInputDepth -= 1;
+          this.agentInputUntil = Date.now() + 1000;
           await this.pushGuardedShell(`typeof __dsCanvas.setAgentInput==='function'&&__dsCanvas.setAgentInput(false)`);
         }
       });
@@ -4009,6 +4265,9 @@ export class Browser {
       await this.shellEval('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))',true);
       const rect=await this.shellEval(`(()=>{const f=document.getElementById('ds-frame-${screen}'),r=f.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,cssWidth:f.clientWidth,cssHeight:f.clientHeight}})()`) as {x:number;y:number;width:number;height:number;cssWidth:number;cssHeight:number};
       if(event.type==='pointer'&&event.action==='down'&&this.canvasFlags.menu){await this.shellEval('__dsCanvas.dismissMenu()');continue;}
+      // R2/m9: in a workspace this __dsPickAt only SELECTS in the frame (its
+      // synthetic click reports script:true, so the user's selection on other
+      // boards survives); the legacy launch still picks directly.
       if(event.type==='pointer'&&(event.modifiers.ctrl||event.modifiers.meta)&&this.canvasFlags.pan){if(event.action==='up')await this.evalIn(`window.__dsPickAt(${event.x},${event.y})`,false,screen);continue;}
       if (event.type === 'pointer') {
         const type = event.action === 'down' ? 'mousePressed' : event.action === 'up' ? 'mouseReleased' : 'mouseMoved';
@@ -4633,7 +4892,7 @@ export class Browser {
     // R2 (B4): a closed window's selection is gone with its documents.
     this.selection.clear();
     this.selectionScreen = null;
-    this.selectPending = [];
+    this.dropPendingSelectionJobs();
     this.pickTimings.clear();
     this.lastSelectMs = null;
     // F13 boot-grace: the follow's arming belongs to the dying window's
