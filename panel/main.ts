@@ -24,7 +24,7 @@
 // (Start creates the workspace on first use). The canvas itself is a real
 // headful Chrome window the local service opens on the workspace dir; this page
 // only opens it, raises it and reads its state. English-only copy by requirement.
-import { type HostReadyContext, GUEST_COMPOSE_TEXT_MAX } from '@openchamber/sdk';
+import type { HostReadyContext } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 
 import {
@@ -109,13 +109,15 @@ import {
 } from './api.ts';
 import { DIRECTIONS, type DirectionId } from './craft.ts';
 import {
+  BRIEF_MAX,
   DEFAULT_MODE,
   DESIGN_TYPES,
+  DEVICE_PRESETS,
   FIDELITIES,
-  FIDELITY_OPTIONS,
-  NO_DESIGN_SYSTEM,
+  FIDELITY_FOR_TYPE,
   TYPE_HINT,
   attachUrl,
+  briefLimitError,
   buildCompactModeChip,
   buildModeChip,
   critiqueReviewChip,
@@ -124,7 +126,6 @@ import {
   designSessionIdFromKey,
   designSessionPrompt,
   designSystemGroups,
-  designSystemLabel,
   designSystemSwatches,
   exportFailureSummary,
   exportJobSummary,
@@ -141,25 +142,32 @@ import {
   projectReferenceChip,
   seedModeValue,
   seedSessionData,
+  structureBrief,
   workspaceOpenPrompt,
   workspaceStorageKey,
   type DesignBriefSpec,
+  type DesignLook,
   type DesignMode,
   type DesignType,
+  type DeviceId,
   type Fidelity,
 } from './mode.ts';
+import type { OptionsChoice } from '../shared/harness-text.ts';
 import type { DesignSystemPreset } from '../shared/design-systems.ts';
 import { addDraftReference, removeDraftReference, buildReferenceSubmission, type DraftReference } from './reference-draft.ts';
 import { buildAttachPayload, type PickContext } from './attach-dialog.ts';
 
 const POLL_MS = 900;
 
-/** One suggestion under the composer: a title, a one-liner and the brief it seeds. */
-type Idea = { title: string; description: string; prompt: string };
+/** The outline a starter card draws: what the brief is designed for. */
+type StarterGlyph = 'phone' | 'desktop' | 'slide' | 'square' | 'page';
+
+/** One "Start from" card: a pre-structured brief for one design type. */
+type Starter = { type: DesignType; title: string; description: string; glyph: StarterGlyph; prompt: string };
 
 /**
  * The design types as they read on the creation page: short labels for the
- * headline and the chip. The compact session row has no creation selectors.
+ * chip and the session title. The compact session row has no creation selectors.
  */
 const PAGE_TYPE_LABELS: Record<DesignType, string> = {
   wireframe: 'Wireframe',
@@ -169,37 +177,44 @@ const PAGE_TYPE_LABELS: Record<DesignType, string> = {
   custom: 'Custom',
 };
 
-/**
- * Idea cards, framed by the selected type: choosing a type reframes these. There
- * are no real project thumbnails, so each card carries a small abstract SVG
- * preview instead (see `ideaThumb`). English only.
- */
-const IDEAS: Record<DesignType, Idea[]> = {
-  prototype: [
-    { title: 'Gamified Habit App', description: 'Daily streaks with playful rewards', prompt: 'A gamified habit-tracking app with daily streaks, points, and playful rewards.' },
-    { title: 'Interactive Dashboard', description: 'Live metrics, filters and charts', prompt: 'An interactive dashboard with live metrics, filters, and charts.' },
-    { title: 'Booking Flow', description: 'Pick a slot, confirm, pay', prompt: 'An interactive booking flow: choose a date and slot, confirm the details, and pay.' },
-  ],
-  'hi-fi': [
-    { title: 'Luxury Property Website', description: 'Elegant listings and detail pages', prompt: 'A luxury property website with elegant listings, a photo gallery, and property detail pages.' },
-    { title: 'Product Pricing Page', description: 'Three tiers, clear comparison', prompt: 'A product pricing page with three tiers and a clear feature comparison.' },
-    { title: 'Marketing Landing Page', description: 'Hero, features and a call to action', prompt: 'A marketing landing page with a hero, feature highlights, and a strong call to action.' },
-  ],
-  deck: [
-    { title: 'New Hire Onboarding Guide', description: 'A welcome deck for the first week', prompt: 'A new-hire onboarding deck covering the first week, the tools, and the team.' },
-    { title: 'Q3 Product Review', description: 'Results, learnings and next bets', prompt: 'A Q3 product review deck: results, learnings, and the next bets.' },
-    { title: 'Sales Pitch', description: 'Problem, solution, proof, pricing', prompt: 'A sales pitch deck: problem, solution, proof, and pricing.' },
-  ],
-  wireframe: [
-    { title: 'Checkout Flow', description: 'Cart to confirmation, boxes only', prompt: 'A wireframe of the checkout flow from cart to confirmation, boxes and labels only.' },
-    { title: 'Onboarding Steps', description: 'Sign-up to first value', prompt: 'A wireframe of the onboarding steps from sign-up to first value.' },
-    { title: 'App Navigation', description: 'Tabs, menus and top-level screens', prompt: 'A wireframe of the app navigation: tabs, menus, and the top-level screens.' },
-  ],
-  custom: [
-    { title: 'Marketing Page', description: 'A single page that sells', prompt: 'A single marketing page that explains the product and asks for one clear action.' },
-    { title: 'Mobile App', description: 'A multi-screen product', prompt: 'A multi-screen mobile app for the core flow.' },
-    { title: 'Data Tool', description: 'A dashboard or console', prompt: 'A data tool: a dashboard or console for the team to read at a glance.' },
-  ],
+/** The "Start from" cards: three per type, each seeding an already-structured brief. */
+const STARTERS: Starter[] = [
+  { type: 'hi-fi', title: 'Landing page', description: 'Hero, proof, one call to action', glyph: 'desktop', prompt: 'Goal: a landing page that gets visitors to start a trial.\nKey screens: home\nDevices: phone, desktop' },
+  { type: 'hi-fi', title: 'Settings & account', description: 'Profile, billing, notifications', glyph: 'desktop', prompt: 'Goal: account settings for an existing app.\nKey screens: profile, billing, notifications\nDevices: desktop' },
+  { type: 'hi-fi', title: 'Dashboard home', description: 'The first screen after sign-in', glyph: 'desktop', prompt: 'Goal: a dashboard home that shows what needs attention today.\nKey screens: dashboard\nDevices: desktop, tablet' },
+  { type: 'wireframe', title: 'Checkout flow', description: 'Cart to confirmation', glyph: 'phone', prompt: 'Goal: map the checkout from cart to confirmation.\nKey screens: cart, details, payment, confirmation\nDevices: phone' },
+  { type: 'wireframe', title: 'Onboarding', description: 'Sign-up to first value', glyph: 'phone', prompt: 'Goal: onboarding from sign-up to the first useful moment.\nKey screens: welcome, sign-up, setup, first task\nDevices: phone' },
+  { type: 'wireframe', title: 'App navigation', description: 'Tabs, menus, top-level screens', glyph: 'phone', prompt: 'Goal: the top-level navigation and where each screen lives.\nDevices: phone, desktop' },
+  { type: 'prototype', title: 'Booking flow', description: 'Pick a slot, confirm, pay', glyph: 'phone', prompt: 'Goal: a clickable booking flow.\nKey screens: pick a date, pick a slot, confirm, paid\nDevices: phone' },
+  { type: 'prototype', title: 'Data table', description: 'Filter, sort, inspect a row', glyph: 'desktop', prompt: 'Goal: a working table with filters, sorting and a row detail panel.\nDevices: desktop' },
+  { type: 'prototype', title: 'Sign-in', description: 'Email, code, errors', glyph: 'phone', prompt: 'Goal: a sign-in flow with every state: idle, sending, wrong code, locked.\nDevices: phone, desktop' },
+  { type: 'deck', title: 'Product review', description: 'Results, learnings, next bets', glyph: 'slide', prompt: 'Goal: a quarterly product review deck.\nSlides: title, results, learnings, next bets, asks' },
+  { type: 'deck', title: 'Pitch', description: 'Problem, solution, proof, ask', glyph: 'slide', prompt: 'Goal: a short pitch deck.\nSlides: problem, solution, proof, pricing, ask' },
+  { type: 'deck', title: 'Onboarding guide', description: "A new hire's first week", glyph: 'slide', prompt: 'Goal: a first-week guide for new hires.\nSlides: welcome, team, tools, week plan, contacts' },
+  { type: 'custom', title: 'From my project', description: 'Redesign a screen you already have', glyph: 'desktop', prompt: 'Goal: redesign one existing screen in my project.\nScreen: \nKeep: ' },
+  { type: 'custom', title: 'Social post', description: '1080×1080 artboards', glyph: 'square', prompt: 'Goal: three social posts for a launch.\nSize: 1080×1080' },
+  { type: 'custom', title: 'Print page', description: 'A4 at 96 dpi', glyph: 'page', prompt: 'Goal: a one-page A4 flyer.\nSize: 794×1123' },
+];
+
+/** How many "Your design work" rows the page shows before "Show all". */
+const WORK_LIST_CAP = 5;
+
+/** The brief length at which the composer starts showing its counter. */
+const BRIEF_COUNTER_FROM = 2000;
+
+/** Where the page keeps its creation preferences across mounts. */
+const PAGE_PREFS_KEY = 'prefs/page';
+
+/** Where the look comes from: the open project, a preset, or a direction (or Auto). */
+type LookKind = 'project' | 'preset' | 'direction';
+
+/** The page's remembered creation preferences (`prefs/page`). */
+export type PagePrefs = {
+  questions: boolean;
+  options: OptionsChoice;
+  /** Empty = "Ask me — detect from the project". */
+  devices: DeviceId[];
+  look: { kind: LookKind | null; presetId: string | null; direction: 'auto' | DirectionId };
 };
 
 /** The one-time heads-up about out-of-folder edit permissions (decision 4b). */
@@ -257,21 +272,30 @@ const state = {
   // ---- full-page creation surface ----
   /** The workspaces list (GET /workspaces joined with the cached ws/ scan). */
   workspaces: null as WorkspacesView | null,
-  /** The selected creation type; drives the headline, chip and the idea cards. */
+  /** The selected creation type; drives the type chip, the fidelity and the session title. */
   pageType: 'hi-fi' as DesignType,
+  /** The Look chip's direction (its Directions tab), or Auto. */
   pageDirection: 'auto' as 'auto' | DirectionId,
-  pageFidelity: 'hi-fi' as Fidelity,
+  /** Where the look comes from; null = the default (Project with a project open, else Directions). */
+  pageLookKind: null as LookKind | null,
+  /** "Ask me questions first". */
+  pageQuestions: true,
+  /** How many side-by-side directions, or 'ask'. */
+  pageOptions: 'ask' as OptionsChoice,
+  /** The device artboards; empty = "Ask me — detect from the project". */
+  pageDevices: [] as DeviceId[],
   prompt: '' as string,
   references: [] as DraftReference[],
   /** An actionable error from a failed scaffold (the session still starts). */
   pageError: '' as string,
   pageBusy: false,
-  typeMenuOpen: false,
-  /** The `+` attach overlay: its open state. */
-  attachMenuOpen: false,
-  /** The design-system picker panel open in the composer. */
-  dsMenuOpen: false,
-  /** The chosen design-system preset id, or null for "No design system". */
+  /** The one composer overlay open right now, or null. */
+  overlay: null as OverlayId | null,
+  /** The Look popover's visible tab. */
+  lookTab: 'directions' as LookTab,
+  /** "Your design work" shows every row instead of the first WORK_LIST_CAP. */
+  workShowAll: false,
+  /** The chosen design-system preset id (the Look chip's Presets tab), or null. */
   pageDesignSystemId: null as string | null,
 };
 
@@ -328,7 +352,9 @@ let serverAnnounceEl: HTMLElement | null = null;
 // steals the caret). Null whenever the page is not mounted.
 let promptEl: HTMLTextAreaElement | null = null;
 let sendEl: HTMLButtonElement | null = null;
-let accentFillEl: HTMLElement | null = null;
+let counterEl: HTMLElement | null = null;
+/** The page's designs-location line: one node kept across renders, so an open editor survives a redraw. */
+let pageLocationEl: HTMLElement | null = null;
 /** Play the staggered reveal only on the first paint, not on every re-render. */
 let pageEnter = true;
 /** Live state of the open design-system picker. */
@@ -501,6 +527,10 @@ type ScaffoldChoice = {
   direction: DesignMode['direction'];
   fidelity: Fidelity;
   designSystemId: string | null;
+  /** The page's Devices chip; omitted = not chosen. */
+  devices?: DeviceId[];
+  /** The user's open project (read-only design context). */
+  projectDir?: string | null;
 };
 
 /** The session mode as a scaffold choice (the row and `/canvas` flows). */
@@ -552,6 +582,9 @@ async function scaffoldCanvasWorkspace(
       brief: brief || undefined,
       // Omitted for "No design system" so the request stays as before.
       designSystemId: choice.designSystemId ?? undefined,
+      // The service forwards both to the scaffold (R4); omitted when not chosen.
+      ...(choice.devices?.length ? { devices: choice.devices } : {}),
+      ...(choice.projectDir ? { projectDir: choice.projectDir } : {}),
     });
   } catch (error) {
     scaffold = { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -1389,12 +1422,14 @@ async function scaffoldCurrentProject(spec: DesignBriefSpec): Promise<CanvasPrep
     return { kind: 'workspace', workspace: state.workspace, url, projectId };
   }
   // F8: the page's OWN selections (type / direction / fidelity / design
-  // system) shape the scaffold — never the session row's `state.mode`.
+  // system / devices / project) shape the scaffold — never the session row's `state.mode`.
   const outcome = await scaffoldCanvasWorkspace(spec.brief, `new-design:${Date.now()}`, {
     type: spec.type,
     direction: spec.direction,
     fidelity: spec.fidelity,
     designSystemId: spec.designSystemId ?? null,
+    devices: spec.devices,
+    projectDir: spec.projectDir,
   }, { notify: false });
   if (!outcome.ok) {
     await host.toast({ kind: 'error', message: outcome.error });
@@ -1407,6 +1442,44 @@ async function scaffoldCurrentProject(spec: DesignBriefSpec): Promise<CanvasPrep
     return { kind: 'failed', error: job.error, workspace: outcome.record };
   }
   return { kind: 'new', workspace: outcome.record, url: outcome.url };
+}
+
+/** The Look the page uses: a stored choice that still applies, else the default. */
+function effectiveLookKind(): LookKind {
+  const kind = state.pageLookKind;
+  if (kind === 'project' && state.directory) return 'project';
+  if (kind === 'preset' && findDesignSystem(state.pageDesignSystemId)) return 'preset';
+  if (kind === 'direction') return 'direction';
+  return state.directory ? 'project' : 'direction';
+}
+
+/** The page's selections as the session/scaffold spec. Fidelity follows the type. */
+function pageBriefSpec(): DesignBriefSpec {
+  const kind = effectiveLookKind();
+  const look: DesignLook = kind === 'project' ? 'project' : kind === 'preset' ? 'preset' : 'new';
+  return {
+    type: state.pageType,
+    direction: kind === 'direction' ? state.pageDirection : 'auto',
+    fidelity: FIDELITY_FOR_TYPE[state.pageType],
+    brief: state.prompt.trim(),
+    designSystemId: kind === 'preset' ? state.pageDesignSystemId : null,
+    projectDir: state.directory,
+    questions: state.pageQuestions,
+    options: state.pageOptions,
+    ...(state.pageDevices.length ? { devices: [...state.pageDevices] } : {}),
+    look,
+  };
+}
+
+/**
+ * A short session title from the brief: the first 40 characters of its first
+ * clause, with a leading `Goal:` label dropped (the starters seed one).
+ */
+export function briefTitle(brief: string): string {
+  const line = brief.split('\n').map((text) => text.trim()).find(Boolean) ?? '';
+  const clause = line.replace(/^goal:\s*/i, '').split(/[.,;!?—–]|\s-\s/)[0] ?? '';
+  const title = clause.trim().slice(0, 40).trim();
+  return title.charAt(0).toUpperCase() + title.slice(1);
 }
 
 /**
@@ -1423,21 +1496,17 @@ async function startNewDesign(): Promise<void> {
   // create a second session, and the first action owns this draft snapshot.
   state.pageBusy = true;
   state.pageError = '';
-  const spec: DesignBriefSpec = {
-    type: state.pageType,
-    direction: state.pageDirection,
-    fidelity: state.pageFidelity,
-    brief: state.prompt.trim(),
-    designSystemId: state.pageDesignSystemId,
-  };
+  const spec = pageBriefSpec();
   const references = state.surface === 'page' ? [...state.references] : undefined;
+  const title = `Design · ${briefTitle(spec.brief) || PAGE_TYPE_LABELS[spec.type]}`;
   rerender();
   try {
     // An oversized brief fails loudly instead of letting the host silently
-    // clamp the draft (the compose cap the SDK enforces is
-    // GUEST_COMPOSE_TEXT_MAX — a clamped brief is data loss, never delivery).
-    if (spec.brief.length > GUEST_COMPOSE_TEXT_MAX) {
-      state.pageError = `The design brief is too long (${spec.brief.length} of ${GUEST_COMPOSE_TEXT_MAX} characters). Shorten it, then send again.`;
+    // clamp the draft (BRIEF_MAX keeps the session prompt inside its budget,
+    // well under the SDK's compose cap — a clamped brief is data loss).
+    const tooLong = briefLimitError(spec.brief);
+    if (tooLong) {
+      state.pageError = tooLong;
       rerender();
       await host.toast({ kind: 'error', message: state.pageError });
       return;
@@ -1453,7 +1522,7 @@ async function startNewDesign(): Promise<void> {
       const workspace = prep.workspace ?? state.workspace ?? undefined;
       await startDesignSession({
         id: `new-design:${Date.now()}`,
-        title: `New design · ${spec.type}`,
+        title,
         url: '',
         type: spec.type,
         brief: spec.brief,
@@ -1466,7 +1535,7 @@ async function startNewDesign(): Promise<void> {
     }
     await startDesignSession({
       id: `new-design:${Date.now()}`,
-      title: `New design · ${spec.type}`,
+      title,
       url: prep.url,
       type: spec.type,
       brief: spec.brief,
@@ -2526,40 +2595,20 @@ function svgIcon(paths: string, size = 18): SVGElement {
   return svg;
 }
 
-/** The abstract mini-preview on an idea card. `variant` is the card index modulo four. */
-function ideaThumb(variant: number): SVGElement {
-  const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.setAttribute('viewBox', '0 0 56 40');
-  svg.setAttribute('width', '56');
-  svg.setAttribute('height', '40');
-  svg.setAttribute('aria-hidden', 'true');
-  const add = (tag: string, attrs: Record<string, string | number>): void => {
-    const node = document.createElementNS(SVG_NS, tag);
-    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, String(value));
-    svg.append(node);
-  };
-  add('rect', { x: 0, y: 0, width: 56, height: 40, rx: 7, class: 'ds-thumb-bg' });
-  if (variant === 0) {
-    add('rect', { x: 8, y: 8, width: 22, height: 4, rx: 2, class: 'ds-thumb-accent' });
-    add('rect', { x: 8, y: 16, width: 40, height: 8, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 8, y: 28, width: 18, height: 5, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 30, y: 28, width: 18, height: 5, rx: 2, class: 'ds-thumb-line' });
-  } else if (variant === 1) {
-    add('rect', { x: 8, y: 7, width: 40, height: 5, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 8, y: 16, width: 19, height: 16, rx: 3, class: 'ds-thumb-accent' });
-    add('rect', { x: 29, y: 16, width: 19, height: 7, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 29, y: 25, width: 19, height: 7, rx: 2, class: 'ds-thumb-line' });
-  } else if (variant === 2) {
-    add('rect', { x: 8, y: 8, width: 12, height: 24, rx: 3, class: 'ds-thumb-accent' });
-    add('rect', { x: 24, y: 9, width: 24, height: 4, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 24, y: 17, width: 24, height: 4, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 24, y: 25, width: 16, height: 4, rx: 2, class: 'ds-thumb-line' });
-  } else {
-    add('rect', { x: 8, y: 12, width: 12, height: 16, rx: 3, class: 'ds-thumb-line' });
-    add('rect', { x: 22, y: 12, width: 12, height: 16, rx: 3, class: 'ds-thumb-accent' });
-    add('rect', { x: 36, y: 12, width: 12, height: 16, rx: 3, class: 'ds-thumb-line' });
-  }
-  return svg;
+/** The outline glyph on a starter card: a device or artboard drawn in strokes. */
+const GLYPH_PATHS: Record<StarterGlyph, string> = {
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/>',
+  desktop: '<rect x="2.5" y="4" width="19" height="12.5" rx="1.5"/><path d="M9 20.5h6"/><path d="M12 16.5v4"/>',
+  slide: '<rect x="2.5" y="5" width="19" height="12" rx="1.5"/><path d="M6 9h7"/><path d="M6 12.5h4"/>',
+  square: '<rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M4 15l4.5-4 4 3.5 3-2.5L20 15"/>',
+  page: '<path d="M6.5 2.5h8l3.5 3.5v15.5h-11.5z"/><path d="M14.5 2.5v3.5H18"/><path d="M9 11h6"/><path d="M9 14.5h6"/>',
+};
+
+function starterGlyph(glyph: StarterGlyph): HTMLElement {
+  const span = q('span', `ds-glyph ds-glyph-${glyph}`);
+  span.setAttribute('aria-hidden', 'true');
+  span.append(svgIcon(GLYPH_PATHS[glyph], 22));
+  return span;
 }
 
 /** Whether the send action may run right now. */
@@ -2567,7 +2616,7 @@ function canSend(): boolean {
   return !state.pageBusy && !referencePending && state.prompt.trim() !== '';
 }
 
-/** Keep the send button and the accent progress line in sync with the prompt. */
+/** Keep the Start button and the character counter in sync with the prompt. */
 function updateComposerState(): void {
   const ready = canSend();
   if (sendEl) {
@@ -2577,14 +2626,19 @@ function updateComposerState(): void {
     sendEl.setAttribute('aria-busy', String(state.pageBusy));
     sendEl.title = state.pageBusy ? 'Starting the design session…' : referencePending ? 'Wait for the reference to finish checking' : 'Start the design session';
   }
-  if (accentFillEl) {
-    const progress = Math.min(1, state.prompt.trim().length / 140);
-    accentFillEl.style.width = `${6 + progress * 94}%`;
+  if (counterEl) {
+    const length = state.prompt.length;
+    counterEl.hidden = length < BRIEF_COUNTER_FROM;
+    counterEl.textContent = `${length} / ${BRIEF_MAX}`;
+    counterEl.classList.toggle('warn', length >= BRIEF_MAX * 0.9);
   }
 }
 
 /** The composer overlays, every one driven by the same toggle contract. */
-export type OverlayId = 'type' | 'ds' | 'attach';
+export type OverlayId = 'type' | 'look' | 'devices' | 'attach';
+
+/** The Look popover's tabs. */
+type LookTab = 'project' | 'presets' | 'directions';
 
 /**
  * The ONE decision behind every composer overlay trigger: clicking a trigger
@@ -2596,23 +2650,23 @@ export function nextOverlayState(current: OverlayId | null, triggerId: OverlayId
 
 /** The overlay currently open, or null. At most one is open at a time. */
 function currentOverlay(): OverlayId | null {
-  if (state.typeMenuOpen) return 'type';
-  if (state.attachMenuOpen) return 'attach';
-  if (state.dsMenuOpen) return 'ds';
-  return null;
+  return state.overlay;
 }
 
 /** The trigger to focus once the page is rebuilt — set whenever a close happens. */
 let refocusOverlayTrigger: OverlayId | null = null;
+/** The overlay that just opened: only its first paint animates, not every redraw. */
+let poppingOverlay: OverlayId | null = null;
 
 /** Toggle one composer overlay through the shared rule. */
 function toggleMenu(which: OverlayId): void {
   if (currentOverlay() === 'attach') cancelReferenceValidation();
   const next = nextOverlayState(currentOverlay(), which);
-  state.typeMenuOpen = next === 'type';
-  state.attachMenuOpen = next === 'attach';
-  state.dsMenuOpen = next === 'ds';
-  if (next === 'ds') {
+  state.overlay = next;
+  poppingOverlay = next;
+  if (next === 'look') {
+    const kind = effectiveLookKind();
+    state.lookTab = kind === 'project' ? 'project' : kind === 'preset' ? 'presets' : 'directions';
     dsQuery = '';
     dsHighlight = state.pageDesignSystemId;
   }
@@ -2625,9 +2679,7 @@ function closeMenus(refocus = false): void {
   const open = currentOverlay();
   if (!open) return;
   if (open === 'attach') cancelReferenceValidation();
-  state.typeMenuOpen = false;
-  state.attachMenuOpen = false;
-  state.dsMenuOpen = false;
+  state.overlay = null;
   refocusOverlayTrigger = refocus ? open : null;
   renderPage();
 }
@@ -2635,9 +2687,7 @@ function closeMenus(refocus = false): void {
 /** Close the active overlay after a selection and return focus to its trigger. */
 function closeActiveOverlay(id: OverlayId): void {
   if (id === 'attach') cancelReferenceValidation();
-  state.typeMenuOpen = false;
-  state.attachMenuOpen = false;
-  state.dsMenuOpen = false;
+  state.overlay = null;
   refocusOverlayTrigger = id;
   renderPage();
 }
@@ -2657,21 +2707,22 @@ function onPageKeydown(event: KeyboardEvent): void {
   closeMenus(true);
 }
 
-/** The centred page: hero, composer, workspace row and idea cards. */
+/** The page column: header, composer, context, starters, the work list and the footer. */
 function renderPage(): void {
   if (!pageBody || state.surface !== 'page') return;
   pageBody.replaceChildren();
   promptEl = null;
   sendEl = null;
-  accentFillEl = null;
+  counterEl = null;
   const shell = q('div', 'ds-home');
   if (pageEnter) {
     shell.classList.add('ds-enter');
     pageEnter = false;
   }
-  shell.append(renderHero(), renderComposer(), renderWorkspaceRow(), renderIdeas(), renderCanvasSection(), renderFooter());
+  shell.append(renderHeader(), renderComposer(), renderContextRow(), renderStarters(), renderCanvasSection(), renderFooter());
   pageBody.append(shell);
   updateComposerState();
+  poppingOverlay = null;
   focusPendingTrigger();
   if (referenceFocusId) {
     const target = Array.from(pageBody.querySelectorAll<HTMLButtonElement>('.ds-reference-remove'))
@@ -2689,24 +2740,23 @@ function focusPendingTrigger(): void {
   pageBody?.querySelector<HTMLElement>(`[data-overlay-trigger="${id}"]`)?.focus();
 }
 
-function renderHero(): HTMLElement {
-  const hero = q('header', 'ds-hero');
-  const title = q('h1', 'ds-hero-title');
-  title.append(document.createTextNode("Let's create "));
-  title.append(q('span', 'ds-hero-type', PAGE_TYPE_LABELS[state.pageType]));
-  hero.append(title);
-  hero.append(q('p', 'ds-hero-sub', 'Good work starts here'));
+/** The left-aligned header: eyebrow, title, one plain line on how it works. */
+function renderHeader(): HTMLElement {
+  const header = q('header', 'ds-header');
+  header.append(q('div', 'ds-eyebrow', 'Design Canvas'));
+  header.append(q('h1', 'ds-title', 'Design on a live canvas'));
+  header.append(q('p', 'ds-lede', 'Describe it. The agent reads your project, asks what it needs, shows options, then builds real screens you can click to edit.'));
   if (state.pageError) {
     const error = q('div', 'ds-home-warn', state.pageError);
     error.setAttribute('role', 'alert');
-    hero.append(error);
+    header.append(error);
   }
-  return hero;
+  return header;
 }
 
 /**
- * ONE anchored-popover pattern, shared by the composer overlays — the type
- * picker, the design-system picker and the `+` attach menu.
+ * ONE anchored-popover pattern, shared by the composer overlays — the type,
+ * Look and Devices pickers and the `+` attach menu.
  */
 function anchoredPopover(options: {
   open: boolean;
@@ -2723,6 +2773,7 @@ function anchoredPopover(options: {
   if (!options.open) return anchor;
   options.panel.setAttribute('role', 'dialog');
   options.panel.setAttribute('aria-label', options.label);
+  if (poppingOverlay && options.trigger.dataset.overlayTrigger === poppingOverlay) options.panel.classList.add('ds-pop');
   const backdrop = q('div', 'ds-ds-backdrop');
   if (options.closeOnBackdrop) backdrop.addEventListener('click', () => options.onClose());
   anchor.append(backdrop);
@@ -2746,12 +2797,61 @@ function anchoredPopover(options: {
   return anchor;
 }
 
+const CARET_ICON = '<path d="M6 9l6 6 6-6"/>';
+
+/** A composer chip that opens one overlay. */
+function overlayChip(id: OverlayId, label: string, ariaLabel: string): HTMLButtonElement {
+  const chip = q<HTMLButtonElement>('button', 'ds-chip ds-menu-trigger');
+  chip.type = 'button';
+  chip.dataset.overlayTrigger = id;
+  chip.append(q('span', 'ds-chip-label', label));
+  chip.append(svgIcon(CARET_ICON, 14));
+  chip.title = ariaLabel;
+  chip.setAttribute('aria-label', `${ariaLabel}: ${label}`);
+  chip.setAttribute('aria-expanded', String(state.overlay === id));
+  chip.disabled = state.pageBusy;
+  chip.addEventListener('click', () => toggleMenu(id));
+  return chip;
+}
+
+/** "Look: Match project" / "Look: <preset>" / "Look: <direction>" / "Look: Auto". */
+function lookChipLabel(): string {
+  const kind = effectiveLookKind();
+  if (kind === 'project') return 'Look: Match project';
+  if (kind === 'preset') return `Look: ${findDesignSystem(state.pageDesignSystemId)?.name ?? 'Preset'}`;
+  return `Look: ${state.pageDirection === 'auto' ? 'Auto' : DIRECTIONS[state.pageDirection].name}`;
+}
+
+const DEVICE_ORDER: DeviceId[] = ['phone', 'tablet', 'desktop'];
+
+function deviceName(id: DeviceId): string {
+  const label = DEVICE_PRESETS[id].label;
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+/** "Devices: Ask" or "Devices: Phone + Desktop". */
+function devicesChipLabel(): string {
+  const chosen = DEVICE_ORDER.filter((id) => state.pageDevices.includes(id));
+  return `Devices: ${chosen.length ? chosen.map(deviceName).join(' + ') : 'Ask'}`;
+}
+
+/** Replace the draft with the structured skeleton (a no-op on an already structured one). */
+function applyStructureBrief(): void {
+  if (state.pageBusy) return;
+  const next = structureBrief(state.prompt, { devices: state.pageDevices });
+  if (next === state.prompt) return;
+  state.prompt = next;
+  if (promptEl) promptEl.value = next;
+  updateComposerState();
+  promptEl?.focus();
+}
+
 function renderComposer(): HTMLElement {
   const box = q('div', 'ds-composer');
 
   const area = q<HTMLTextAreaElement>('textarea', 'ds-composer-input');
   area.rows = 3;
-  area.placeholder = 'Describe the design you want…';
+  area.placeholder = 'What are we designing? e.g. "Budget app onboarding — 3 screens, phone first"';
   area.value = state.prompt;
   area.setAttribute('aria-label', 'Design brief');
   area.disabled = state.pageBusy;
@@ -2771,15 +2871,16 @@ function renderComposer(): HTMLElement {
 
   // References belong to this page's draft, not the original host composer.
   const plus = q<HTMLButtonElement>('button', 'ds-plus ds-menu-trigger');
+  plus.type = 'button';
   plus.dataset.overlayTrigger = 'attach';
   plus.append(svgIcon('<path d="M12 5v14"/><path d="M5 12h14"/>'));
   plus.title = 'Add a reference';
   plus.setAttribute('aria-label', 'Add a reference');
   plus.disabled = state.pageBusy || referencePending;
-  plus.setAttribute('aria-expanded', String(state.attachMenuOpen));
+  plus.setAttribute('aria-expanded', String(state.overlay === 'attach'));
   plus.addEventListener('click', () => toggleMenu('attach'));
   const attachAnchor = anchoredPopover({
-    open: state.attachMenuOpen,
+    open: state.overlay === 'attach',
     trigger: plus,
     panel: renderAttachPanel(),
     label: 'Add a reference',
@@ -2787,67 +2888,114 @@ function renderComposer(): HTMLElement {
     onClose: () => closeMenus(true),
   });
 
-  // The design-system control, next to `+`.
-  const designSystem = q<HTMLButtonElement>('button', 'ds-chip ds-ds-trigger ds-menu-trigger');
-  designSystem.dataset.overlayTrigger = 'ds';
-  designSystem.append(designSystemIcon());
-  designSystem.append(q('span', 'ds-chip-label', designSystemLabel(state.pageDesignSystemId)));
-  designSystem.append(svgIcon('<path d="M6 9l6 6 6-6"/>', 14));
-  designSystem.title = 'Choose a design system';
-  designSystem.setAttribute('aria-label', `Design system: ${designSystemLabel(state.pageDesignSystemId)}`);
-  designSystem.disabled = state.pageBusy;
-  designSystem.addEventListener('click', () => toggleMenu('ds'));
-
-  const chip = q<HTMLButtonElement>('button', 'ds-chip ds-menu-trigger');
-  chip.dataset.overlayTrigger = 'type';
-  chip.append(q('span', 'ds-chip-label', PAGE_TYPE_LABELS[state.pageType]));
-  chip.append(svgIcon('<path d="M6 9l6 6 6-6"/>', 14));
-  chip.title = 'Choose the design type';
-  chip.setAttribute('aria-label', 'Choose the design type');
-  chip.disabled = state.pageBusy;
-  chip.addEventListener('click', () => toggleMenu('type'));
-
-  const spacer = q('div', 'ds-composer-spacer');
-
-  const send = q<HTMLButtonElement>('button', 'ds-send');
-  send.append(svgIcon('<path d="M5 12h14"/><path d="M13 6l6 6-6 6"/>', 20));
-  send.title = 'Start the design session';
-  send.setAttribute('aria-label', 'Start the design session');
-  send.addEventListener('click', () => {
-    if (canSend()) void startNewDesign();
-  });
-  sendEl = send;
-
-  const dsAnchor = anchoredPopover({
-    open: state.dsMenuOpen,
-    trigger: designSystem,
-    panel: renderDesignSystemPanel(),
-    label: 'Choose a design system',
-    optionSelector: '.ds-ds-item',
-    onClose: () => closeMenus(true),
-  });
   const typeAnchor = anchoredPopover({
-    open: state.typeMenuOpen,
-    trigger: chip,
+    open: state.overlay === 'type',
+    trigger: overlayChip('type', PAGE_TYPE_LABELS[state.pageType], 'Design type'),
     panel: renderTypeMenu(),
     label: 'Choose the design type',
     optionSelector: '.ds-menu-item',
     onClose: () => closeMenus(true),
   });
+  const lookAnchor = anchoredPopover({
+    open: state.overlay === 'look',
+    trigger: overlayChip('look', lookChipLabel(), 'Look'),
+    panel: renderLookPanel(),
+    label: 'Choose the look',
+    optionSelector: '.ds-look-option:not(:disabled), .ds-ds-item',
+    onClose: () => closeMenus(true),
+  });
+  const devicesAnchor = anchoredPopover({
+    open: state.overlay === 'devices',
+    trigger: overlayChip('devices', devicesChipLabel(), 'Devices'),
+    panel: renderDevicesPanel(),
+    label: 'Choose the devices',
+    optionSelector: '.ds-device-option input',
+    onClose: () => closeMenus(true),
+  });
 
-  const children: HTMLElement[] = [];
-  children.push(attachAnchor);
-  children.push(dsAnchor, typeAnchor, spacer, send);
-  bar.append(...children);
+  const spacer = q('div', 'ds-composer-spacer');
+
+  const structure = q<HTMLButtonElement>('button', 'ds-ghost ds-structure', 'Structure brief');
+  structure.type = 'button';
+  structure.title = 'Turn the draft into Goal, audience, screens, devices and the rest';
+  structure.disabled = state.pageBusy;
+  structure.addEventListener('click', () => applyStructureBrief());
+
+  const send = q<HTMLButtonElement>('button', 'ds-send');
+  send.type = 'button';
+  send.append(q('span', 'ds-send-label', 'Start design'));
+  send.append(svgIcon('<path d="M9 6l6 6-6 6"/>', 16));
+  send.title = 'Start the design session';
+  send.setAttribute('aria-label', 'Start design');
+  send.addEventListener('click', () => {
+    if (canSend()) void startNewDesign();
+  });
+  sendEl = send;
+
+  const actions = q('div', 'ds-composer-actions');
+  actions.append(structure, send);
+  bar.append(attachAnchor, typeAnchor, lookAnchor, devicesAnchor, spacer, actions);
   box.append(area, renderReferenceDraft(), bar);
-  box.classList.toggle('ds-overlay-open', state.attachMenuOpen || state.dsMenuOpen || state.typeMenuOpen);
+  box.classList.toggle('ds-overlay-open', state.overlay !== null);
 
-  const track = q('div', 'ds-composer-accent');
-  accentFillEl = q('div', 'ds-composer-accent-fill');
-  track.append(accentFillEl);
-  box.append(track);
+  const wrap = q('div', 'ds-composer-wrap');
+  wrap.append(box, renderToggles());
+  return wrap;
+}
 
-  return box;
+/** Under the composer: Questions first, how many options, and the character counter. */
+function renderToggles(): HTMLElement {
+  const row = q('div', 'ds-toggles');
+
+  const questions = q('div', 'ds-toggle');
+  const sw = q<HTMLButtonElement>('button', 'ds-switch');
+  sw.type = 'button';
+  sw.setAttribute('role', 'switch');
+  sw.setAttribute('aria-checked', String(state.pageQuestions));
+  sw.setAttribute('aria-labelledby', 'ds-questions-label');
+  sw.setAttribute('aria-describedby', 'ds-questions-hint');
+  sw.disabled = state.pageBusy;
+  sw.append(q('span', 'ds-switch-thumb'));
+  sw.addEventListener('click', () => {
+    setPagePref({ questions: !state.pageQuestions }, '.ds-switch');
+  });
+  const questionsText = q('div', 'ds-toggle-text');
+  const questionsLabel = q('span', 'ds-toggle-label', 'Ask me questions first');
+  questionsLabel.id = 'ds-questions-label';
+  const questionsHint = q('span', 'ds-toggle-hint', '3–6 questions, with my recommended answers');
+  questionsHint.id = 'ds-questions-hint';
+  questionsText.append(questionsLabel, questionsHint);
+  questions.append(sw, questionsText);
+
+  const options = q('div', 'ds-toggle');
+  const seg = q('div', 'ds-seg');
+  seg.setAttribute('role', 'radiogroup');
+  seg.setAttribute('aria-labelledby', 'ds-options-label');
+  const choices: Array<[OptionsChoice, string]> = [['ask', 'Ask'], [1, '1'], [2, '2'], [3, '3']];
+  for (const [value, label] of choices) {
+    const on = state.pageOptions === value;
+    const item = q<HTMLButtonElement>('button', `ds-seg-item${on ? ' on' : ''}`, label);
+    item.type = 'button';
+    item.setAttribute('role', 'radio');
+    item.setAttribute('aria-checked', String(on));
+    if (value !== 'ask') item.setAttribute('aria-label', `${label} option${value === 1 ? '' : 's'}`);
+    item.disabled = state.pageBusy;
+    item.dataset.option = String(value);
+    item.addEventListener('click', () => setPagePref({ options: value }, `.ds-seg-item[data-option="${value}"]`));
+    seg.append(item);
+  }
+  const optionsText = q('div', 'ds-toggle-text');
+  const optionsLabel = q('span', 'ds-toggle-label', 'Options');
+  optionsLabel.id = 'ds-options-label';
+  optionsText.append(optionsLabel, q('span', 'ds-toggle-hint', 'Side-by-side directions to pick from'));
+  options.append(optionsText, seg);
+
+  const counter = q('span', 'ds-counter');
+  counter.setAttribute('aria-live', 'polite');
+  counterEl = counter;
+
+  row.append(questions, options, counter);
+  return row;
 }
 
 /** Compact suffixes disambiguate equal basenames; disclosure exposes full paths. */
@@ -2902,7 +3050,7 @@ export function removePageReference(id: string): void {
   renderPage();
 }
 
-/** The type picker panel: DESIGN_TYPES plus Direction/Fidelity options. */
+/** The type picker panel: the five design types, each with its one-line hint. */
 function renderTypeMenu(): HTMLElement {
   const panel = q('div', 'ds-ds-panel ds-type-panel');
   const list = q('div', 'ds-ds-list ds-type-list');
@@ -2911,6 +3059,7 @@ function renderTypeMenu(): HTMLElement {
   for (const type of DESIGN_TYPES) {
     const on = type === state.pageType;
     const item = q<HTMLButtonElement>('button', `ds-menu-item${on ? ' on' : ''}`);
+    item.type = 'button';
     item.setAttribute('role', 'option');
     item.setAttribute('aria-selected', on ? 'true' : 'false');
     const main = q('span', 'ds-menu-main');
@@ -2924,37 +3073,9 @@ function renderTypeMenu(): HTMLElement {
     });
     list.append(item);
   }
-  panel.append(list, renderOptions());
-  if (state.typeMenuOpen) queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-menu-item')?.focus());
+  panel.append(list);
+  if (state.overlay === 'type') queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-menu-item')?.focus());
   return panel;
-}
-
-function renderOptions(): HTMLElement {
-  const row = q('div', 'ds-options');
-
-  const direction = q<HTMLSelectElement>('select');
-  direction.append(option('auto', 'Auto (infer from the brief)'));
-  for (const id of Object.keys(DIRECTIONS) as DirectionId[]) direction.append(option(id, DIRECTIONS[id].name));
-  direction.value = state.pageDirection;
-  direction.addEventListener('change', () => {
-    state.pageDirection = direction.value as 'auto' | DirectionId;
-  });
-
-  const fidelity = q<HTMLSelectElement>('select');
-  for (const [value, label] of FIDELITY_OPTIONS) fidelity.append(option(value, label));
-  fidelity.value = state.pageFidelity;
-  fidelity.addEventListener('change', () => {
-    state.pageFidelity = fidelity.value as Fidelity;
-  });
-
-  row.append(field('Direction', direction), field('Fidelity', fidelity));
-  return row;
-}
-
-function field(label: string, control: HTMLElement): HTMLElement {
-  const wrap = q('label', 'ds-field');
-  wrap.append(q('span', 'ds-field-label', label), control);
-  return wrap;
 }
 
 // ---- the `+` attach control (an anchored overlay above the composer) ----
@@ -3218,35 +3339,128 @@ function renderAttachPanel(): HTMLElement {
       feedback.prepend(spinner);
     }
     panel.append(feedback);
-    if (state.attachMenuOpen) queueMicrotask(() => input.focus());
+    if (state.overlay === 'attach') queueMicrotask(() => input.focus());
   } else {
     panel.append(q('div', 'ds-attach-note', projectHint));
   }
   return panel;
 }
 
-// ---- the design-system picker (an anchored overlay above the composer) ----
+// ---- the Look picker (an anchored overlay: Project · Presets · Directions) ----
 
-function designSystemIcon(): SVGElement {
-  return svgIcon(
-    '<circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>',
-    15,
-  );
+/** Commit a look and close the panel. A cleared preset falls back to the default look. */
+function applyLook(kind: LookKind | null, value?: { presetId?: string | null; direction?: 'auto' | DirectionId }): void {
+  state.pageLookKind = kind;
+  if (kind === 'preset') state.pageDesignSystemId = findDesignSystem(value?.presetId)?.id ?? null;
+  else state.pageDesignSystemId = null;
+  if (kind === 'preset' && !state.pageDesignSystemId) state.pageLookKind = null;
+  if (kind === 'direction' && value?.direction) state.pageDirection = value.direction;
+  void savePagePrefs();
+  closeActiveOverlay('look');
 }
 
-/** Commit a design-system choice (or clear it) and close the panel. */
-function applyDesignSystem(id: string | null): void {
-  state.pageDesignSystemId = findDesignSystem(id)?.id ?? null;
-  closeActiveOverlay('ds');
+function renderLookPanel(): HTMLElement {
+  const panel = q('div', 'ds-ds-panel ds-look-panel');
+  const tabs = q('div', 'ds-look-tabs');
+  tabs.setAttribute('role', 'tablist');
+  tabs.setAttribute('aria-label', 'Where the look comes from');
+  const entries: Array<[LookTab, string]> = [['project', 'Project'], ['presets', 'Presets'], ['directions', 'Directions']];
+  const tabEls: HTMLButtonElement[] = [];
+  for (const [id, label] of entries) {
+    const on = state.lookTab === id;
+    const tab = q<HTMLButtonElement>('button', 'ds-look-tab', label);
+    tab.type = 'button';
+    tab.id = `ds-look-tab-${id}`;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(on));
+    tab.setAttribute('aria-controls', 'ds-look-tabpanel');
+    tab.tabIndex = on ? 0 : -1;
+    tab.addEventListener('click', () => {
+      if (state.lookTab === id) return;
+      state.lookTab = id;
+      dsQuery = '';
+      renderPage();
+      queueMicrotask(() => pageBody?.querySelector<HTMLElement>(`#ds-look-tab-${id}`)?.focus());
+    });
+    tabEls.push(tab);
+    tabs.append(tab);
+  }
+  tabs.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const index = entries.findIndex(([id]) => id === state.lookTab);
+    tabEls[popoverStep(index, entries.length, event.key === 'ArrowRight' ? 1 : -1)]?.click();
+  });
+  const body = q('div', 'ds-look-body');
+  body.id = 'ds-look-tabpanel';
+  body.setAttribute('role', 'tabpanel');
+  body.setAttribute('aria-labelledby', `ds-look-tab-${state.lookTab}`);
+  if (state.lookTab === 'project') body.append(renderLookProject());
+  else if (state.lookTab === 'presets') body.append(renderDesignSystemPanel());
+  else body.append(renderLookDirections());
+  panel.append(tabs, body);
+  if (state.overlay === 'look' && state.lookTab !== 'presets') {
+    queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-look-option:not(:disabled)')?.focus());
+  }
+  return panel;
 }
 
-/** The detail pane for the highlighted entry. */
+/** One selectable row in the Look panel. */
+function lookOption(title: string, hint: string, on: boolean, disabled: boolean, onClick: () => void, extra?: HTMLElement): HTMLButtonElement {
+  const item = q<HTMLButtonElement>('button', `ds-menu-item ds-look-option${on ? ' on' : ''}`);
+  item.type = 'button';
+  item.setAttribute('aria-pressed', String(on));
+  item.disabled = disabled || state.pageBusy;
+  const main = q('span', 'ds-menu-main');
+  main.append(q('strong', undefined, title));
+  main.append(q('span', 'ds-menu-hint ds-look-hint', hint));
+  if (extra) main.append(extra);
+  item.append(main);
+  if (on) item.append(svgIcon('<path d="M20 6L9 17l-5-5"/>', 16));
+  if (!item.disabled) item.addEventListener('click', onClick);
+  return item;
+}
+
+function renderLookProject(): HTMLElement {
+  const list = q('div', 'ds-look-list');
+  const dir = state.directory;
+  const hint = dir
+    ? `Use its colors, type, radii and components. The agent reads ${fileBaseName(dir)} first.`
+    : 'Open a project in OpenChamber to use this';
+  list.append(lookOption('Match this project', hint, effectiveLookKind() === 'project', !dir, () => applyLook('project')));
+  return list;
+}
+
+/** A small strip of a direction's own colors. */
+function directionSwatches(id: DirectionId): HTMLElement {
+  const strip = q('span', 'ds-ds-swatches ds-look-swatches');
+  strip.setAttribute('aria-hidden', 'true');
+  for (const value of Object.values(DIRECTIONS[id].tokens).slice(0, 6)) {
+    const swatch = q('span', 'ds-ds-swatch');
+    swatch.style.background = value;
+    strip.append(swatch);
+  }
+  return strip;
+}
+
+function renderLookDirections(): HTMLElement {
+  const list = q('div', 'ds-look-list');
+  const current = effectiveLookKind() === 'direction' ? state.pageDirection : null;
+  list.append(lookOption('Auto', 'Infer from the brief', current === 'auto', false, () => applyLook('direction', { direction: 'auto' })));
+  for (const id of Object.keys(DIRECTIONS) as DirectionId[]) {
+    const direction = DIRECTIONS[id];
+    list.append(lookOption(direction.name, `For ${direction.when}`, current === id, false, () => applyLook('direction', { direction: id }), directionSwatches(id)));
+  }
+  return list;
+}
+
+/** The detail pane for the highlighted preset. */
 function renderDesignSystemDetail(detail: HTMLElement, id: string | null): void {
   detail.replaceChildren();
   const preset = findDesignSystem(id);
   if (!preset) {
-    detail.append(q('div', 'ds-ds-detail-name', NO_DESIGN_SYSTEM));
-    detail.append(q('p', 'ds-ds-detail-desc', 'Start from scratch — no preset. The design system comes out of the brief.'));
+    detail.append(q('div', 'ds-ds-detail-name', 'No preset'));
+    detail.append(q('p', 'ds-ds-detail-desc', 'Point at a preset to see its colors. Its tokens and DESIGN.md become the rules every screen follows.'));
     return;
   }
   detail.append(q('div', 'ds-ds-detail-name', preset.name));
@@ -3266,36 +3480,35 @@ function renderDesignSystemDetail(detail: HTMLElement, id: string | null): void 
   }
 }
 
+/** The Presets tab: search, the grouped preset list beside its detail, and "No preset". */
 function renderDesignSystemPanel(): HTMLElement {
-  const panel = q('div', 'ds-ds-panel');
+  const panel = q('div', 'ds-ds-presets');
 
   const toolbar = q('div', 'ds-ds-toolbar');
   const search = q<HTMLInputElement>('input', 'ds-ds-search');
   search.type = 'search';
-  search.placeholder = 'Search design systems';
-  search.setAttribute('aria-label', 'Search design systems');
+  search.placeholder = 'Search presets';
+  search.setAttribute('aria-label', 'Search design-system presets');
   search.value = dsQuery;
-  const create = q<HTMLButtonElement>('button', 'ds-ds-create', '+ Create');
-  create.title = 'Custom design systems are not available yet';
-  create.setAttribute('aria-label', 'Create a design system');
-  create.disabled = true;
-  toolbar.append(search, create);
+  toolbar.append(search);
 
   const body = q('div', 'ds-ds-body');
   const list = q('div', 'ds-ds-list');
   list.setAttribute('role', 'listbox');
-  list.setAttribute('aria-label', 'Design systems');
+  list.setAttribute('aria-label', 'Design-system presets');
   const detail = q('div', 'ds-ds-detail');
   body.append(list, detail);
 
   const actions = q('div', 'ds-ds-foot');
-  const clear = q<HTMLButtonElement>('button', 'ds-ds-clear', 'Clear');
-  clear.addEventListener('click', () => applyDesignSystem(null));
+  const clear = q<HTMLButtonElement>('button', 'ds-ds-clear', 'No preset');
+  clear.type = 'button';
+  clear.addEventListener('click', () => applyLook('preset', { presetId: null }));
   actions.append(clear);
 
   panel.append(toolbar, body, actions);
 
-  const itemRefs: Array<{ id: string | null; el: HTMLButtonElement }> = [];
+  const itemRefs: Array<{ id: string; el: HTMLButtonElement }> = [];
+  const chosen = effectiveLookKind() === 'preset' ? state.pageDesignSystemId : null;
 
   const setHighlight = (id: string | null): void => {
     if (dsHighlight === id) return;
@@ -3311,32 +3524,31 @@ function renderDesignSystemPanel(): HTMLElement {
   const buildList = (): void => {
     itemRefs.length = 0;
     list.replaceChildren();
-    const add = (preset: DesignSystemPreset | null): void => {
-      const id = preset?.id ?? null;
-      const on = dsHighlight === id;
-      const item = q<HTMLButtonElement>('button', `ds-ds-item${on ? ' on' : ''}`);
+    const add = (preset: DesignSystemPreset): void => {
+      const on = dsHighlight === preset.id;
+      const item = q<HTMLButtonElement>('button', `ds-ds-item${on ? ' on' : ''}${chosen === preset.id ? ' chosen' : ''}`);
+      item.type = 'button';
       item.setAttribute('role', 'option');
       item.setAttribute('aria-selected', on ? 'true' : 'false');
       const main = q('div', 'ds-ds-item-main');
-      main.append(q('span', 'ds-ds-item-name', preset ? preset.name : NO_DESIGN_SYSTEM));
-      if (preset) main.append(q('span', 'ds-ds-item-cat', preset.category));
+      main.append(q('span', 'ds-ds-item-name', preset.name));
+      main.append(q('span', 'ds-ds-item-cat', preset.category));
       item.append(main);
       const check = q('span', 'ds-ds-check');
       check.append(svgIcon('<path d="M20 6L9 17l-5-5"/>', 16));
       item.append(check);
-      item.addEventListener('click', () => applyDesignSystem(id));
-      item.addEventListener('mouseenter', () => setHighlight(id));
-      item.addEventListener('focus', () => setHighlight(id));
-      itemRefs.push({ id, el: item });
+      item.addEventListener('click', () => applyLook('preset', { presetId: preset.id }));
+      item.addEventListener('mouseenter', () => setHighlight(preset.id));
+      item.addEventListener('focus', () => setHighlight(preset.id));
+      itemRefs.push({ id: preset.id, el: item });
       list.append(item);
     };
-    add(null);
     const shown = filterDesignSystems(dsQuery);
     for (const group of designSystemGroups(shown)) {
       list.append(q('div', 'ds-ds-group', group.category));
       for (const preset of group.presets) add(preset);
     }
-    if (shown.length === 0) list.append(q('div', 'ds-ds-empty', 'No design systems match your search.'));
+    if (shown.length === 0) list.append(q('div', 'ds-ds-empty', 'No presets match your search.'));
   };
 
   buildList();
@@ -3352,60 +3564,175 @@ function renderDesignSystemPanel(): HTMLElement {
   });
 
   panel.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && event.target !== create) {
+    if (event.key === 'Enter' && event.target !== clear && dsHighlight) {
       event.preventDefault();
-      applyDesignSystem(dsHighlight);
+      applyLook('preset', { presetId: dsHighlight });
     }
   });
 
-  queueMicrotask(() => search.focus());
+  if (state.overlay === 'look') queueMicrotask(() => search.focus());
 
   return panel;
 }
 
-/** The one-line workspace context under the composer (no registered-project gate). */
-function renderWorkspaceRow(): HTMLElement {
-  const row = q('div', 'ds-dir');
-  const label = q('span', 'ds-dir-label', 'Canvas workspace');
-  const ws = state.workspace;
-  const value = q('span', 'ds-dir-value', ws
-    ? (ws.name.length > 38 ? `${ws.name.slice(0, 38)}…` : ws.name)
-    : 'Created on send — no project registration needed.');
-  value.title = ws ? ws.dir : NO_WORKSPACE_MESSAGE;
-  row.append(label, value);
-  return row;
+// ---- the Devices picker ----
+
+/** Toggle one device; `null` is "Ask me", which clears every device. */
+function toggleDevice(id: DeviceId | null): void {
+  if (id === null) setPagePref({ devices: [] });
+  else if (state.pageDevices.includes(id)) setPagePref({ devices: state.pageDevices.filter((device) => device !== id) });
+  else setPagePref({ devices: DEVICE_ORDER.filter((device) => device === id || state.pageDevices.includes(device)) });
 }
 
-function renderIdeas(): HTMLElement {
-  const wrap = q('div', 'ds-ideas');
-  wrap.append(q('div', 'ds-ideas-label', 'Ideas'));
-  const list = q('div', 'ds-idea-list');
-  IDEAS[state.pageType].forEach((idea, index) => {
-    const card = q<HTMLButtonElement>('button', 'ds-idea');
+function renderDevicesPanel(): HTMLElement {
+  const panel = q('div', 'ds-ds-panel ds-devices-panel');
+  const list = q('div', 'ds-device-list');
+  list.setAttribute('role', 'group');
+  list.setAttribute('aria-label', 'Devices to design for');
+  const row = (id: DeviceId | null, title: string, hint: string, checked: boolean): HTMLElement => {
+    const label = q('label', `ds-device-option${checked ? ' on' : ''}`);
+    const box = q<HTMLInputElement>('input');
+    box.type = 'checkbox';
+    box.checked = checked;
+    box.disabled = state.pageBusy;
+    box.addEventListener('change', () => {
+      toggleDevice(id);
+      queueMicrotask(() => pageBody?.querySelector<HTMLElement>(`[data-device="${id ?? 'ask'}"]`)?.focus());
+    });
+    box.dataset.device = id ?? 'ask';
+    const text = q('span', 'ds-menu-main');
+    text.append(q('strong', undefined, title), q('span', 'ds-menu-hint', hint));
+    label.append(box, text);
+    return label;
+  };
+  list.append(row(null, 'Ask me', 'Detect from the project', state.pageDevices.length === 0));
+  for (const id of DEVICE_ORDER) {
+    const preset = DEVICE_PRESETS[id];
+    list.append(row(id, deviceName(id), `${preset.width}×${preset.height}`, state.pageDevices.includes(id)));
+  }
+  panel.append(list);
+  if (state.overlay === 'devices') queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-device-option input')?.focus());
+  return panel;
+}
+
+// ---- the page preferences (`prefs/page`) ----
+
+function pagePrefs(): PagePrefs {
+  return {
+    questions: state.pageQuestions,
+    options: state.pageOptions,
+    devices: [...state.pageDevices],
+    look: { kind: state.pageLookKind, presetId: state.pageDesignSystemId, direction: state.pageDirection },
+  };
+}
+
+async function savePagePrefs(): Promise<void> {
+  try {
+    await host.storage.set(PAGE_PREFS_KEY, pagePrefs());
+  } catch {
+    /* the choice still applies to this page; it just is not remembered */
+  }
+}
+
+/** Change page preferences, remember them and redraw. */
+function setPagePref(change: Partial<Omit<PagePrefs, 'look'>>, refocus?: string): void {
+  if (change.questions !== undefined) state.pageQuestions = change.questions;
+  if (change.options !== undefined) state.pageOptions = change.options;
+  if (change.devices !== undefined) state.pageDevices = DEVICE_ORDER.filter((id) => change.devices!.includes(id));
+  void savePagePrefs();
+  rerender();
+  if (refocus) queueMicrotask(() => pageBody?.querySelector<HTMLElement>(refocus)?.focus());
+}
+
+function isOptionsChoice(value: unknown): value is OptionsChoice {
+  return value === 'ask' || value === 1 || value === 2 || value === 3;
+}
+
+/** Restore the remembered page preferences, ignoring anything malformed. Page surface only. */
+async function loadPagePrefs(): Promise<void> {
+  if (state.surface !== 'page') return;
+  let stored: unknown;
+  try {
+    stored = await host.storage.get(PAGE_PREFS_KEY);
+  } catch {
+    return;
+  }
+  if (!stored || typeof stored !== 'object') return;
+  const value = stored as Partial<Record<keyof PagePrefs, unknown>>;
+  if (typeof value.questions === 'boolean') state.pageQuestions = value.questions;
+  if (isOptionsChoice(value.options)) state.pageOptions = value.options;
+  if (Array.isArray(value.devices)) state.pageDevices = DEVICE_ORDER.filter((id) => (value.devices as unknown[]).includes(id));
+  const look = value.look as Partial<PagePrefs['look']> | undefined;
+  if (look && typeof look === 'object') {
+    if (look.kind === null || look.kind === 'project' || look.kind === 'preset' || look.kind === 'direction') state.pageLookKind = look.kind;
+    state.pageDesignSystemId = findDesignSystem(typeof look.presetId === 'string' ? look.presetId : null)?.id ?? null;
+    if (look.direction === 'auto' || (typeof look.direction === 'string' && Object.hasOwn(DIRECTIONS, look.direction))) {
+      state.pageDirection = look.direction as 'auto' | DirectionId;
+    }
+  }
+  rerender();
+}
+
+// ---- context, starters, footer ----
+
+/** What the agent reads before it designs, and where designs are saved. */
+function renderContextRow(): HTMLElement {
+  const context = q('div', 'ds-context');
+  const project = q('div', 'ds-context-item');
+  const dir = state.directory;
+  if (dir) {
+    project.append(q('span', 'ds-context-label', 'Project'));
+    const name = q('span', 'ds-context-value', fileBaseName(dir));
+    name.title = dir;
+    project.append(name, q('span', 'ds-context-note', ' · read for colors, fonts, components and breakpoints'));
+  } else {
+    project.append(q('span', 'ds-context-note', "No project open — you'll confirm a palette first"));
+  }
+  context.append(project);
+  if (!pageLocationEl) pageLocationEl = q('div', 'ds-context-item ds-context-location');
+  renderLocationRow(pageLocationEl);
+  context.append(pageLocationEl);
+  return context;
+}
+
+/** "Start from": three pre-structured briefs per type. A click seeds the composer. */
+function renderStarters(): HTMLElement {
+  const wrap = q('section', 'ds-starters');
+  wrap.append(q('div', 'ds-section-label', 'Start from'));
+  const grid = q('div', 'ds-starter-grid');
+  for (const starter of STARTERS) {
+    const card = q<HTMLButtonElement>('button', 'ds-starter');
+    card.type = 'button';
     card.disabled = state.pageBusy;
-    card.append(ideaThumb(index % 4));
-    const body = q('div', 'ds-idea-body');
-    body.append(q('strong', 'ds-idea-title', idea.title));
-    body.append(q('span', 'ds-idea-desc', idea.description));
+    card.setAttribute('aria-label', `${starter.title}: ${starter.description}. ${PAGE_TYPE_LABELS[starter.type]}.`);
+    card.append(starterGlyph(starter.glyph));
+    const body = q('span', 'ds-starter-body');
+    body.append(q('strong', 'ds-starter-title', starter.title));
+    body.append(q('span', 'ds-starter-desc', starter.description));
     card.append(body);
     card.addEventListener('click', () => {
       if (state.pageBusy) return;
-      state.prompt = idea.prompt;
-      if (promptEl) promptEl.value = idea.prompt;
+      state.prompt = starter.prompt;
+      state.pageType = starter.type;
+      renderPage();
       updateComposerState();
       promptEl?.focus();
     });
-    list.append(card);
-  });
-  wrap.append(list);
+    grid.append(card);
+  }
+  wrap.append(grid);
   return wrap;
 }
 
-/** The calm closing line under everything. */
+/** The closing line: the keys, and where else the canvas opens. */
 function renderFooter(): HTMLElement {
   const footer = q('footer', 'ds-footer');
-  footer.append(q('span', 'ds-footer-name', 'Design Canvas'));
-  footer.append(q('span', 'ds-footer-hint', 'Click an element in the canvas, then Reference in chat.'));
+  const hints = q('p', 'ds-hints');
+  const kbd = (text: string): HTMLElement => q('kbd', undefined, text);
+  hints.append(kbd('Enter'), document.createTextNode(' to start · '));
+  hints.append(kbd('Shift'), document.createTextNode('+'), kbd('Enter'), document.createTextNode(' new line · '));
+  hints.append(kbd('/canvas'), document.createTextNode(' in any chat opens the canvas there'));
+  footer.append(hints);
   return footer;
 }
 
@@ -3449,8 +3776,20 @@ function renderCanvasSection(): HTMLElement {
   } else if (view.kind === 'empty') {
     list.append(listNote(NO_DESIGN_WORK_MESSAGE));
   } else {
-    for (const row of view.rows) {
+    const shown = state.workShowAll ? view.rows : view.rows.slice(0, WORK_LIST_CAP);
+    for (const row of shown) {
       list.append(renderWorkspaceListRow(row));
+    }
+    if (view.rows.length > WORK_LIST_CAP) {
+      const more = q<HTMLButtonElement>('button', 'ds-link ds-list-more', state.workShowAll ? 'Show fewer' : `Show all (${view.rows.length})`);
+      more.type = 'button';
+      more.setAttribute('aria-expanded', String(state.workShowAll));
+      more.addEventListener('click', () => {
+        state.workShowAll = !state.workShowAll;
+        rerender();
+      });
+      section.append(list, more);
+      return section;
     }
   }
   section.append(list);
@@ -4426,6 +4765,7 @@ function buildPage(root: HTMLElement): void {
   window.addEventListener('dragover', onPageWindowDragOver);
   window.addEventListener('drop', onPageWindowDrop);
   renderPage();
+  void loadPagePrefs();
   void loadDesignHome();
 }
 
@@ -4857,11 +5197,45 @@ export function getPendingOpen(): boolean {
 }
 
 /** Test seam: the page's creation selections, without replaying the pickers. */
-export function setPageChoice(choice: { type?: DesignType; direction?: 'auto' | DirectionId; fidelity?: Fidelity }): void {
+export function setPageChoice(choice: { type?: DesignType; direction?: 'auto' | DirectionId; look?: LookKind | null; presetId?: string | null }): void {
   if (choice.type) state.pageType = choice.type;
   if (choice.direction) state.pageDirection = choice.direction;
-  if (choice.fidelity) state.pageFidelity = choice.fidelity;
+  if (choice.look !== undefined) state.pageLookKind = choice.look;
+  if (choice.presetId !== undefined) state.pageDesignSystemId = choice.presetId;
 }
+
+/** Test seam: the page's current type and the session spec its selections build. */
+export function getPageChoice(): { type: DesignType; spec: DesignBriefSpec } {
+  return { type: state.pageType, spec: pageBriefSpec() };
+}
+
+/** Test seam: the remembered page preferences as they stand. */
+export function getPagePrefs(): PagePrefs {
+  return pagePrefs();
+}
+
+/** Test seam: change the page preferences as the controls do (and remember them). */
+export async function setPagePrefs(change: Partial<Omit<PagePrefs, 'look'>> & { look?: PagePrefs['look'] }): Promise<void> {
+  if (change.look) {
+    state.pageLookKind = change.look.kind;
+    state.pageDesignSystemId = change.look.presetId;
+    state.pageDirection = change.look.direction;
+  }
+  setPagePref(change);
+  await savePagePrefs();
+}
+
+/** Test seam: forget the page preferences in memory, as a fresh mount starts. */
+export function resetPagePrefs(): void {
+  state.pageQuestions = true;
+  state.pageOptions = 'ask';
+  state.pageDevices = [];
+  state.pageLookKind = null;
+  state.pageDesignSystemId = null;
+  state.pageDirection = 'auto';
+}
+
+export { loadPagePrefs, renderStarters, applyStructureBrief };
 
 /** Test seam: allow the `/canvas` resolver without replaying an `onReady` context. */
 export function allowResolve(value: boolean): void {

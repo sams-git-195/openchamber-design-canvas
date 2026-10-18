@@ -4,9 +4,95 @@
   var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
   var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
-  // node_modules/@openchamber/sdk/dist/api-version.js
-  var OPENCHAMBER_SDK_CHANNEL = "openchamber.sdk";
-  var OPENCHAMBER_SDK_API_VERSION = 1;
+  // node_modules/@openchamber/sdk/dist/ui/theme.js
+  var TOKEN_VARS = [
+    ["--oc-bg", "background"],
+    ["--oc-elevated", "elevated"],
+    ["--oc-fg", "foreground"],
+    ["--oc-muted", "muted"],
+    ["--oc-subtle", "subtle"],
+    ["--oc-border", "border"],
+    ["--oc-hover", "hover"],
+    ["--oc-selection", "selection"],
+    ["--oc-focus", "focus"],
+    ["--oc-primary", "primary"],
+    ["--oc-muted-surface", "mutedSurface"],
+    ["--oc-elevated-fg", "elevatedForeground"],
+    ["--oc-active", "active"],
+    ["--oc-selection-fg", "selectionForeground"],
+    ["--oc-primary-fg", "primaryForeground"],
+    ["--oc-primary-text", "primaryText"],
+    ["--oc-success-text", "successText"],
+    ["--oc-warning-text", "warningText"],
+    ["--oc-error-text", "errorText"],
+    ["--oc-info-text", "infoText"],
+    ["--oc-success", "success"],
+    ["--oc-warning", "warning"],
+    ["--oc-error", "error"],
+    ["--oc-info", "info"],
+    ["--oc-font", "font"],
+    ["--oc-mono", "mono"],
+    ["--oc-radius", "radius"],
+    ["--surface-background", "background"],
+    ["--surface-elevated", "elevated"],
+    ["--surface-foreground", "foreground"],
+    ["--surface-muted-foreground", "muted"],
+    ["--surface-subtle", "subtle"],
+    ["--interactive-border", "border"],
+    ["--interactive-hover", "hover"],
+    ["--interactive-selection", "selection"],
+    ["--interactive-focus-ring", "focus"],
+    ["--primary", "primary"],
+    ["--surface-muted", "mutedSurface"],
+    ["--surface-elevated-foreground", "elevatedForeground"],
+    ["--interactive-active", "active"],
+    ["--interactive-selection-foreground", "selectionForeground"],
+    ["--primary-foreground", "primaryForeground"],
+    ["--primary-text", "primaryText"],
+    ["--success-text", "successText"],
+    ["--warning-text", "warningText"],
+    ["--error-text", "errorText"],
+    ["--info-text", "infoText"],
+    ["--status-success", "success"],
+    ["--status-warning", "warning"],
+    ["--status-error", "error"],
+    ["--status-info", "info"],
+    ["--font-sans", "font"],
+    ["--font-mono", "mono"],
+    ["--radius", "radius"]
+  ];
+  var SYNTAX_TOKEN_VARS = [
+    ["--oc-syntax-keyword", "--syntax-keyword", "syntaxKeyword"],
+    ["--oc-syntax-string", "--syntax-string", "syntaxString"],
+    ["--oc-syntax-number", "--syntax-number", "syntaxNumber"],
+    ["--oc-syntax-function", "--syntax-function", "syntaxFunction"],
+    ["--oc-syntax-type", "--syntax-type", "syntaxType"],
+    ["--oc-syntax-comment", "--syntax-comment", "syntaxComment"],
+    ["--oc-syntax-variable", "--syntax-variable", "syntaxVariable"],
+    ["--oc-syntax-operator", "--syntax-operator", "syntaxOperator"]
+  ];
+  var applyHostTheme = (theme, root) => {
+    root.style.colorScheme = theme.mode;
+    for (const [name, key] of TOKEN_VARS) {
+      root.style.setProperty(name, theme.tokens[key]);
+    }
+    for (const [alias, hostName, key] of SYNTAX_TOKEN_VARS) {
+      const value = theme.tokens[key] ?? "";
+      root.style.setProperty(alias, value);
+      root.style.setProperty(hostName, value);
+    }
+    root.style.setProperty("font-family", theme.tokens.font);
+    root.style.setProperty("font-size", "0.875rem");
+    root.style.setProperty("line-height", "1.45");
+    root.style.setProperty("color", theme.tokens.foreground);
+  };
+  var applyHostReady = (ctx, root) => {
+    applyHostTheme(ctx.theme, root);
+    if (root.dataset) {
+      root.dataset.ocSurface = ctx.surface;
+      root.dataset.ocTheme = ctx.theme.mode;
+    }
+  };
 
   // node_modules/@openchamber/sdk/dist/scrollbar-style.js
   var GUEST_SCROLLING_ATTRIBUTE = "data-oc-scrolling";
@@ -66,6 +152,212 @@
     }, { capture: true, passive: true });
   }
   var GUEST_SCROLLBAR_SCRIPT = `(${installGuestScrollbarActivity.toString()})(document);`;
+
+  // node_modules/@openchamber/sdk/dist/ui/style.js
+  var OC_ALIAS = {
+    "surface-background": "bg",
+    "surface-elevated": "elevated",
+    "surface-elevated-foreground": "elevated-fg",
+    "surface-foreground": "fg",
+    "surface-muted-foreground": "muted",
+    "surface-muted": "muted-surface",
+    "surface-subtle": "subtle",
+    "interactive-border": "border",
+    "interactive-hover": "hover",
+    "interactive-active": "active",
+    "interactive-selection": "selection",
+    "interactive-selection-foreground": "selection-fg",
+    "interactive-focus-ring": "focus",
+    "primary": "primary",
+    "primary-foreground": "primary-fg",
+    "primary-text": "primary-text",
+    "success-text": "success-text",
+    "warning-text": "warning-text",
+    "error-text": "error-text",
+    "info-text": "info-text",
+    "status-success": "success",
+    "status-warning": "warning",
+    "status-error": "error",
+    "status-info": "info",
+    "font-sans": "font",
+    "font-mono": "mono",
+    "radius": "radius"
+  };
+  var v = (name, fallback) => `var(--${name}, var(--oc-${OC_ALIAS[name]}, ${fallback}))`;
+  var bg = v("surface-background", "transparent");
+  var elevated = v("surface-elevated", "transparent");
+  var elevatedFg = v("surface-elevated-foreground", "inherit");
+  var fg = v("surface-foreground", "inherit");
+  var muted = v("surface-muted-foreground", "gray");
+  var secondary = v("surface-muted", "transparent");
+  var border = v("interactive-border", "currentColor");
+  var hover = v("interactive-hover", "transparent");
+  var active = v("interactive-active", "transparent");
+  var selection = v("interactive-selection", "transparent");
+  var selectionFg = v("interactive-selection-foreground", "inherit");
+  var focus = v("interactive-focus-ring", "currentColor");
+  var primary = v("primary", "currentColor");
+  var primaryText = v("primary-text", "inherit");
+  var errorText = v("error-text", "inherit");
+  var font = v("font-sans", "inherit");
+  var mono = v("font-mono", "monospace");
+  var radius = v("radius", "9px");
+  var mix = (color, pct, base = "transparent") => `color-mix(in srgb, ${color} ${pct}%, ${base})`;
+  var focusRing = `box-shadow: 0 0 0 2px ${focus};`;
+  var tone = (name) => {
+    const color = v(`status-${name}`, "currentColor");
+    return `
+.oc-sdk[data-tone="${name}"], .oc-sdk [data-tone="${name}"] { --oc-sdk-tone: ${color}; --oc-sdk-tone-text: ${v(`${name}-text`, "inherit")}; }`;
+  };
+  var UI_CSS = `
+${GUEST_SCROLLBAR_CSS}
+.oc-sdk { box-sizing: border-box; color: ${fg}; font-family: ${font}; font-size: 0.875rem; line-height: 1.45; }
+.oc-sdk *, .oc-sdk *::before, .oc-sdk *::after { box-sizing: border-box; }
+/* :where() keeps the reset at zero specificity so every primitive class below overrides it. */
+:where(.oc-sdk) :where(button, input, textarea), :where(button.oc-sdk, input.oc-sdk, textarea.oc-sdk) { font: inherit; color: inherit; margin: 0; }
+:where(.oc-sdk) :where(button), :where(button.oc-sdk) { cursor: pointer; background: none; border: 0; padding: 0; }
+.oc-sdk button:disabled, button.oc-sdk:disabled, .oc-sdk[aria-disabled="true"], .oc-sdk [aria-disabled="true"] { opacity: .5; pointer-events: none; }
+.oc-sdk :focus-visible { outline: none; ${focusRing} }
+.oc-sdk-mono { font-family: ${mono}; }
+.oc-sdk-muted { color: ${muted}; }
+${tone("success")}${tone("warning")}${tone("error")}${tone("info")}
+.oc-sdk[data-tone="primary"], .oc-sdk [data-tone="primary"] { --oc-sdk-tone: ${primary}; --oc-sdk-tone-text: ${primaryText}; }
+
+.oc-sdk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px; border: 1px solid transparent; border-radius: ${radius}; font-size: 0.875rem; font-weight: 500; line-height: 1; white-space: nowrap; transition: background 150ms ease-out, color 150ms ease-out; }
+.oc-sdk-btn[data-size="sm"] { height: 32px; padding: 0 10px; font-size: 0.8125rem; }
+.oc-sdk-btn[data-size="xs"] { height: 24px; padding: 0 8px; font-size: 0.75rem; border-radius: 6px; }
+.oc-sdk-btn[data-variant="default"] { color: ${primaryText}; background: ${mix(primary, 10, bg)}; border-color: ${mix(primary, 12)}; }
+.oc-sdk-btn[data-variant="default"]:hover { background: ${mix(primary, 16, bg)}; }
+.oc-sdk-btn[data-variant="default"]:active { background: ${mix(primary, 22, bg)}; }
+.oc-sdk-btn[data-variant="secondary"] { background: ${secondary}; color: var(--oc-fg); }
+.oc-sdk-btn[data-variant="secondary"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-btn[data-variant="secondary"]:active { background-image: linear-gradient(${active}, ${active}); }
+.oc-sdk-btn[data-variant="outline"] { background: ${elevated}; color: ${elevatedFg}; border-color: ${border}; }
+.oc-sdk-btn[data-variant="outline"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-btn[data-variant="outline"]:active { background-image: linear-gradient(${active}, ${active}); }
+.oc-sdk-btn[data-variant="ghost"] { background: transparent; }
+.oc-sdk-btn[data-variant="ghost"]:hover { background: ${hover}; }
+.oc-sdk-btn[data-variant="ghost"]:active { background: ${active}; }
+.oc-sdk-btn[data-variant="destructive"] { --oc-sdk-tone: ${v("status-error", "red")}; color: ${errorText}; background: ${mix("var(--oc-sdk-tone)", 7, bg)}; border-color: ${mix("var(--oc-sdk-tone)", 12)}; }
+.oc-sdk-btn[data-variant="destructive"]:hover { background: ${mix("var(--oc-sdk-tone)", 9, bg)}; }
+.oc-sdk-btn[data-variant="destructive"]:active { background: ${mix("var(--oc-sdk-tone)", 11, bg)}; }
+.oc-sdk-btn[data-loading="true"] { opacity: .5; pointer-events: none; }
+.oc-sdk-btn > .oc-sdk-spinner-ring { width: 14px; height: 14px; }
+
+.oc-sdk-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-sdk-field-label { font-size: 0.8125rem; font-weight: 500; }
+.oc-sdk-field-note { font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-field[data-invalid="true"] .oc-sdk-field-note { color: ${errorText}; }
+.oc-sdk-input { display: block; width: 100%; min-width: 0; height: 36px; padding: 0 12px; border: 0; border-radius: ${radius}; background: ${elevated}; color: ${elevatedFg}; font-size: 0.875rem; line-height: 1.45; appearance: none; box-shadow: inset 0 0 0 1px ${mix(border, 60)}; transition: background 150ms ease-out, box-shadow 150ms ease-out; }
+textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
+.oc-sdk-input::placeholder { color: ${muted}; }
+.oc-sdk-input:hover:not(:focus) { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-input:focus, .oc-sdk-input:focus-visible { box-shadow: inset 0 0 0 2px ${focus}; }
+.oc-sdk-field[data-invalid="true"] .oc-sdk-input { box-shadow: inset 0 0 0 1px ${v("status-error", "red")}; }
+.oc-sdk-field[data-invalid="true"] .oc-sdk-input:focus { box-shadow: inset 0 0 0 2px ${v("status-error", "red")}; }
+.oc-sdk-input[data-mono="true"] { font-family: ${mono}; }
+
+.oc-sdk-search { position: relative; min-width: 0; }
+.oc-sdk-search .oc-sdk-input { padding-left: 34px; padding-right: 34px; }
+.oc-sdk-search-icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: ${muted}; pointer-events: none; }
+.oc-sdk-search[data-active="true"] .oc-sdk-search-icon { color: ${primary}; }
+.oc-sdk-search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: none; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 6px; color: ${muted}; }
+.oc-sdk-search[data-active="true"] .oc-sdk-search-clear { display: inline-flex; }
+.oc-sdk-search-clear:hover { background: ${hover}; color: ${fg}; }
+
+.oc-sdk-select { position: relative; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-sdk-trigger { display: inline-flex; align-items: center; gap: 6px; width: 100%; min-width: 0; height: 32px; padding: 0 8px 0 10px; border: 1px solid ${border}; border-radius: 6px; background: ${elevated}; color: ${elevatedFg}; font-size: 0.8125rem; text-align: left; transition: background 150ms ease-out; }
+.oc-sdk-trigger:hover { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-trigger[aria-expanded="true"] { background-image: linear-gradient(${active}, ${active}); }
+.oc-sdk-trigger-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-sdk-trigger-value[data-empty="true"] { color: ${muted}; }
+.oc-sdk-trigger-chevron { flex: 0 0 auto; color: ${muted}; }
+.oc-sdk-popup { --surface-foreground: ${elevatedFg}; position: fixed; z-index: 50; display: flex; flex-direction: column; gap: 2px; min-width: 160px; max-width: calc(100vw - 16px); max-height: min(320px, calc(100vh - 16px)); overflow: auto; padding: 4px; border: 1px solid ${mix(border, 60)}; border-radius: 12px; background: ${elevated}; color: ${elevatedFg}; box-shadow: 0 8px 24px ${mix(fg, 12)}; }
+.oc-sdk-popup-search { flex: 0 0 auto; padding: 2px 2px 4px; }
+.oc-sdk-popup-search .oc-sdk-input { height: 32px; font-size: 0.8125rem; }
+.oc-sdk-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 8px; font-size: 0.8125rem; text-align: left; }
+.oc-sdk-option[data-active="true"] { background: ${hover}; }
+.oc-sdk-option[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
+.oc-sdk-option[data-destructive="true"] { color: ${errorText}; }
+.oc-sdk-option[data-destructive="true"][data-active="true"] { background: ${mix(v("status-error", "red"), 10)}; }
+.oc-sdk-option-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-sdk-option-hint { flex: 0 0 auto; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-option-check { flex: 0 0 auto; width: 12px; }
+.oc-sdk-popup-empty { padding: 8px; font-size: 0.8125rem; color: ${muted}; }
+
+.oc-sdk-check { display: inline-flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; }
+.oc-sdk-check-box { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-top: 3px; border: 1px solid ${border}; border-radius: 4px; color: ${primary}; transition: border-color 150ms ease-out; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box { border-color: ${mix(primary, 65, border)}; }
+.oc-sdk-check-box > svg { display: none; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box > svg { display: block; }
+.oc-sdk-check-thumb { flex: 0 0 auto; position: relative; width: 36px; height: 20px; border-radius: 9999px; background: ${border}; transition: background 150ms ease-out; }
+.oc-sdk-check-thumb::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 9999px; background: ${bg}; transition: transform 150ms ease-out; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb { background: ${primary}; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb::after { transform: translateX(16px); }
+.oc-sdk-check:focus-visible { box-shadow: none; }
+.oc-sdk-check:focus-visible .oc-sdk-check-box, .oc-sdk-check:focus-visible .oc-sdk-check-thumb { ${focusRing} }
+.oc-sdk-check-text { display: flex; flex-direction: column; min-width: 0; }
+.oc-sdk-check-label { font-size: 0.875rem; }
+.oc-sdk-check-desc { font-size: 0.75rem; color: ${muted}; }
+
+.oc-sdk-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; max-width: 100%; overflow: auto; }
+.oc-sdk-tabs[data-track="true"] { background: ${mix(fg, 4)}; }
+.oc-sdk-tab { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; font-size: 0.8125rem; font-weight: 500; color: ${muted}; white-space: nowrap; transition: color 150ms ease-out, background 150ms ease-out; }
+.oc-sdk-tab:hover { color: ${fg}; }
+.oc-sdk-tab[aria-selected="true"] { color: ${selectionFg}; background: ${selection}; border-color: ${border}; }
+.oc-sdk-tab-count { font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
+
+.oc-sdk-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 9999px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; background: ${hover}; color: ${muted}; }
+.oc-sdk-badge[data-tone] { color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); background: ${mix("var(--oc-sdk-tone)", 15)}; }
+
+.oc-sdk-list { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.oc-sdk-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 6px; text-align: left; transition: background 120ms ease-out; }
+.oc-sdk-row:hover, .oc-sdk-row[data-active="true"] { background: ${hover}; }
+.oc-sdk-row[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
+.oc-sdk-row-lead { flex: 0 0 auto; width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ${mono}; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.oc-sdk-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-sdk-row-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-row-meta { flex: 0 0 auto; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
+.oc-sdk-row[aria-selected="true"] .oc-sdk-row-lead, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-sub, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-meta { color: inherit; opacity: .75; }
+.oc-sdk-list-empty { padding: 16px 8px; text-align: center; font-size: 0.8125rem; color: ${muted}; }
+
+.oc-sdk-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 40px 16px; text-align: center; }
+.oc-sdk-empty-title { margin: 0; font-size: 0.8125rem; font-weight: 600; }
+.oc-sdk-empty-body { margin: 0; max-width: 32rem; font-size: 0.8125rem; color: ${muted}; }
+.oc-sdk-empty-action { margin-top: 12px; }
+
+@keyframes oc-sdk-spin { to { transform: rotate(360deg); } }
+.oc-sdk-spinner { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8125rem; color: ${muted}; }
+.oc-sdk-spinner-ring { width: 16px; height: 16px; border: 2px solid ${border}; border-top-color: ${primary}; border-radius: 9999px; animation: oc-sdk-spin .8s linear infinite; }
+.oc-sdk-spinner[data-size="sm"] .oc-sdk-spinner-ring { width: 12px; height: 12px; }
+
+.oc-sdk-banner { display: flex; align-items: flex-start; gap: 12px; padding: 8px 12px; border: 1px solid ${mix("var(--oc-sdk-tone)", 40)}; border-radius: 8px; background: ${mix("var(--oc-sdk-tone)", 10)}; }
+.oc-sdk-banner-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.oc-sdk-banner-title { font-size: 0.8125rem; font-weight: 500; color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); }
+.oc-sdk-banner-body { font-size: 0.8125rem; color: ${muted}; }
+.oc-sdk-banner-action { flex: 0 0 auto; }
+
+.oc-sdk-separator { display: flex; align-items: center; gap: 8px; width: 100%; margin: 8px 0; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-separator::before, .oc-sdk-separator::after { content: ""; flex: 1 1 auto; height: 1px; background: ${mix(border, 40)}; }
+.oc-sdk-separator[data-labeled="false"]::after { display: none; }
+.oc-sdk-popup > .oc-sdk-separator { margin: 4px 0; }
+
+.oc-sdk-progress { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-sdk-progress-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: ${muted}; font-variant-numeric: tabular-nums; }
+.oc-sdk-progress-track { height: 6px; border-radius: 9999px; background: ${border}; overflow: hidden; }
+.oc-sdk-progress-fill { height: 100%; border-radius: 9999px; background: var(--oc-sdk-tone, ${primary}); transform-origin: left; transition: transform 200ms ease-out; }
+
+.oc-sdk-menu { position: relative; display: inline-flex; }
+
+.oc-sdk-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.oc-sdk-text a { color: ${primaryText}; text-decoration: underline; text-underline-offset: 2px; }
+.oc-sdk-text img { display: block; max-width: 100%; margin: 8px 0; border-radius: 8px; border: 1px solid ${mix(border, 60)}; }
+`;
+
+  // node_modules/@openchamber/sdk/dist/api-version.js
+  var OPENCHAMBER_SDK_CHANNEL = "openchamber.sdk";
+  var OPENCHAMBER_SDK_API_VERSION = 1;
 
   // node_modules/@openchamber/sdk/dist/workspace.js
   var GUEST_STORAGE_KEY_MAX = 128;
@@ -1345,298 +1637,6 @@
   // node_modules/@openchamber/sdk/dist/service-surface.js
   var SURFACE_CONTROLLERS = ["none", "agent", "user"];
   var CONTROLLERS = new Set(SURFACE_CONTROLLERS);
-
-  // node_modules/@openchamber/sdk/dist/ui/theme.js
-  var TOKEN_VARS = [
-    ["--oc-bg", "background"],
-    ["--oc-elevated", "elevated"],
-    ["--oc-fg", "foreground"],
-    ["--oc-muted", "muted"],
-    ["--oc-subtle", "subtle"],
-    ["--oc-border", "border"],
-    ["--oc-hover", "hover"],
-    ["--oc-selection", "selection"],
-    ["--oc-focus", "focus"],
-    ["--oc-primary", "primary"],
-    ["--oc-muted-surface", "mutedSurface"],
-    ["--oc-elevated-fg", "elevatedForeground"],
-    ["--oc-active", "active"],
-    ["--oc-selection-fg", "selectionForeground"],
-    ["--oc-primary-fg", "primaryForeground"],
-    ["--oc-primary-text", "primaryText"],
-    ["--oc-success-text", "successText"],
-    ["--oc-warning-text", "warningText"],
-    ["--oc-error-text", "errorText"],
-    ["--oc-info-text", "infoText"],
-    ["--oc-success", "success"],
-    ["--oc-warning", "warning"],
-    ["--oc-error", "error"],
-    ["--oc-info", "info"],
-    ["--oc-font", "font"],
-    ["--oc-mono", "mono"],
-    ["--oc-radius", "radius"],
-    ["--surface-background", "background"],
-    ["--surface-elevated", "elevated"],
-    ["--surface-foreground", "foreground"],
-    ["--surface-muted-foreground", "muted"],
-    ["--surface-subtle", "subtle"],
-    ["--interactive-border", "border"],
-    ["--interactive-hover", "hover"],
-    ["--interactive-selection", "selection"],
-    ["--interactive-focus-ring", "focus"],
-    ["--primary", "primary"],
-    ["--surface-muted", "mutedSurface"],
-    ["--surface-elevated-foreground", "elevatedForeground"],
-    ["--interactive-active", "active"],
-    ["--interactive-selection-foreground", "selectionForeground"],
-    ["--primary-foreground", "primaryForeground"],
-    ["--primary-text", "primaryText"],
-    ["--success-text", "successText"],
-    ["--warning-text", "warningText"],
-    ["--error-text", "errorText"],
-    ["--info-text", "infoText"],
-    ["--status-success", "success"],
-    ["--status-warning", "warning"],
-    ["--status-error", "error"],
-    ["--status-info", "info"],
-    ["--font-sans", "font"],
-    ["--font-mono", "mono"],
-    ["--radius", "radius"]
-  ];
-  var SYNTAX_TOKEN_VARS = [
-    ["--oc-syntax-keyword", "--syntax-keyword", "syntaxKeyword"],
-    ["--oc-syntax-string", "--syntax-string", "syntaxString"],
-    ["--oc-syntax-number", "--syntax-number", "syntaxNumber"],
-    ["--oc-syntax-function", "--syntax-function", "syntaxFunction"],
-    ["--oc-syntax-type", "--syntax-type", "syntaxType"],
-    ["--oc-syntax-comment", "--syntax-comment", "syntaxComment"],
-    ["--oc-syntax-variable", "--syntax-variable", "syntaxVariable"],
-    ["--oc-syntax-operator", "--syntax-operator", "syntaxOperator"]
-  ];
-  var applyHostTheme = (theme, root) => {
-    root.style.colorScheme = theme.mode;
-    for (const [name, key] of TOKEN_VARS) {
-      root.style.setProperty(name, theme.tokens[key]);
-    }
-    for (const [alias, hostName, key] of SYNTAX_TOKEN_VARS) {
-      const value = theme.tokens[key] ?? "";
-      root.style.setProperty(alias, value);
-      root.style.setProperty(hostName, value);
-    }
-    root.style.setProperty("font-family", theme.tokens.font);
-    root.style.setProperty("font-size", "0.875rem");
-    root.style.setProperty("line-height", "1.45");
-    root.style.setProperty("color", theme.tokens.foreground);
-  };
-  var applyHostReady = (ctx, root) => {
-    applyHostTheme(ctx.theme, root);
-    if (root.dataset) {
-      root.dataset.ocSurface = ctx.surface;
-      root.dataset.ocTheme = ctx.theme.mode;
-    }
-  };
-
-  // node_modules/@openchamber/sdk/dist/ui/style.js
-  var OC_ALIAS = {
-    "surface-background": "bg",
-    "surface-elevated": "elevated",
-    "surface-elevated-foreground": "elevated-fg",
-    "surface-foreground": "fg",
-    "surface-muted-foreground": "muted",
-    "surface-muted": "muted-surface",
-    "surface-subtle": "subtle",
-    "interactive-border": "border",
-    "interactive-hover": "hover",
-    "interactive-active": "active",
-    "interactive-selection": "selection",
-    "interactive-selection-foreground": "selection-fg",
-    "interactive-focus-ring": "focus",
-    "primary": "primary",
-    "primary-foreground": "primary-fg",
-    "primary-text": "primary-text",
-    "success-text": "success-text",
-    "warning-text": "warning-text",
-    "error-text": "error-text",
-    "info-text": "info-text",
-    "status-success": "success",
-    "status-warning": "warning",
-    "status-error": "error",
-    "status-info": "info",
-    "font-sans": "font",
-    "font-mono": "mono",
-    "radius": "radius"
-  };
-  var v = (name, fallback) => `var(--${name}, var(--oc-${OC_ALIAS[name]}, ${fallback}))`;
-  var bg = v("surface-background", "transparent");
-  var elevated = v("surface-elevated", "transparent");
-  var elevatedFg = v("surface-elevated-foreground", "inherit");
-  var fg = v("surface-foreground", "inherit");
-  var muted = v("surface-muted-foreground", "gray");
-  var secondary = v("surface-muted", "transparent");
-  var border = v("interactive-border", "currentColor");
-  var hover = v("interactive-hover", "transparent");
-  var active = v("interactive-active", "transparent");
-  var selection = v("interactive-selection", "transparent");
-  var selectionFg = v("interactive-selection-foreground", "inherit");
-  var focus = v("interactive-focus-ring", "currentColor");
-  var primary = v("primary", "currentColor");
-  var primaryText = v("primary-text", "inherit");
-  var errorText = v("error-text", "inherit");
-  var font = v("font-sans", "inherit");
-  var mono = v("font-mono", "monospace");
-  var radius = v("radius", "9px");
-  var mix = (color, pct, base = "transparent") => `color-mix(in srgb, ${color} ${pct}%, ${base})`;
-  var focusRing = `box-shadow: 0 0 0 2px ${focus};`;
-  var tone = (name) => {
-    const color = v(`status-${name}`, "currentColor");
-    return `
-.oc-sdk[data-tone="${name}"], .oc-sdk [data-tone="${name}"] { --oc-sdk-tone: ${color}; --oc-sdk-tone-text: ${v(`${name}-text`, "inherit")}; }`;
-  };
-  var UI_CSS = `
-${GUEST_SCROLLBAR_CSS}
-.oc-sdk { box-sizing: border-box; color: ${fg}; font-family: ${font}; font-size: 0.875rem; line-height: 1.45; }
-.oc-sdk *, .oc-sdk *::before, .oc-sdk *::after { box-sizing: border-box; }
-/* :where() keeps the reset at zero specificity so every primitive class below overrides it. */
-:where(.oc-sdk) :where(button, input, textarea), :where(button.oc-sdk, input.oc-sdk, textarea.oc-sdk) { font: inherit; color: inherit; margin: 0; }
-:where(.oc-sdk) :where(button), :where(button.oc-sdk) { cursor: pointer; background: none; border: 0; padding: 0; }
-.oc-sdk button:disabled, button.oc-sdk:disabled, .oc-sdk[aria-disabled="true"], .oc-sdk [aria-disabled="true"] { opacity: .5; pointer-events: none; }
-.oc-sdk :focus-visible { outline: none; ${focusRing} }
-.oc-sdk-mono { font-family: ${mono}; }
-.oc-sdk-muted { color: ${muted}; }
-${tone("success")}${tone("warning")}${tone("error")}${tone("info")}
-.oc-sdk[data-tone="primary"], .oc-sdk [data-tone="primary"] { --oc-sdk-tone: ${primary}; --oc-sdk-tone-text: ${primaryText}; }
-
-.oc-sdk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px; border: 1px solid transparent; border-radius: ${radius}; font-size: 0.875rem; font-weight: 500; line-height: 1; white-space: nowrap; transition: background 150ms ease-out, color 150ms ease-out; }
-.oc-sdk-btn[data-size="sm"] { height: 32px; padding: 0 10px; font-size: 0.8125rem; }
-.oc-sdk-btn[data-size="xs"] { height: 24px; padding: 0 8px; font-size: 0.75rem; border-radius: 6px; }
-.oc-sdk-btn[data-variant="default"] { color: ${primaryText}; background: ${mix(primary, 10, bg)}; border-color: ${mix(primary, 12)}; }
-.oc-sdk-btn[data-variant="default"]:hover { background: ${mix(primary, 16, bg)}; }
-.oc-sdk-btn[data-variant="default"]:active { background: ${mix(primary, 22, bg)}; }
-.oc-sdk-btn[data-variant="secondary"] { background: ${secondary}; color: var(--oc-fg); }
-.oc-sdk-btn[data-variant="secondary"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-btn[data-variant="secondary"]:active { background-image: linear-gradient(${active}, ${active}); }
-.oc-sdk-btn[data-variant="outline"] { background: ${elevated}; color: ${elevatedFg}; border-color: ${border}; }
-.oc-sdk-btn[data-variant="outline"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-btn[data-variant="outline"]:active { background-image: linear-gradient(${active}, ${active}); }
-.oc-sdk-btn[data-variant="ghost"] { background: transparent; }
-.oc-sdk-btn[data-variant="ghost"]:hover { background: ${hover}; }
-.oc-sdk-btn[data-variant="ghost"]:active { background: ${active}; }
-.oc-sdk-btn[data-variant="destructive"] { --oc-sdk-tone: ${v("status-error", "red")}; color: ${errorText}; background: ${mix("var(--oc-sdk-tone)", 7, bg)}; border-color: ${mix("var(--oc-sdk-tone)", 12)}; }
-.oc-sdk-btn[data-variant="destructive"]:hover { background: ${mix("var(--oc-sdk-tone)", 9, bg)}; }
-.oc-sdk-btn[data-variant="destructive"]:active { background: ${mix("var(--oc-sdk-tone)", 11, bg)}; }
-.oc-sdk-btn[data-loading="true"] { opacity: .5; pointer-events: none; }
-.oc-sdk-btn > .oc-sdk-spinner-ring { width: 14px; height: 14px; }
-
-.oc-sdk-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.oc-sdk-field-label { font-size: 0.8125rem; font-weight: 500; }
-.oc-sdk-field-note { font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-field[data-invalid="true"] .oc-sdk-field-note { color: ${errorText}; }
-.oc-sdk-input { display: block; width: 100%; min-width: 0; height: 36px; padding: 0 12px; border: 0; border-radius: ${radius}; background: ${elevated}; color: ${elevatedFg}; font-size: 0.875rem; line-height: 1.45; appearance: none; box-shadow: inset 0 0 0 1px ${mix(border, 60)}; transition: background 150ms ease-out, box-shadow 150ms ease-out; }
-textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
-.oc-sdk-input::placeholder { color: ${muted}; }
-.oc-sdk-input:hover:not(:focus) { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-input:focus, .oc-sdk-input:focus-visible { box-shadow: inset 0 0 0 2px ${focus}; }
-.oc-sdk-field[data-invalid="true"] .oc-sdk-input { box-shadow: inset 0 0 0 1px ${v("status-error", "red")}; }
-.oc-sdk-field[data-invalid="true"] .oc-sdk-input:focus { box-shadow: inset 0 0 0 2px ${v("status-error", "red")}; }
-.oc-sdk-input[data-mono="true"] { font-family: ${mono}; }
-
-.oc-sdk-search { position: relative; min-width: 0; }
-.oc-sdk-search .oc-sdk-input { padding-left: 34px; padding-right: 34px; }
-.oc-sdk-search-icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: ${muted}; pointer-events: none; }
-.oc-sdk-search[data-active="true"] .oc-sdk-search-icon { color: ${primary}; }
-.oc-sdk-search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: none; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 6px; color: ${muted}; }
-.oc-sdk-search[data-active="true"] .oc-sdk-search-clear { display: inline-flex; }
-.oc-sdk-search-clear:hover { background: ${hover}; color: ${fg}; }
-
-.oc-sdk-select { position: relative; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.oc-sdk-trigger { display: inline-flex; align-items: center; gap: 6px; width: 100%; min-width: 0; height: 32px; padding: 0 8px 0 10px; border: 1px solid ${border}; border-radius: 6px; background: ${elevated}; color: ${elevatedFg}; font-size: 0.8125rem; text-align: left; transition: background 150ms ease-out; }
-.oc-sdk-trigger:hover { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-trigger[aria-expanded="true"] { background-image: linear-gradient(${active}, ${active}); }
-.oc-sdk-trigger-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-sdk-trigger-value[data-empty="true"] { color: ${muted}; }
-.oc-sdk-trigger-chevron { flex: 0 0 auto; color: ${muted}; }
-.oc-sdk-popup { --surface-foreground: ${elevatedFg}; position: fixed; z-index: 50; display: flex; flex-direction: column; gap: 2px; min-width: 160px; max-width: calc(100vw - 16px); max-height: min(320px, calc(100vh - 16px)); overflow: auto; padding: 4px; border: 1px solid ${mix(border, 60)}; border-radius: 12px; background: ${elevated}; color: ${elevatedFg}; box-shadow: 0 8px 24px ${mix(fg, 12)}; }
-.oc-sdk-popup-search { flex: 0 0 auto; padding: 2px 2px 4px; }
-.oc-sdk-popup-search .oc-sdk-input { height: 32px; font-size: 0.8125rem; }
-.oc-sdk-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 8px; font-size: 0.8125rem; text-align: left; }
-.oc-sdk-option[data-active="true"] { background: ${hover}; }
-.oc-sdk-option[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
-.oc-sdk-option[data-destructive="true"] { color: ${errorText}; }
-.oc-sdk-option[data-destructive="true"][data-active="true"] { background: ${mix(v("status-error", "red"), 10)}; }
-.oc-sdk-option-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-sdk-option-hint { flex: 0 0 auto; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-option-check { flex: 0 0 auto; width: 12px; }
-.oc-sdk-popup-empty { padding: 8px; font-size: 0.8125rem; color: ${muted}; }
-
-.oc-sdk-check { display: inline-flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; }
-.oc-sdk-check-box { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-top: 3px; border: 1px solid ${border}; border-radius: 4px; color: ${primary}; transition: border-color 150ms ease-out; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box { border-color: ${mix(primary, 65, border)}; }
-.oc-sdk-check-box > svg { display: none; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box > svg { display: block; }
-.oc-sdk-check-thumb { flex: 0 0 auto; position: relative; width: 36px; height: 20px; border-radius: 9999px; background: ${border}; transition: background 150ms ease-out; }
-.oc-sdk-check-thumb::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 9999px; background: ${bg}; transition: transform 150ms ease-out; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb { background: ${primary}; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb::after { transform: translateX(16px); }
-.oc-sdk-check:focus-visible { box-shadow: none; }
-.oc-sdk-check:focus-visible .oc-sdk-check-box, .oc-sdk-check:focus-visible .oc-sdk-check-thumb { ${focusRing} }
-.oc-sdk-check-text { display: flex; flex-direction: column; min-width: 0; }
-.oc-sdk-check-label { font-size: 0.875rem; }
-.oc-sdk-check-desc { font-size: 0.75rem; color: ${muted}; }
-
-.oc-sdk-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; max-width: 100%; overflow: auto; }
-.oc-sdk-tabs[data-track="true"] { background: ${mix(fg, 4)}; }
-.oc-sdk-tab { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; font-size: 0.8125rem; font-weight: 500; color: ${muted}; white-space: nowrap; transition: color 150ms ease-out, background 150ms ease-out; }
-.oc-sdk-tab:hover { color: ${fg}; }
-.oc-sdk-tab[aria-selected="true"] { color: ${selectionFg}; background: ${selection}; border-color: ${border}; }
-.oc-sdk-tab-count { font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
-
-.oc-sdk-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 9999px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; background: ${hover}; color: ${muted}; }
-.oc-sdk-badge[data-tone] { color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); background: ${mix("var(--oc-sdk-tone)", 15)}; }
-
-.oc-sdk-list { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.oc-sdk-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 6px; text-align: left; transition: background 120ms ease-out; }
-.oc-sdk-row:hover, .oc-sdk-row[data-active="true"] { background: ${hover}; }
-.oc-sdk-row[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
-.oc-sdk-row-lead { flex: 0 0 auto; width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ${mono}; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
-.oc-sdk-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-sdk-row-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-row-meta { flex: 0 0 auto; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
-.oc-sdk-row[aria-selected="true"] .oc-sdk-row-lead, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-sub, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-meta { color: inherit; opacity: .75; }
-.oc-sdk-list-empty { padding: 16px 8px; text-align: center; font-size: 0.8125rem; color: ${muted}; }
-
-.oc-sdk-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 40px 16px; text-align: center; }
-.oc-sdk-empty-title { margin: 0; font-size: 0.8125rem; font-weight: 600; }
-.oc-sdk-empty-body { margin: 0; max-width: 32rem; font-size: 0.8125rem; color: ${muted}; }
-.oc-sdk-empty-action { margin-top: 12px; }
-
-@keyframes oc-sdk-spin { to { transform: rotate(360deg); } }
-.oc-sdk-spinner { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8125rem; color: ${muted}; }
-.oc-sdk-spinner-ring { width: 16px; height: 16px; border: 2px solid ${border}; border-top-color: ${primary}; border-radius: 9999px; animation: oc-sdk-spin .8s linear infinite; }
-.oc-sdk-spinner[data-size="sm"] .oc-sdk-spinner-ring { width: 12px; height: 12px; }
-
-.oc-sdk-banner { display: flex; align-items: flex-start; gap: 12px; padding: 8px 12px; border: 1px solid ${mix("var(--oc-sdk-tone)", 40)}; border-radius: 8px; background: ${mix("var(--oc-sdk-tone)", 10)}; }
-.oc-sdk-banner-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.oc-sdk-banner-title { font-size: 0.8125rem; font-weight: 500; color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); }
-.oc-sdk-banner-body { font-size: 0.8125rem; color: ${muted}; }
-.oc-sdk-banner-action { flex: 0 0 auto; }
-
-.oc-sdk-separator { display: flex; align-items: center; gap: 8px; width: 100%; margin: 8px 0; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-separator::before, .oc-sdk-separator::after { content: ""; flex: 1 1 auto; height: 1px; background: ${mix(border, 40)}; }
-.oc-sdk-separator[data-labeled="false"]::after { display: none; }
-.oc-sdk-popup > .oc-sdk-separator { margin: 4px 0; }
-
-.oc-sdk-progress { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.oc-sdk-progress-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: ${muted}; font-variant-numeric: tabular-nums; }
-.oc-sdk-progress-track { height: 6px; border-radius: 9999px; background: ${border}; overflow: hidden; }
-.oc-sdk-progress-fill { height: 100%; border-radius: 9999px; background: var(--oc-sdk-tone, ${primary}); transform-origin: left; transition: transform 200ms ease-out; }
-
-.oc-sdk-menu { position: relative; display: inline-flex; }
-
-.oc-sdk-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.oc-sdk-text a { color: ${primaryText}; text-decoration: underline; text-underline-offset: 2px; }
-.oc-sdk-text img { display: block; max-width: 100%; margin: 8px 0; border-radius: 8px; border: 1px solid ${mix(border, 60)}; }
-`;
 
   // panel/api.ts
   var host = connectHost();
@@ -3716,18 +3716,9 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     "hi-fi": "final visual quality: tokens, type, color, spacing",
     interactive: "hi-fi plus working interactions and transitions"
   };
-  var FIDELITY_OPTIONS = [
-    ["hi-fi", "Hi-fi"],
-    ["wireframe", "Wireframe"],
-    ["interactive", "Interactive"]
-  ];
-  var NO_DESIGN_SYSTEM = "No design system";
   function findDesignSystem(id) {
     if (!id) return null;
     return DESIGN_SYSTEMS.find((preset) => preset.id === id) ?? null;
-  }
-  function designSystemLabel(id) {
-    return findDesignSystem(id)?.name ?? NO_DESIGN_SYSTEM;
   }
   function filterDesignSystems(query, presets = DESIGN_SYSTEMS) {
     const needle = query.trim().toLowerCase();
@@ -3884,6 +3875,12 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     if (look === "preset") return "use the chosen design-system preset";
     return questions ? "a new look \u2014 propose it first and confirm it with the questions" : "a new look \u2014 put its palette and type pairing in your Assumptions list";
   }
+  var BRIEF_MAX = 3e3;
+  function briefLimitError(brief) {
+    const length = brief.trim().length;
+    if (length <= BRIEF_MAX) return null;
+    return `The design brief is too long (${length} characters; the limit is ${BRIEF_MAX}). Shorten it, then send again.`;
+  }
   var CRAFT_BY_TYPE = {
     wireframe: ["layout", "content", "anti-slop", "states", "laws-of-ux", "responsive"],
     "hi-fi": ["layout", "typography", "color", "content", "anti-slop", "accessibility", "laws-of-ux", "responsive"],
@@ -3891,6 +3888,30 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     deck: ["layout", "typography", "color", "content", "anti-slop"],
     custom: ["layout", "typography", "color", "content", "anti-slop", "accessibility", "responsive"]
   };
+  var FIDELITY_FOR_TYPE = {
+    wireframe: "wireframe",
+    "hi-fi": "hi-fi",
+    prototype: "interactive",
+    deck: "hi-fi",
+    custom: "hi-fi"
+  };
+  function structureBrief(draft, ctx = {}) {
+    const text = draft.trim();
+    if (/^Goal:/m.test(text)) return draft;
+    const [first = "", ...rest] = text.split(/(?<=[.!?])\s+|\n+/);
+    const devices = ctx.devices && ctx.devices.length ? ctx.devices.join(", ") : "ask me";
+    return [
+      `Goal: ${first}`,
+      "Who it's for: ",
+      "Primary task: ",
+      "Feel / tone: ",
+      "Key screens: ",
+      `Devices: ${devices}`,
+      "Content I have (copy, data, brand assets): ",
+      "Must keep / avoid: ",
+      rest.length ? `Notes: ${rest.join(" ")}` : "Notes: "
+    ].join("\n");
+  }
   function workspacePathRule(dir) {
     return [
       `The workspace's absolute path is ${JSON.stringify(dir)} \u2014 it is the ONLY place design files are written.`,
@@ -4282,33 +4303,26 @@ ${TRUNCATED_MARKUP}` };
     deck: "Slide deck",
     custom: "Custom"
   };
-  var IDEAS = {
-    prototype: [
-      { title: "Gamified Habit App", description: "Daily streaks with playful rewards", prompt: "A gamified habit-tracking app with daily streaks, points, and playful rewards." },
-      { title: "Interactive Dashboard", description: "Live metrics, filters and charts", prompt: "An interactive dashboard with live metrics, filters, and charts." },
-      { title: "Booking Flow", description: "Pick a slot, confirm, pay", prompt: "An interactive booking flow: choose a date and slot, confirm the details, and pay." }
-    ],
-    "hi-fi": [
-      { title: "Luxury Property Website", description: "Elegant listings and detail pages", prompt: "A luxury property website with elegant listings, a photo gallery, and property detail pages." },
-      { title: "Product Pricing Page", description: "Three tiers, clear comparison", prompt: "A product pricing page with three tiers and a clear feature comparison." },
-      { title: "Marketing Landing Page", description: "Hero, features and a call to action", prompt: "A marketing landing page with a hero, feature highlights, and a strong call to action." }
-    ],
-    deck: [
-      { title: "New Hire Onboarding Guide", description: "A welcome deck for the first week", prompt: "A new-hire onboarding deck covering the first week, the tools, and the team." },
-      { title: "Q3 Product Review", description: "Results, learnings and next bets", prompt: "A Q3 product review deck: results, learnings, and the next bets." },
-      { title: "Sales Pitch", description: "Problem, solution, proof, pricing", prompt: "A sales pitch deck: problem, solution, proof, and pricing." }
-    ],
-    wireframe: [
-      { title: "Checkout Flow", description: "Cart to confirmation, boxes only", prompt: "A wireframe of the checkout flow from cart to confirmation, boxes and labels only." },
-      { title: "Onboarding Steps", description: "Sign-up to first value", prompt: "A wireframe of the onboarding steps from sign-up to first value." },
-      { title: "App Navigation", description: "Tabs, menus and top-level screens", prompt: "A wireframe of the app navigation: tabs, menus, and the top-level screens." }
-    ],
-    custom: [
-      { title: "Marketing Page", description: "A single page that sells", prompt: "A single marketing page that explains the product and asks for one clear action." },
-      { title: "Mobile App", description: "A multi-screen product", prompt: "A multi-screen mobile app for the core flow." },
-      { title: "Data Tool", description: "A dashboard or console", prompt: "A data tool: a dashboard or console for the team to read at a glance." }
-    ]
-  };
+  var STARTERS = [
+    { type: "hi-fi", title: "Landing page", description: "Hero, proof, one call to action", glyph: "desktop", prompt: "Goal: a landing page that gets visitors to start a trial.\nKey screens: home\nDevices: phone, desktop" },
+    { type: "hi-fi", title: "Settings & account", description: "Profile, billing, notifications", glyph: "desktop", prompt: "Goal: account settings for an existing app.\nKey screens: profile, billing, notifications\nDevices: desktop" },
+    { type: "hi-fi", title: "Dashboard home", description: "The first screen after sign-in", glyph: "desktop", prompt: "Goal: a dashboard home that shows what needs attention today.\nKey screens: dashboard\nDevices: desktop, tablet" },
+    { type: "wireframe", title: "Checkout flow", description: "Cart to confirmation", glyph: "phone", prompt: "Goal: map the checkout from cart to confirmation.\nKey screens: cart, details, payment, confirmation\nDevices: phone" },
+    { type: "wireframe", title: "Onboarding", description: "Sign-up to first value", glyph: "phone", prompt: "Goal: onboarding from sign-up to the first useful moment.\nKey screens: welcome, sign-up, setup, first task\nDevices: phone" },
+    { type: "wireframe", title: "App navigation", description: "Tabs, menus, top-level screens", glyph: "phone", prompt: "Goal: the top-level navigation and where each screen lives.\nDevices: phone, desktop" },
+    { type: "prototype", title: "Booking flow", description: "Pick a slot, confirm, pay", glyph: "phone", prompt: "Goal: a clickable booking flow.\nKey screens: pick a date, pick a slot, confirm, paid\nDevices: phone" },
+    { type: "prototype", title: "Data table", description: "Filter, sort, inspect a row", glyph: "desktop", prompt: "Goal: a working table with filters, sorting and a row detail panel.\nDevices: desktop" },
+    { type: "prototype", title: "Sign-in", description: "Email, code, errors", glyph: "phone", prompt: "Goal: a sign-in flow with every state: idle, sending, wrong code, locked.\nDevices: phone, desktop" },
+    { type: "deck", title: "Product review", description: "Results, learnings, next bets", glyph: "slide", prompt: "Goal: a quarterly product review deck.\nSlides: title, results, learnings, next bets, asks" },
+    { type: "deck", title: "Pitch", description: "Problem, solution, proof, ask", glyph: "slide", prompt: "Goal: a short pitch deck.\nSlides: problem, solution, proof, pricing, ask" },
+    { type: "deck", title: "Onboarding guide", description: "A new hire's first week", glyph: "slide", prompt: "Goal: a first-week guide for new hires.\nSlides: welcome, team, tools, week plan, contacts" },
+    { type: "custom", title: "From my project", description: "Redesign a screen you already have", glyph: "desktop", prompt: "Goal: redesign one existing screen in my project.\nScreen: \nKeep: " },
+    { type: "custom", title: "Social post", description: "1080\xD71080 artboards", glyph: "square", prompt: "Goal: three social posts for a launch.\nSize: 1080\xD71080" },
+    { type: "custom", title: "Print page", description: "A4 at 96 dpi", glyph: "page", prompt: "Goal: a one-page A4 flyer.\nSize: 794\xD71123" }
+  ];
+  var WORK_LIST_CAP = 5;
+  var BRIEF_COUNTER_FROM = 2e3;
+  var PAGE_PREFS_KEY = "prefs/page";
   var PERMISSION_TOAST_KEY = "ws-permission-notified";
   var PERMISSION_HEADS_UP = "The agent edits the Design Canvas workspace, which lives outside the chat folder \u2014 approve its file-edit permission prompts so it can write the design files.";
   var state = {
@@ -4361,21 +4375,30 @@ ${TRUNCATED_MARKUP}` };
     // ---- full-page creation surface ----
     /** The workspaces list (GET /workspaces joined with the cached ws/ scan). */
     workspaces: null,
-    /** The selected creation type; drives the headline, chip and the idea cards. */
+    /** The selected creation type; drives the type chip, the fidelity and the session title. */
     pageType: "hi-fi",
+    /** The Look chip's direction (its Directions tab), or Auto. */
     pageDirection: "auto",
-    pageFidelity: "hi-fi",
+    /** Where the look comes from; null = the default (Project with a project open, else Directions). */
+    pageLookKind: null,
+    /** "Ask me questions first". */
+    pageQuestions: true,
+    /** How many side-by-side directions, or 'ask'. */
+    pageOptions: "ask",
+    /** The device artboards; empty = "Ask me — detect from the project". */
+    pageDevices: [],
     prompt: "",
     references: [],
     /** An actionable error from a failed scaffold (the session still starts). */
     pageError: "",
     pageBusy: false,
-    typeMenuOpen: false,
-    /** The `+` attach overlay: its open state. */
-    attachMenuOpen: false,
-    /** The design-system picker panel open in the composer. */
-    dsMenuOpen: false,
-    /** The chosen design-system preset id, or null for "No design system". */
+    /** The one composer overlay open right now, or null. */
+    overlay: null,
+    /** The Look popover's visible tab. */
+    lookTab: "directions",
+    /** "Your design work" shows every row instead of the first WORK_LIST_CAP. */
+    workShowAll: false,
+    /** The chosen design-system preset id (the Look chip's Presets tab), or null. */
     pageDesignSystemId: null
   };
   var REAL_PANE_MIN_PX = 64;
@@ -4400,7 +4423,8 @@ ${TRUNCATED_MARKUP}` };
   var serverAnnounceEl = null;
   var promptEl = null;
   var sendEl = null;
-  var accentFillEl = null;
+  var counterEl = null;
+  var pageLocationEl = null;
   var pageEnter = true;
   var dsQuery = "";
   var dsHighlight = null;
@@ -4544,7 +4568,10 @@ ${TRUNCATED_MARKUP}` };
         fidelity: choice.fidelity,
         brief: brief || void 0,
         // Omitted for "No design system" so the request stays as before.
-        designSystemId: choice.designSystemId ?? void 0
+        designSystemId: choice.designSystemId ?? void 0,
+        // The service forwards both to the scaffold (R4); omitted when not chosen.
+        ...choice.devices?.length ? { devices: choice.devices } : {},
+        ...choice.projectDir ? { projectDir: choice.projectDir } : {}
       });
     } catch (error) {
       scaffold = { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -5074,7 +5101,9 @@ ${TRUNCATED_MARKUP}` };
       type: spec.type,
       direction: spec.direction,
       fidelity: spec.fidelity,
-      designSystemId: spec.designSystemId ?? null
+      designSystemId: spec.designSystemId ?? null,
+      devices: spec.devices,
+      projectDir: spec.projectDir
     }, { notify: false });
     if (!outcome.ok) {
       await host.toast({ kind: "error", message: outcome.error });
@@ -5086,22 +5115,47 @@ ${TRUNCATED_MARKUP}` };
     }
     return { kind: "new", workspace: outcome.record, url: outcome.url };
   }
+  function effectiveLookKind() {
+    const kind = state.pageLookKind;
+    if (kind === "project" && state.directory) return "project";
+    if (kind === "preset" && findDesignSystem(state.pageDesignSystemId)) return "preset";
+    if (kind === "direction") return "direction";
+    return state.directory ? "project" : "direction";
+  }
+  function pageBriefSpec() {
+    const kind = effectiveLookKind();
+    const look = kind === "project" ? "project" : kind === "preset" ? "preset" : "new";
+    return {
+      type: state.pageType,
+      direction: kind === "direction" ? state.pageDirection : "auto",
+      fidelity: FIDELITY_FOR_TYPE[state.pageType],
+      brief: state.prompt.trim(),
+      designSystemId: kind === "preset" ? state.pageDesignSystemId : null,
+      projectDir: state.directory,
+      questions: state.pageQuestions,
+      options: state.pageOptions,
+      ...state.pageDevices.length ? { devices: [...state.pageDevices] } : {},
+      look
+    };
+  }
+  function briefTitle(brief) {
+    const line = brief.split("\n").map((text) => text.trim()).find(Boolean) ?? "";
+    const clause = line.replace(/^goal:\s*/i, "").split(/[.,;!?—–]|\s-\s/)[0] ?? "";
+    const title = clause.trim().slice(0, 40).trim();
+    return title.charAt(0).toUpperCase() + title.slice(1);
+  }
   async function startNewDesign() {
     if (state.pageBusy || referencePending) return;
     state.pageBusy = true;
     state.pageError = "";
-    const spec = {
-      type: state.pageType,
-      direction: state.pageDirection,
-      fidelity: state.pageFidelity,
-      brief: state.prompt.trim(),
-      designSystemId: state.pageDesignSystemId
-    };
+    const spec = pageBriefSpec();
     const references = state.surface === "page" ? [...state.references] : void 0;
+    const title = `Design \xB7 ${briefTitle(spec.brief) || PAGE_TYPE_LABELS[spec.type]}`;
     rerender();
     try {
-      if (spec.brief.length > GUEST_COMPOSE_TEXT_MAX) {
-        state.pageError = `The design brief is too long (${spec.brief.length} of ${GUEST_COMPOSE_TEXT_MAX} characters). Shorten it, then send again.`;
+      const tooLong = briefLimitError(spec.brief);
+      if (tooLong) {
+        state.pageError = tooLong;
         rerender();
         await host.toast({ kind: "error", message: state.pageError });
         return;
@@ -5113,7 +5167,7 @@ ${TRUNCATED_MARKUP}` };
         const workspace = prep.workspace ?? state.workspace ?? void 0;
         await startDesignSession({
           id: `new-design:${Date.now()}`,
-          title: `New design \xB7 ${spec.type}`,
+          title,
           url: "",
           type: spec.type,
           brief: spec.brief,
@@ -5126,7 +5180,7 @@ ${TRUNCATED_MARKUP}` };
       }
       await startDesignSession({
         id: `new-design:${Date.now()}`,
-        title: `New design \xB7 ${spec.type}`,
+        title,
         url: prep.url,
         type: spec.type,
         brief: spec.brief,
@@ -5825,39 +5879,18 @@ ${TRUNCATED_MARKUP}` };
     svg.innerHTML = paths;
     return svg;
   }
-  function ideaThumb(variant) {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", "0 0 56 40");
-    svg.setAttribute("width", "56");
-    svg.setAttribute("height", "40");
-    svg.setAttribute("aria-hidden", "true");
-    const add = (tag, attrs) => {
-      const node = document.createElementNS(SVG_NS, tag);
-      for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, String(value));
-      svg.append(node);
-    };
-    add("rect", { x: 0, y: 0, width: 56, height: 40, rx: 7, class: "ds-thumb-bg" });
-    if (variant === 0) {
-      add("rect", { x: 8, y: 8, width: 22, height: 4, rx: 2, class: "ds-thumb-accent" });
-      add("rect", { x: 8, y: 16, width: 40, height: 8, rx: 2, class: "ds-thumb-line" });
-      add("rect", { x: 8, y: 28, width: 18, height: 5, rx: 2, class: "ds-thumb-line" });
-      add("rect", { x: 30, y: 28, width: 18, height: 5, rx: 2, class: "ds-thumb-line" });
-    } else if (variant === 1) {
-      add("rect", { x: 8, y: 7, width: 40, height: 5, rx: 2, class: "ds-thumb-line" });
-      add("rect", { x: 8, y: 16, width: 19, height: 16, rx: 3, class: "ds-thumb-accent" });
-      add("rect", { x: 29, y: 16, width: 19, height: 7, rx: 2, class: "ds-thumb-line" });
-      add("rect", { x: 29, y: 25, width: 19, height: 7, rx: 2, class: "ds-thumb-line" });
-    } else if (variant === 2) {
-      add("rect", { x: 8, y: 8, width: 12, height: 24, rx: 3, class: "ds-thumb-accent" });
-      add("rect", { x: 24, y: 9, width: 24, height: 4, rx: 2, class: "ds-thumb-line" });
-      add("rect", { x: 24, y: 17, width: 24, height: 4, rx: 2, class: "ds-thumb-line" });
-      add("rect", { x: 24, y: 25, width: 16, height: 4, rx: 2, class: "ds-thumb-line" });
-    } else {
-      add("rect", { x: 8, y: 12, width: 12, height: 16, rx: 3, class: "ds-thumb-line" });
-      add("rect", { x: 22, y: 12, width: 12, height: 16, rx: 3, class: "ds-thumb-accent" });
-      add("rect", { x: 36, y: 12, width: 12, height: 16, rx: 3, class: "ds-thumb-line" });
-    }
-    return svg;
+  var GLYPH_PATHS = {
+    phone: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/>',
+    desktop: '<rect x="2.5" y="4" width="19" height="12.5" rx="1.5"/><path d="M9 20.5h6"/><path d="M12 16.5v4"/>',
+    slide: '<rect x="2.5" y="5" width="19" height="12" rx="1.5"/><path d="M6 9h7"/><path d="M6 12.5h4"/>',
+    square: '<rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M4 15l4.5-4 4 3.5 3-2.5L20 15"/>',
+    page: '<path d="M6.5 2.5h8l3.5 3.5v15.5h-11.5z"/><path d="M14.5 2.5v3.5H18"/><path d="M9 11h6"/><path d="M9 14.5h6"/>'
+  };
+  function starterGlyph(glyph) {
+    const span = q("span", `ds-glyph ds-glyph-${glyph}`);
+    span.setAttribute("aria-hidden", "true");
+    span.append(svgIcon(GLYPH_PATHS[glyph], 22));
+    return span;
   }
   function canSend() {
     return !state.pageBusy && !referencePending && state.prompt.trim() !== "";
@@ -5871,28 +5904,29 @@ ${TRUNCATED_MARKUP}` };
       sendEl.setAttribute("aria-busy", String(state.pageBusy));
       sendEl.title = state.pageBusy ? "Starting the design session\u2026" : referencePending ? "Wait for the reference to finish checking" : "Start the design session";
     }
-    if (accentFillEl) {
-      const progress = Math.min(1, state.prompt.trim().length / 140);
-      accentFillEl.style.width = `${6 + progress * 94}%`;
+    if (counterEl) {
+      const length = state.prompt.length;
+      counterEl.hidden = length < BRIEF_COUNTER_FROM;
+      counterEl.textContent = `${length} / ${BRIEF_MAX}`;
+      counterEl.classList.toggle("warn", length >= BRIEF_MAX * 0.9);
     }
   }
   function nextOverlayState(current, triggerId) {
     return current === triggerId ? null : triggerId;
   }
   function currentOverlay() {
-    if (state.typeMenuOpen) return "type";
-    if (state.attachMenuOpen) return "attach";
-    if (state.dsMenuOpen) return "ds";
-    return null;
+    return state.overlay;
   }
   var refocusOverlayTrigger = null;
+  var poppingOverlay = null;
   function toggleMenu(which) {
     if (currentOverlay() === "attach") cancelReferenceValidation();
     const next = nextOverlayState(currentOverlay(), which);
-    state.typeMenuOpen = next === "type";
-    state.attachMenuOpen = next === "attach";
-    state.dsMenuOpen = next === "ds";
-    if (next === "ds") {
+    state.overlay = next;
+    poppingOverlay = next;
+    if (next === "look") {
+      const kind = effectiveLookKind();
+      state.lookTab = kind === "project" ? "project" : kind === "preset" ? "presets" : "directions";
       dsQuery = "";
       dsHighlight = state.pageDesignSystemId;
     }
@@ -5903,17 +5937,13 @@ ${TRUNCATED_MARKUP}` };
     const open = currentOverlay();
     if (!open) return;
     if (open === "attach") cancelReferenceValidation();
-    state.typeMenuOpen = false;
-    state.attachMenuOpen = false;
-    state.dsMenuOpen = false;
+    state.overlay = null;
     refocusOverlayTrigger = refocus ? open : null;
     renderPage();
   }
   function closeActiveOverlay(id) {
     if (id === "attach") cancelReferenceValidation();
-    state.typeMenuOpen = false;
-    state.attachMenuOpen = false;
-    state.dsMenuOpen = false;
+    state.overlay = null;
     refocusOverlayTrigger = id;
     renderPage();
   }
@@ -5933,15 +5963,16 @@ ${TRUNCATED_MARKUP}` };
     pageBody.replaceChildren();
     promptEl = null;
     sendEl = null;
-    accentFillEl = null;
+    counterEl = null;
     const shell = q("div", "ds-home");
     if (pageEnter) {
       shell.classList.add("ds-enter");
       pageEnter = false;
     }
-    shell.append(renderHero(), renderComposer(), renderWorkspaceRow(), renderIdeas(), renderCanvasSection(), renderFooter());
+    shell.append(renderHeader(), renderComposer(), renderContextRow(), renderStarters(), renderCanvasSection(), renderFooter());
     pageBody.append(shell);
     updateComposerState();
+    poppingOverlay = null;
     focusPendingTrigger();
     if (referenceFocusId) {
       const target = Array.from(pageBody.querySelectorAll(".ds-reference-remove")).find((button2) => button2.dataset.referenceId === referenceFocusId);
@@ -5955,19 +5986,17 @@ ${TRUNCATED_MARKUP}` };
     refocusOverlayTrigger = null;
     pageBody?.querySelector(`[data-overlay-trigger="${id}"]`)?.focus();
   }
-  function renderHero() {
-    const hero = q("header", "ds-hero");
-    const title = q("h1", "ds-hero-title");
-    title.append(document.createTextNode("Let's create "));
-    title.append(q("span", "ds-hero-type", PAGE_TYPE_LABELS[state.pageType]));
-    hero.append(title);
-    hero.append(q("p", "ds-hero-sub", "Good work starts here"));
+  function renderHeader() {
+    const header = q("header", "ds-header");
+    header.append(q("div", "ds-eyebrow", "Design Canvas"));
+    header.append(q("h1", "ds-title", "Design on a live canvas"));
+    header.append(q("p", "ds-lede", "Describe it. The agent reads your project, asks what it needs, shows options, then builds real screens you can click to edit."));
     if (state.pageError) {
       const error = q("div", "ds-home-warn", state.pageError);
       error.setAttribute("role", "alert");
-      hero.append(error);
+      header.append(error);
     }
-    return hero;
+    return header;
   }
   function anchoredPopover(options) {
     const anchor = q("div", "ds-ds-anchor");
@@ -5975,6 +6004,7 @@ ${TRUNCATED_MARKUP}` };
     if (!options.open) return anchor;
     options.panel.setAttribute("role", "dialog");
     options.panel.setAttribute("aria-label", options.label);
+    if (poppingOverlay && options.trigger.dataset.overlayTrigger === poppingOverlay) options.panel.classList.add("ds-pop");
     const backdrop = q("div", "ds-ds-backdrop");
     if (options.closeOnBackdrop) backdrop.addEventListener("click", () => options.onClose());
     anchor.append(backdrop);
@@ -5997,11 +6027,49 @@ ${TRUNCATED_MARKUP}` };
     });
     return anchor;
   }
+  var CARET_ICON = '<path d="M6 9l6 6 6-6"/>';
+  function overlayChip(id, label, ariaLabel) {
+    const chip = q("button", "ds-chip ds-menu-trigger");
+    chip.type = "button";
+    chip.dataset.overlayTrigger = id;
+    chip.append(q("span", "ds-chip-label", label));
+    chip.append(svgIcon(CARET_ICON, 14));
+    chip.title = ariaLabel;
+    chip.setAttribute("aria-label", `${ariaLabel}: ${label}`);
+    chip.setAttribute("aria-expanded", String(state.overlay === id));
+    chip.disabled = state.pageBusy;
+    chip.addEventListener("click", () => toggleMenu(id));
+    return chip;
+  }
+  function lookChipLabel() {
+    const kind = effectiveLookKind();
+    if (kind === "project") return "Look: Match project";
+    if (kind === "preset") return `Look: ${findDesignSystem(state.pageDesignSystemId)?.name ?? "Preset"}`;
+    return `Look: ${state.pageDirection === "auto" ? "Auto" : DIRECTIONS[state.pageDirection].name}`;
+  }
+  var DEVICE_ORDER = ["phone", "tablet", "desktop"];
+  function deviceName(id) {
+    const label = DEVICE_PRESETS[id].label;
+    return label.charAt(0).toUpperCase() + label.slice(1);
+  }
+  function devicesChipLabel() {
+    const chosen = DEVICE_ORDER.filter((id) => state.pageDevices.includes(id));
+    return `Devices: ${chosen.length ? chosen.map(deviceName).join(" + ") : "Ask"}`;
+  }
+  function applyStructureBrief() {
+    if (state.pageBusy) return;
+    const next = structureBrief(state.prompt, { devices: state.pageDevices });
+    if (next === state.prompt) return;
+    state.prompt = next;
+    if (promptEl) promptEl.value = next;
+    updateComposerState();
+    promptEl?.focus();
+  }
   function renderComposer() {
     const box = q("div", "ds-composer");
     const area = q("textarea", "ds-composer-input");
     area.rows = 3;
-    area.placeholder = "Describe the design you want\u2026";
+    area.placeholder = 'What are we designing? e.g. "Budget app onboarding \u2014 3 screens, phone first"';
     area.value = state.prompt;
     area.setAttribute("aria-label", "Design brief");
     area.disabled = state.pageBusy;
@@ -6018,74 +6086,119 @@ ${TRUNCATED_MARKUP}` };
     promptEl = area;
     const bar = q("div", "ds-composer-bar");
     const plus = q("button", "ds-plus ds-menu-trigger");
+    plus.type = "button";
     plus.dataset.overlayTrigger = "attach";
     plus.append(svgIcon('<path d="M12 5v14"/><path d="M5 12h14"/>'));
     plus.title = "Add a reference";
     plus.setAttribute("aria-label", "Add a reference");
     plus.disabled = state.pageBusy || referencePending;
-    plus.setAttribute("aria-expanded", String(state.attachMenuOpen));
+    plus.setAttribute("aria-expanded", String(state.overlay === "attach"));
     plus.addEventListener("click", () => toggleMenu("attach"));
     const attachAnchor = anchoredPopover({
-      open: state.attachMenuOpen,
+      open: state.overlay === "attach",
       trigger: plus,
       panel: renderAttachPanel(),
       label: "Add a reference",
       optionSelector: ".ds-menu-item",
       onClose: () => closeMenus(true)
     });
-    const designSystem = q("button", "ds-chip ds-ds-trigger ds-menu-trigger");
-    designSystem.dataset.overlayTrigger = "ds";
-    designSystem.append(designSystemIcon());
-    designSystem.append(q("span", "ds-chip-label", designSystemLabel(state.pageDesignSystemId)));
-    designSystem.append(svgIcon('<path d="M6 9l6 6 6-6"/>', 14));
-    designSystem.title = "Choose a design system";
-    designSystem.setAttribute("aria-label", `Design system: ${designSystemLabel(state.pageDesignSystemId)}`);
-    designSystem.disabled = state.pageBusy;
-    designSystem.addEventListener("click", () => toggleMenu("ds"));
-    const chip = q("button", "ds-chip ds-menu-trigger");
-    chip.dataset.overlayTrigger = "type";
-    chip.append(q("span", "ds-chip-label", PAGE_TYPE_LABELS[state.pageType]));
-    chip.append(svgIcon('<path d="M6 9l6 6 6-6"/>', 14));
-    chip.title = "Choose the design type";
-    chip.setAttribute("aria-label", "Choose the design type");
-    chip.disabled = state.pageBusy;
-    chip.addEventListener("click", () => toggleMenu("type"));
-    const spacer = q("div", "ds-composer-spacer");
-    const send = q("button", "ds-send");
-    send.append(svgIcon('<path d="M5 12h14"/><path d="M13 6l6 6-6 6"/>', 20));
-    send.title = "Start the design session";
-    send.setAttribute("aria-label", "Start the design session");
-    send.addEventListener("click", () => {
-      if (canSend()) void startNewDesign();
-    });
-    sendEl = send;
-    const dsAnchor = anchoredPopover({
-      open: state.dsMenuOpen,
-      trigger: designSystem,
-      panel: renderDesignSystemPanel(),
-      label: "Choose a design system",
-      optionSelector: ".ds-ds-item",
-      onClose: () => closeMenus(true)
-    });
     const typeAnchor = anchoredPopover({
-      open: state.typeMenuOpen,
-      trigger: chip,
+      open: state.overlay === "type",
+      trigger: overlayChip("type", PAGE_TYPE_LABELS[state.pageType], "Design type"),
       panel: renderTypeMenu(),
       label: "Choose the design type",
       optionSelector: ".ds-menu-item",
       onClose: () => closeMenus(true)
     });
-    const children = [];
-    children.push(attachAnchor);
-    children.push(dsAnchor, typeAnchor, spacer, send);
-    bar.append(...children);
+    const lookAnchor = anchoredPopover({
+      open: state.overlay === "look",
+      trigger: overlayChip("look", lookChipLabel(), "Look"),
+      panel: renderLookPanel(),
+      label: "Choose the look",
+      optionSelector: ".ds-look-option:not(:disabled), .ds-ds-item",
+      onClose: () => closeMenus(true)
+    });
+    const devicesAnchor = anchoredPopover({
+      open: state.overlay === "devices",
+      trigger: overlayChip("devices", devicesChipLabel(), "Devices"),
+      panel: renderDevicesPanel(),
+      label: "Choose the devices",
+      optionSelector: ".ds-device-option input",
+      onClose: () => closeMenus(true)
+    });
+    const spacer = q("div", "ds-composer-spacer");
+    const structure = q("button", "ds-ghost ds-structure", "Structure brief");
+    structure.type = "button";
+    structure.title = "Turn the draft into Goal, audience, screens, devices and the rest";
+    structure.disabled = state.pageBusy;
+    structure.addEventListener("click", () => applyStructureBrief());
+    const send = q("button", "ds-send");
+    send.type = "button";
+    send.append(q("span", "ds-send-label", "Start design"));
+    send.append(svgIcon('<path d="M9 6l6 6-6 6"/>', 16));
+    send.title = "Start the design session";
+    send.setAttribute("aria-label", "Start design");
+    send.addEventListener("click", () => {
+      if (canSend()) void startNewDesign();
+    });
+    sendEl = send;
+    const actions = q("div", "ds-composer-actions");
+    actions.append(structure, send);
+    bar.append(attachAnchor, typeAnchor, lookAnchor, devicesAnchor, spacer, actions);
     box.append(area, renderReferenceDraft(), bar);
-    box.classList.toggle("ds-overlay-open", state.attachMenuOpen || state.dsMenuOpen || state.typeMenuOpen);
-    const track = q("div", "ds-composer-accent");
-    accentFillEl = q("div", "ds-composer-accent-fill");
-    track.append(accentFillEl);
-    box.append(track);
-    return box;
+    box.classList.toggle("ds-overlay-open", state.overlay !== null);
+    const wrap = q("div", "ds-composer-wrap");
+    wrap.append(box, renderToggles());
+    return wrap;
+  }
+  function renderToggles() {
+    const row = q("div", "ds-toggles");
+    const questions = q("div", "ds-toggle");
+    const sw = q("button", "ds-switch");
+    sw.type = "button";
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", String(state.pageQuestions));
+    sw.setAttribute("aria-labelledby", "ds-questions-label");
+    sw.setAttribute("aria-describedby", "ds-questions-hint");
+    sw.disabled = state.pageBusy;
+    sw.append(q("span", "ds-switch-thumb"));
+    sw.addEventListener("click", () => {
+      setPagePref({ questions: !state.pageQuestions }, ".ds-switch");
+    });
+    const questionsText = q("div", "ds-toggle-text");
+    const questionsLabel = q("span", "ds-toggle-label", "Ask me questions first");
+    questionsLabel.id = "ds-questions-label";
+    const questionsHint = q("span", "ds-toggle-hint", "3\u20136 questions, with my recommended answers");
+    questionsHint.id = "ds-questions-hint";
+    questionsText.append(questionsLabel, questionsHint);
+    questions.append(sw, questionsText);
+    const options = q("div", "ds-toggle");
+    const seg = q("div", "ds-seg");
+    seg.setAttribute("role", "radiogroup");
+    seg.setAttribute("aria-labelledby", "ds-options-label");
+    const choices = [["ask", "Ask"], [1, "1"], [2, "2"], [3, "3"]];
+    for (const [value, label] of choices) {
+      const on = state.pageOptions === value;
+      const item = q("button", `ds-seg-item${on ? " on" : ""}`, label);
+      item.type = "button";
+      item.setAttribute("role", "radio");
+      item.setAttribute("aria-checked", String(on));
+      if (value !== "ask") item.setAttribute("aria-label", `${label} option${value === 1 ? "" : "s"}`);
+      item.disabled = state.pageBusy;
+      item.dataset.option = String(value);
+      item.addEventListener("click", () => setPagePref({ options: value }, `.ds-seg-item[data-option="${value}"]`));
+      seg.append(item);
+    }
+    const optionsText = q("div", "ds-toggle-text");
+    const optionsLabel = q("span", "ds-toggle-label", "Options");
+    optionsLabel.id = "ds-options-label";
+    optionsText.append(optionsLabel, q("span", "ds-toggle-hint", "Side-by-side directions to pick from"));
+    options.append(optionsText, seg);
+    const counter = q("span", "ds-counter");
+    counter.setAttribute("aria-live", "polite");
+    counterEl = counter;
+    row.append(questions, options, counter);
+    return row;
   }
   function referenceDisplayLabel(reference) {
     const parts = reference.path.split("/").filter(Boolean);
@@ -6141,6 +6254,7 @@ Source: ${reference.sourceDirectory}`;
     for (const type of DESIGN_TYPES) {
       const on = type === state.pageType;
       const item = q("button", `ds-menu-item${on ? " on" : ""}`);
+      item.type = "button";
       item.setAttribute("role", "option");
       item.setAttribute("aria-selected", on ? "true" : "false");
       const main2 = q("span", "ds-menu-main");
@@ -6154,32 +6268,9 @@ Source: ${reference.sourceDirectory}`;
       });
       list.append(item);
     }
-    panel.append(list, renderOptions());
-    if (state.typeMenuOpen) queueMicrotask(() => panel.querySelector(".ds-menu-item")?.focus());
+    panel.append(list);
+    if (state.overlay === "type") queueMicrotask(() => panel.querySelector(".ds-menu-item")?.focus());
     return panel;
-  }
-  function renderOptions() {
-    const row = q("div", "ds-options");
-    const direction = q("select");
-    direction.append(option("auto", "Auto (infer from the brief)"));
-    for (const id of Object.keys(DIRECTIONS)) direction.append(option(id, DIRECTIONS[id].name));
-    direction.value = state.pageDirection;
-    direction.addEventListener("change", () => {
-      state.pageDirection = direction.value;
-    });
-    const fidelity = q("select");
-    for (const [value, label] of FIDELITY_OPTIONS) fidelity.append(option(value, label));
-    fidelity.value = state.pageFidelity;
-    fidelity.addEventListener("change", () => {
-      state.pageFidelity = fidelity.value;
-    });
-    row.append(field("Direction", direction), field("Fidelity", fidelity));
-    return row;
-  }
-  function field(label, control) {
-    const wrap = q("label", "ds-field");
-    wrap.append(q("span", "ds-field-label", label), control);
-    return wrap;
   }
   function attachProject() {
     const ws = state.workspace;
@@ -6397,28 +6488,113 @@ Source: ${reference.sourceDirectory}`;
         feedback.prepend(spinner);
       }
       panel.append(feedback);
-      if (state.attachMenuOpen) queueMicrotask(() => input.focus());
+      if (state.overlay === "attach") queueMicrotask(() => input.focus());
     } else {
       panel.append(q("div", "ds-attach-note", projectHint));
     }
     return panel;
   }
-  function designSystemIcon() {
-    return svgIcon(
-      '<circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>',
-      15
-    );
+  function applyLook(kind, value) {
+    state.pageLookKind = kind;
+    if (kind === "preset") state.pageDesignSystemId = findDesignSystem(value?.presetId)?.id ?? null;
+    else state.pageDesignSystemId = null;
+    if (kind === "preset" && !state.pageDesignSystemId) state.pageLookKind = null;
+    if (kind === "direction" && value?.direction) state.pageDirection = value.direction;
+    void savePagePrefs();
+    closeActiveOverlay("look");
   }
-  function applyDesignSystem(id) {
-    state.pageDesignSystemId = findDesignSystem(id)?.id ?? null;
-    closeActiveOverlay("ds");
+  function renderLookPanel() {
+    const panel = q("div", "ds-ds-panel ds-look-panel");
+    const tabs = q("div", "ds-look-tabs");
+    tabs.setAttribute("role", "tablist");
+    tabs.setAttribute("aria-label", "Where the look comes from");
+    const entries = [["project", "Project"], ["presets", "Presets"], ["directions", "Directions"]];
+    const tabEls = [];
+    for (const [id, label] of entries) {
+      const on = state.lookTab === id;
+      const tab = q("button", "ds-look-tab", label);
+      tab.type = "button";
+      tab.id = `ds-look-tab-${id}`;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", String(on));
+      tab.setAttribute("aria-controls", "ds-look-tabpanel");
+      tab.tabIndex = on ? 0 : -1;
+      tab.addEventListener("click", () => {
+        if (state.lookTab === id) return;
+        state.lookTab = id;
+        dsQuery = "";
+        renderPage();
+        queueMicrotask(() => pageBody?.querySelector(`#ds-look-tab-${id}`)?.focus());
+      });
+      tabEls.push(tab);
+      tabs.append(tab);
+    }
+    tabs.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const index = entries.findIndex(([id]) => id === state.lookTab);
+      tabEls[popoverStep(index, entries.length, event.key === "ArrowRight" ? 1 : -1)]?.click();
+    });
+    const body = q("div", "ds-look-body");
+    body.id = "ds-look-tabpanel";
+    body.setAttribute("role", "tabpanel");
+    body.setAttribute("aria-labelledby", `ds-look-tab-${state.lookTab}`);
+    if (state.lookTab === "project") body.append(renderLookProject());
+    else if (state.lookTab === "presets") body.append(renderDesignSystemPanel());
+    else body.append(renderLookDirections());
+    panel.append(tabs, body);
+    if (state.overlay === "look" && state.lookTab !== "presets") {
+      queueMicrotask(() => panel.querySelector(".ds-look-option:not(:disabled)")?.focus());
+    }
+    return panel;
+  }
+  function lookOption(title, hint, on, disabled, onClick, extra) {
+    const item = q("button", `ds-menu-item ds-look-option${on ? " on" : ""}`);
+    item.type = "button";
+    item.setAttribute("aria-pressed", String(on));
+    item.disabled = disabled || state.pageBusy;
+    const main2 = q("span", "ds-menu-main");
+    main2.append(q("strong", void 0, title));
+    main2.append(q("span", "ds-menu-hint ds-look-hint", hint));
+    if (extra) main2.append(extra);
+    item.append(main2);
+    if (on) item.append(svgIcon('<path d="M20 6L9 17l-5-5"/>', 16));
+    if (!item.disabled) item.addEventListener("click", onClick);
+    return item;
+  }
+  function renderLookProject() {
+    const list = q("div", "ds-look-list");
+    const dir = state.directory;
+    const hint = dir ? `Use its colors, type, radii and components. The agent reads ${fileBaseName(dir)} first.` : "Open a project in OpenChamber to use this";
+    list.append(lookOption("Match this project", hint, effectiveLookKind() === "project", !dir, () => applyLook("project")));
+    return list;
+  }
+  function directionSwatches(id) {
+    const strip = q("span", "ds-ds-swatches ds-look-swatches");
+    strip.setAttribute("aria-hidden", "true");
+    for (const value of Object.values(DIRECTIONS[id].tokens).slice(0, 6)) {
+      const swatch = q("span", "ds-ds-swatch");
+      swatch.style.background = value;
+      strip.append(swatch);
+    }
+    return strip;
+  }
+  function renderLookDirections() {
+    const list = q("div", "ds-look-list");
+    const current = effectiveLookKind() === "direction" ? state.pageDirection : null;
+    list.append(lookOption("Auto", "Infer from the brief", current === "auto", false, () => applyLook("direction", { direction: "auto" })));
+    for (const id of Object.keys(DIRECTIONS)) {
+      const direction = DIRECTIONS[id];
+      list.append(lookOption(direction.name, `For ${direction.when}`, current === id, false, () => applyLook("direction", { direction: id }), directionSwatches(id)));
+    }
+    return list;
   }
   function renderDesignSystemDetail(detail, id) {
     detail.replaceChildren();
     const preset = findDesignSystem(id);
     if (!preset) {
-      detail.append(q("div", "ds-ds-detail-name", NO_DESIGN_SYSTEM));
-      detail.append(q("p", "ds-ds-detail-desc", "Start from scratch \u2014 no preset. The design system comes out of the brief."));
+      detail.append(q("div", "ds-ds-detail-name", "No preset"));
+      detail.append(q("p", "ds-ds-detail-desc", "Point at a preset to see its colors. Its tokens and DESIGN.md become the rules every screen follows."));
       return;
     }
     detail.append(q("div", "ds-ds-detail-name", preset.name));
@@ -6438,30 +6614,28 @@ Source: ${reference.sourceDirectory}`;
     }
   }
   function renderDesignSystemPanel() {
-    const panel = q("div", "ds-ds-panel");
+    const panel = q("div", "ds-ds-presets");
     const toolbar = q("div", "ds-ds-toolbar");
     const search = q("input", "ds-ds-search");
     search.type = "search";
-    search.placeholder = "Search design systems";
-    search.setAttribute("aria-label", "Search design systems");
+    search.placeholder = "Search presets";
+    search.setAttribute("aria-label", "Search design-system presets");
     search.value = dsQuery;
-    const create = q("button", "ds-ds-create", "+ Create");
-    create.title = "Custom design systems are not available yet";
-    create.setAttribute("aria-label", "Create a design system");
-    create.disabled = true;
-    toolbar.append(search, create);
+    toolbar.append(search);
     const body = q("div", "ds-ds-body");
     const list = q("div", "ds-ds-list");
     list.setAttribute("role", "listbox");
-    list.setAttribute("aria-label", "Design systems");
+    list.setAttribute("aria-label", "Design-system presets");
     const detail = q("div", "ds-ds-detail");
     body.append(list, detail);
     const actions = q("div", "ds-ds-foot");
-    const clear = q("button", "ds-ds-clear", "Clear");
-    clear.addEventListener("click", () => applyDesignSystem(null));
+    const clear = q("button", "ds-ds-clear", "No preset");
+    clear.type = "button";
+    clear.addEventListener("click", () => applyLook("preset", { presetId: null }));
     actions.append(clear);
     panel.append(toolbar, body, actions);
     const itemRefs = [];
+    const chosen = effectiveLookKind() === "preset" ? state.pageDesignSystemId : null;
     const setHighlight = (id) => {
       if (dsHighlight === id) return;
       dsHighlight = id;
@@ -6476,31 +6650,30 @@ Source: ${reference.sourceDirectory}`;
       itemRefs.length = 0;
       list.replaceChildren();
       const add = (preset) => {
-        const id = preset?.id ?? null;
-        const on = dsHighlight === id;
-        const item = q("button", `ds-ds-item${on ? " on" : ""}`);
+        const on = dsHighlight === preset.id;
+        const item = q("button", `ds-ds-item${on ? " on" : ""}${chosen === preset.id ? " chosen" : ""}`);
+        item.type = "button";
         item.setAttribute("role", "option");
         item.setAttribute("aria-selected", on ? "true" : "false");
         const main2 = q("div", "ds-ds-item-main");
-        main2.append(q("span", "ds-ds-item-name", preset ? preset.name : NO_DESIGN_SYSTEM));
-        if (preset) main2.append(q("span", "ds-ds-item-cat", preset.category));
+        main2.append(q("span", "ds-ds-item-name", preset.name));
+        main2.append(q("span", "ds-ds-item-cat", preset.category));
         item.append(main2);
         const check = q("span", "ds-ds-check");
         check.append(svgIcon('<path d="M20 6L9 17l-5-5"/>', 16));
         item.append(check);
-        item.addEventListener("click", () => applyDesignSystem(id));
-        item.addEventListener("mouseenter", () => setHighlight(id));
-        item.addEventListener("focus", () => setHighlight(id));
-        itemRefs.push({ id, el: item });
+        item.addEventListener("click", () => applyLook("preset", { presetId: preset.id }));
+        item.addEventListener("mouseenter", () => setHighlight(preset.id));
+        item.addEventListener("focus", () => setHighlight(preset.id));
+        itemRefs.push({ id: preset.id, el: item });
         list.append(item);
       };
-      add(null);
       const shown = filterDesignSystems(dsQuery);
       for (const group of designSystemGroups(shown)) {
         list.append(q("div", "ds-ds-group", group.category));
         for (const preset of group.presets) add(preset);
       }
-      if (shown.length === 0) list.append(q("div", "ds-ds-empty", "No design systems match your search."));
+      if (shown.length === 0) list.append(q("div", "ds-ds-empty", "No presets match your search."));
     };
     buildList();
     renderDesignSystemDetail(detail, dsHighlight);
@@ -6513,51 +6686,150 @@ Source: ${reference.sourceDirectory}`;
       renderDesignSystemDetail(detail, dsHighlight);
     });
     panel.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && event.target !== create) {
+      if (event.key === "Enter" && event.target !== clear && dsHighlight) {
         event.preventDefault();
-        applyDesignSystem(dsHighlight);
+        applyLook("preset", { presetId: dsHighlight });
       }
     });
-    queueMicrotask(() => search.focus());
+    if (state.overlay === "look") queueMicrotask(() => search.focus());
     return panel;
   }
-  function renderWorkspaceRow() {
-    const row = q("div", "ds-dir");
-    const label = q("span", "ds-dir-label", "Canvas workspace");
-    const ws = state.workspace;
-    const value = q("span", "ds-dir-value", ws ? ws.name.length > 38 ? `${ws.name.slice(0, 38)}\u2026` : ws.name : "Created on send \u2014 no project registration needed.");
-    value.title = ws ? ws.dir : NO_WORKSPACE_MESSAGE;
-    row.append(label, value);
-    return row;
+  function toggleDevice(id) {
+    if (id === null) setPagePref({ devices: [] });
+    else if (state.pageDevices.includes(id)) setPagePref({ devices: state.pageDevices.filter((device) => device !== id) });
+    else setPagePref({ devices: DEVICE_ORDER.filter((device) => device === id || state.pageDevices.includes(device)) });
   }
-  function renderIdeas() {
-    const wrap = q("div", "ds-ideas");
-    wrap.append(q("div", "ds-ideas-label", "Ideas"));
-    const list = q("div", "ds-idea-list");
-    IDEAS[state.pageType].forEach((idea, index) => {
-      const card = q("button", "ds-idea");
+  function renderDevicesPanel() {
+    const panel = q("div", "ds-ds-panel ds-devices-panel");
+    const list = q("div", "ds-device-list");
+    list.setAttribute("role", "group");
+    list.setAttribute("aria-label", "Devices to design for");
+    const row = (id, title, hint, checked) => {
+      const label = q("label", `ds-device-option${checked ? " on" : ""}`);
+      const box = q("input");
+      box.type = "checkbox";
+      box.checked = checked;
+      box.disabled = state.pageBusy;
+      box.addEventListener("change", () => {
+        toggleDevice(id);
+        queueMicrotask(() => pageBody?.querySelector(`[data-device="${id ?? "ask"}"]`)?.focus());
+      });
+      box.dataset.device = id ?? "ask";
+      const text = q("span", "ds-menu-main");
+      text.append(q("strong", void 0, title), q("span", "ds-menu-hint", hint));
+      label.append(box, text);
+      return label;
+    };
+    list.append(row(null, "Ask me", "Detect from the project", state.pageDevices.length === 0));
+    for (const id of DEVICE_ORDER) {
+      const preset = DEVICE_PRESETS[id];
+      list.append(row(id, deviceName(id), `${preset.width}\xD7${preset.height}`, state.pageDevices.includes(id)));
+    }
+    panel.append(list);
+    if (state.overlay === "devices") queueMicrotask(() => panel.querySelector(".ds-device-option input")?.focus());
+    return panel;
+  }
+  function pagePrefs() {
+    return {
+      questions: state.pageQuestions,
+      options: state.pageOptions,
+      devices: [...state.pageDevices],
+      look: { kind: state.pageLookKind, presetId: state.pageDesignSystemId, direction: state.pageDirection }
+    };
+  }
+  async function savePagePrefs() {
+    try {
+      await host.storage.set(PAGE_PREFS_KEY, pagePrefs());
+    } catch {
+    }
+  }
+  function setPagePref(change, refocus) {
+    if (change.questions !== void 0) state.pageQuestions = change.questions;
+    if (change.options !== void 0) state.pageOptions = change.options;
+    if (change.devices !== void 0) state.pageDevices = DEVICE_ORDER.filter((id) => change.devices.includes(id));
+    void savePagePrefs();
+    rerender();
+    if (refocus) queueMicrotask(() => pageBody?.querySelector(refocus)?.focus());
+  }
+  function isOptionsChoice(value) {
+    return value === "ask" || value === 1 || value === 2 || value === 3;
+  }
+  async function loadPagePrefs() {
+    if (state.surface !== "page") return;
+    let stored;
+    try {
+      stored = await host.storage.get(PAGE_PREFS_KEY);
+    } catch {
+      return;
+    }
+    if (!stored || typeof stored !== "object") return;
+    const value = stored;
+    if (typeof value.questions === "boolean") state.pageQuestions = value.questions;
+    if (isOptionsChoice(value.options)) state.pageOptions = value.options;
+    if (Array.isArray(value.devices)) state.pageDevices = DEVICE_ORDER.filter((id) => value.devices.includes(id));
+    const look = value.look;
+    if (look && typeof look === "object") {
+      if (look.kind === null || look.kind === "project" || look.kind === "preset" || look.kind === "direction") state.pageLookKind = look.kind;
+      state.pageDesignSystemId = findDesignSystem(typeof look.presetId === "string" ? look.presetId : null)?.id ?? null;
+      if (look.direction === "auto" || typeof look.direction === "string" && Object.hasOwn(DIRECTIONS, look.direction)) {
+        state.pageDirection = look.direction;
+      }
+    }
+    rerender();
+  }
+  function renderContextRow() {
+    const context = q("div", "ds-context");
+    const project = q("div", "ds-context-item");
+    const dir = state.directory;
+    if (dir) {
+      project.append(q("span", "ds-context-label", "Project"));
+      const name = q("span", "ds-context-value", fileBaseName(dir));
+      name.title = dir;
+      project.append(name, q("span", "ds-context-note", " \xB7 read for colors, fonts, components and breakpoints"));
+    } else {
+      project.append(q("span", "ds-context-note", "No project open \u2014 you'll confirm a palette first"));
+    }
+    context.append(project);
+    if (!pageLocationEl) pageLocationEl = q("div", "ds-context-item ds-context-location");
+    renderLocationRow(pageLocationEl);
+    context.append(pageLocationEl);
+    return context;
+  }
+  function renderStarters() {
+    const wrap = q("section", "ds-starters");
+    wrap.append(q("div", "ds-section-label", "Start from"));
+    const grid = q("div", "ds-starter-grid");
+    for (const starter of STARTERS) {
+      const card = q("button", "ds-starter");
+      card.type = "button";
       card.disabled = state.pageBusy;
-      card.append(ideaThumb(index % 4));
-      const body = q("div", "ds-idea-body");
-      body.append(q("strong", "ds-idea-title", idea.title));
-      body.append(q("span", "ds-idea-desc", idea.description));
+      card.setAttribute("aria-label", `${starter.title}: ${starter.description}. ${PAGE_TYPE_LABELS[starter.type]}.`);
+      card.append(starterGlyph(starter.glyph));
+      const body = q("span", "ds-starter-body");
+      body.append(q("strong", "ds-starter-title", starter.title));
+      body.append(q("span", "ds-starter-desc", starter.description));
       card.append(body);
       card.addEventListener("click", () => {
         if (state.pageBusy) return;
-        state.prompt = idea.prompt;
-        if (promptEl) promptEl.value = idea.prompt;
+        state.prompt = starter.prompt;
+        state.pageType = starter.type;
+        renderPage();
         updateComposerState();
         promptEl?.focus();
       });
-      list.append(card);
-    });
-    wrap.append(list);
+      grid.append(card);
+    }
+    wrap.append(grid);
     return wrap;
   }
   function renderFooter() {
     const footer = q("footer", "ds-footer");
-    footer.append(q("span", "ds-footer-name", "Design Canvas"));
-    footer.append(q("span", "ds-footer-hint", "Click an element in the canvas, then Reference in chat."));
+    const hints = q("p", "ds-hints");
+    const kbd = (text) => q("kbd", void 0, text);
+    hints.append(kbd("Enter"), document.createTextNode(" to start \xB7 "));
+    hints.append(kbd("Shift"), document.createTextNode("+"), kbd("Enter"), document.createTextNode(" new line \xB7 "));
+    hints.append(kbd("/canvas"), document.createTextNode(" in any chat opens the canvas there"));
+    footer.append(hints);
     return footer;
   }
   var WORKSPACE_ROW_ICON = '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>';
@@ -6591,8 +6863,20 @@ Source: ${reference.sourceDirectory}`;
     } else if (view.kind === "empty") {
       list.append(listNote(NO_DESIGN_WORK_MESSAGE));
     } else {
-      for (const row of view.rows) {
+      const shown = state.workShowAll ? view.rows : view.rows.slice(0, WORK_LIST_CAP);
+      for (const row of shown) {
         list.append(renderWorkspaceListRow(row));
+      }
+      if (view.rows.length > WORK_LIST_CAP) {
+        const more = q("button", "ds-link ds-list-more", state.workShowAll ? "Show fewer" : `Show all (${view.rows.length})`);
+        more.type = "button";
+        more.setAttribute("aria-expanded", String(state.workShowAll));
+        more.addEventListener("click", () => {
+          state.workShowAll = !state.workShowAll;
+          rerender();
+        });
+        section.append(list, more);
+        return section;
       }
     }
     section.append(list);
@@ -7370,6 +7654,7 @@ Source: ${reference.sourceDirectory}`;
     window.addEventListener("dragover", onPageWindowDragOver);
     window.addEventListener("drop", onPageWindowDrop);
     renderPage();
+    void loadPagePrefs();
     void loadDesignHome();
   }
   function onPageWindowDragOver(event) {
@@ -7680,7 +7965,31 @@ Source: ${reference.sourceDirectory}`;
   function setPageChoice(choice) {
     if (choice.type) state.pageType = choice.type;
     if (choice.direction) state.pageDirection = choice.direction;
-    if (choice.fidelity) state.pageFidelity = choice.fidelity;
+    if (choice.look !== void 0) state.pageLookKind = choice.look;
+    if (choice.presetId !== void 0) state.pageDesignSystemId = choice.presetId;
+  }
+  function getPageChoice() {
+    return { type: state.pageType, spec: pageBriefSpec() };
+  }
+  function getPagePrefs() {
+    return pagePrefs();
+  }
+  async function setPagePrefs(change) {
+    if (change.look) {
+      state.pageLookKind = change.look.kind;
+      state.pageDesignSystemId = change.look.presetId;
+      state.pageDirection = change.look.direction;
+    }
+    setPagePref(change);
+    await savePagePrefs();
+  }
+  function resetPagePrefs() {
+    state.pageQuestions = true;
+    state.pageOptions = "ask";
+    state.pageDevices = [];
+    state.pageLookKind = null;
+    state.pageDesignSystemId = null;
+    state.pageDirection = "auto";
   }
   function allowResolve(value) {
     state.resolveAllowed = value;

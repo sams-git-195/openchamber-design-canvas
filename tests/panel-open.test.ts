@@ -619,21 +619,63 @@ test('a workspace row opens its session when mapped, else starts a new one carry
 test('the page builds the creation home: no registered-project gate anywhere', async () => {
   const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
   assert.match(text, /function renderPage\(/, 'the page has its own renderer');
-  assert.match(text, /function renderHero\(/, 'the hero is built');
-  assert.match(text, /Let's create /, 'the headline reads "Let\'s create"');
+  assert.match(text, /function renderHeader\(/, 'the header is built');
+  assert.match(text, /'Design on a live canvas'/, 'the title says what it is');
   assert.match(text, /function renderComposer\(/, 'the composer is built');
-  assert.match(text, /function renderWorkspaceRow\(/, 'the workspace context row is built');
-  assert.match(text, /function renderIdeas\(/, 'the idea cards are built');
+  assert.match(text, /function renderContextRow\(/, 'the project/designs context row is built');
+  assert.match(text, /function renderStarters\(/, 'the starter cards are built');
   assert.match(
     text,
-    /renderHero\(\), renderComposer\(\), renderWorkspaceRow\(\), renderIdeas\(\), renderCanvasSection\(\), renderFooter\(\)/,
-    'the one list mounts below the idea cards, closed by the footer',
+    /renderHeader\(\), renderComposer\(\), renderContextRow\(\), renderStarters\(\), renderCanvasSection\(\), renderFooter\(\)/,
+    'the one list mounts below the starters, closed by the footer',
   );
   assert.doesNotMatch(text, /function renderDirRow\(/, 'the registered working-directory selector is gone');
   assert.doesNotMatch(text, /NEEDS_PROJECT_MESSAGE/, 'no needs-project refusal remains');
   assert.doesNotMatch(text, /function buildDialog\(/, 'the wizard is gone');
   assert.match(text, /plus\.disabled = state\.pageBusy \|\| referencePending/, 'the + gate is busy-state only — no project target');
-  assert.match(text, /'Design Canvas'/, 'the footer names the canvas');
+  assert.match(text, /q\('div', 'ds-eyebrow', 'Design Canvas'\)/, 'the eyebrow names the canvas');
+  assert.match(text, /in any chat opens the canvas there/, 'the footer points at /canvas');
+});
+
+test('P4: the old creation-page remnants are gone from the page and its styles', async () => {
+  const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
+  const css = await readFile(new URL('../panel/styles.css', import.meta.url), 'utf8');
+  for (const gone of [/Let's create /, /Good work starts here/, /function renderHero\(/, /function renderIdeas\(/, /function ideaThumb\(/, /const IDEAS\b/, /function renderOptions\(/, /function field\(/, /ds-composer-accent/, /'\+ Create'/, /function renderWorkspaceRow\(/]) {
+    assert.doesNotMatch(text, gone, `main.ts no longer has ${gone}`);
+  }
+  for (const gone of [/\.ds-hero/, /\.ds-composer-accent/, /\.ds-options\b/, /\.ds-field\b/, /\.ds-ds-create/, /\.ds-ideas?\b/, /\.ds-thumb-/]) {
+    assert.doesNotMatch(css, gone, `styles.css no longer has ${gone}`);
+  }
+  for (const added of ['.ds-header', '.ds-eyebrow', '.ds-title', '.ds-lede', '.ds-toggles', '.ds-switch[role="switch"][aria-checked="true"]', '.ds-seg', '.ds-counter', '.ds-context', '.ds-look-tabs', '.ds-device-list', '.ds-starters', '.ds-starter', '.ds-glyph', '.ds-hints kbd']) {
+    assert.ok(css.includes(added), `styles.css styles ${added}`);
+  }
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[^}]*\.ds-starter/, 'the starter hover lift honours reduced motion');
+});
+
+test('P4: the composer wires the Look/Devices chips, toggles, Structure brief and the brief limit', async () => {
+  const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
+  assert.match(text, /export type OverlayId = 'type' \| 'look' \| 'devices' \| 'attach';/, 'the overlay contract: look + devices replace ds');
+  assert.match(text, /setAttribute\('role', 'tablist'\)/, 'the Look popover has tabs');
+  assert.match(text, /'Match this project'/);
+  assert.match(text, /'Open a project in OpenChamber to use this'/, 'the Project look is gated on an open project');
+  assert.match(text, /q<HTMLButtonElement>\('button', 'ds-ds-clear', 'No preset'\)/, 'Clear reads "No preset"');
+  assert.match(text, /setAttribute\('role', 'switch'\)/, 'Questions first is a real switch');
+  assert.match(text, /setAttribute\('role', 'radiogroup'\)/, 'Options is a segmented radio group');
+  assert.match(text, /structureBrief\(state\.prompt, \{ devices: state\.pageDevices \}\)/, 'Structure brief applies the mode.ts skeleton');
+  assert.match(text, /const tooLong = briefLimitError\(spec\.brief\)/, 'the brief limit uses the shared refusal');
+  assert.match(text, /fidelity: FIDELITY_FOR_TYPE\[state\.pageType\]/, 'fidelity follows the type');
+  assert.match(text, /projectDir: state\.directory/, 'the open project rides on the spec');
+  assert.match(text, /const PAGE_PREFS_KEY = 'prefs\/page'/);
+  assert.match(text, /const WORK_LIST_CAP = 5;/, 'the work list caps at five rows');
+  assert.match(text, /`Show all \(\$\{view\.rows\.length\}\)`/);
+  assert.match(text, /renderLocationRow\(pageLocationEl\)/, 'the context row reuses the R5 designs-location line');
+});
+
+test('P4: briefTitle takes the first clause, drops a Goal: label and caps at 40', () => {
+  assert.equal(main.briefTitle('Budget app onboarding — 3 screens, phone first'), 'Budget app onboarding');
+  assert.equal(main.briefTitle('Goal: a short pitch deck.\nSlides: problem'), 'A short pitch deck');
+  assert.equal(main.briefTitle('x'.repeat(80)).length, 40);
+  assert.equal(main.briefTitle('   '), '');
 });
 
 test('startDesignSession is canvas-branded and starts WITHOUT projectId by default (decision 2)', async () => {
@@ -748,15 +790,18 @@ test('loadStudioConfig reads the config for display but never opens a window', a
 });
 
 test('nextOverlayState toggles, opens and switches with one overlay open at a time', () => {
-  assert.equal(nextOverlayState(null, 'ds'), 'ds');
+  assert.equal(nextOverlayState(null, 'look'), 'look');
+  assert.equal(nextOverlayState(null, 'devices'), 'devices');
   assert.equal(nextOverlayState(null, 'type'), 'type');
   assert.equal(nextOverlayState(null, 'attach'), 'attach');
-  assert.equal(nextOverlayState('ds', 'ds'), null);
+  assert.equal(nextOverlayState('look', 'look'), null);
+  assert.equal(nextOverlayState('devices', 'devices'), null);
   assert.equal(nextOverlayState('type', 'type'), null);
   assert.equal(nextOverlayState('attach', 'attach'), null);
-  assert.equal(nextOverlayState('ds', 'type'), 'type');
+  assert.equal(nextOverlayState('look', 'devices'), 'devices');
+  assert.equal(nextOverlayState('devices', 'type'), 'type');
   assert.equal(nextOverlayState('type', 'attach'), 'attach');
-  assert.equal(nextOverlayState('attach', 'ds'), 'ds');
+  assert.equal(nextOverlayState('attach', 'look'), 'look');
 });
 
 test('a directory switch keeps the last config until the fresh read resolves', async () => {

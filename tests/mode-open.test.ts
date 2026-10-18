@@ -1794,19 +1794,19 @@ test('F4/F8: the page flow scaffolds with the PAGE selections, and a failed job 
   main.setSurface('page');
   main.resetReferenceDraft();
   main.setPrompt('Quarterly review deck');
-  main.setPageChoice({ type: 'deck', direction: 'auto', fidelity: 'wireframe' });
+  main.setPageChoice({ type: 'deck', direction: 'auto' });
   try {
     await startNewDesign();
     const body = JSON.parse(calls.find((call) => call.path === '/scaffold')!.body ?? '{}') as { dir: string; type: string; fidelity: string };
     assert.equal(body.type, 'deck', 'F8: the page\'s chosen type, not the row mode');
-    assert.equal(body.fidelity, 'wireframe', 'F8: the page\'s chosen fidelity');
+    assert.equal(body.fidelity, 'hi-fi', 'F8/P4: the fidelity the page\'s type implies (FIDELITY_FOR_TYPE)');
     assert.deepEqual(calls.find((call) => call.path === '/scaffold/status')?.query, { job: 'job-p', dir: body.dir }, 'F1: the page poll names the dir too');
     assert.equal(sessions.length, 1, 'the session still starts');
     assert.ok((sessions[0]!.text ?? '').includes(`Design Canvas workspace: ${body.dir}`), 'F4: the prompt names the folder that exists on disk');
     assert.doesNotMatch(sessions[0]!.text ?? '', /ask if the path is missing/, 'F4: never the "missing path" fallback next to a real folder');
     assert.deepEqual((store.get(workspaceStorageKey('s1')!) as { dir?: string } | undefined)?.dir, body.dir, 'F4: ws/ binds the new session to the real folder');
   } finally {
-    main.setPageChoice({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi' });
+    main.setPageChoice({ type: 'hi-fi', direction: 'auto' });
     main.setSurface('panel');
     main.setPrompt('');
     setWorkspace(null);
@@ -1934,4 +1934,235 @@ test("P2': a brief over BRIEF_MAX is refused with the limit", () => {
   assert.equal(BRIEF_MAX, 3000);
   assert.equal(briefLimitError('x'.repeat(BRIEF_MAX)), null);
   assert.match(briefLimitError('x'.repeat(BRIEF_MAX + 1)) ?? '', /limit is 3000/);
+});
+
+// ---- P4: the creation page wires its toggles, chips and starters into the session ----
+
+type PageStartSession = StartSession & { title?: string };
+
+/** The page flow against a service that scaffolds and finishes the job at once. */
+function pageFlowService(): ServiceRequest[] {
+  return stubService((request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (IS_SCAFFOLD_PATH(request.path)) return scaffoldJob(request);
+    return { status: 200, body: JSON.stringify({ ok: true }) };
+  });
+}
+
+function pageReset(): void {
+  main.resetPagePrefs();
+  main.setPageChoice({ type: 'hi-fi', direction: 'auto', look: null, presetId: null });
+  main.setSurface('panel');
+  main.setPrompt('');
+  setProjectDirectory(null);
+  setWorkspace(null);
+  setSessionId(null);
+}
+
+test('P4 page: questions off + options 2 reach the session text, titled from the brief', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  setProjectDirectory(null);
+  stubStorage();
+  stubToast();
+  stubListProjects([]);
+  const sessions = stubStartSession() as PageStartSession[];
+  pageFlowService();
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  try {
+    await main.setPagePrefs({ questions: false, options: 2 });
+    main.setPrompt('A budget app, three screens');
+    await startNewDesign();
+    assert.equal(sessions.length, 1);
+    const text = sessions[0]!.text ?? '';
+    assert.match(text, /turned questions off/);
+    assert.match(text, /the user wants 2 directions/);
+    assert.match(text, /Questions first: off · Options: 2/);
+    assert.equal(sessions[0]!.title, 'Design · A budget app', 'the title is the first clause of the brief');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: an open project rides as read-only design context, with the chosen devices', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  stubStorage();
+  stubToast();
+  stubListProjects([]);
+  const sessions = stubStartSession() as PageStartSession[];
+  const calls = pageFlowService();
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  setProjectDirectory('/Users/me/projects/budget');
+  try {
+    await main.setPagePrefs({ devices: ['desktop', 'phone'] });
+    main.setPrompt('');
+    main.setPrompt('Goal: onboarding');
+    await startNewDesign();
+    const text = sessions[0]!.text ?? '';
+    // mode.ts words it "User project: …" today; the planner's wording is accepted too.
+    assert.match(text, /User(?:'s)? project(?: \(read-only design context\))?: "?\/Users\/me\/projects\/budget/, 'the project dir is named as read-only design context');
+    assert.match(text, /Look: take it from the user's project/, 'with a project open the default look is Match project');
+    assert.match(text, /Devices: phone 390×844 · desktop 1440×900/);
+    const body = JSON.parse(calls.find((call) => call.path === '/scaffold')!.body ?? '{}') as { devices?: string[]; projectDir?: string };
+    assert.deepEqual(body.devices, ['phone', 'desktop'], 'the scaffold gets the devices (R4 forwards them)');
+    assert.equal(body.projectDir, '/Users/me/projects/budget', 'the scaffold gets the project dir');
+    assert.equal(sessions[0]!.title, 'Design · Onboarding');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: a brief over 3000 characters is refused before any scaffold or session', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  stubStorage();
+  const toasts = stubToast();
+  stubListProjects([]);
+  const sessions = stubStartSession();
+  const calls = pageFlowService();
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  try {
+    main.setPrompt('x'.repeat(BRIEF_MAX + 1));
+    await startNewDesign();
+    assert.equal(sessions.length, 0, 'no session starts');
+    assert.equal(calls.some((call) => call.path === '/scaffold'), false, 'nothing is scaffolded');
+    assert.match(main.getPageDraft().error, /limit is 3000/);
+    assert.ok(toasts.some((toast) => toast.kind === 'error' && /limit is 3000/.test(toast.message)));
+    assert.equal(main.getPageDraft().prompt.length, BRIEF_MAX + 1, 'the draft is kept to shorten');
+  } finally {
+    pageReset();
+  }
+});
+
+/** A minimal DOM node: enough for the page renderers and a click. */
+class PageNode {
+  tagName: string;
+  className = '';
+  textContent = '';
+  disabled = false;
+  type = '';
+  title = '';
+  innerHTML = '';
+  dataset: Record<string, string> = {};
+  style: Record<string, string> = {};
+  children: PageNode[] = [];
+  listeners = new Map<string, Array<() => void>>();
+  constructor(tag: string) { this.tagName = tag.toUpperCase(); }
+  append(...nodes: PageNode[]): void { this.children.push(...nodes); }
+  setAttribute(): void {}
+  addEventListener(name: string, callback: () => void): void { this.listeners.set(name, [...(this.listeners.get(name) ?? []), callback]); }
+  click(): void { if (!this.disabled) for (const callback of this.listeners.get('click') ?? []) callback(); }
+  text(): string { return this.textContent + this.children.map((child) => child.text()).join(''); }
+  all(cls: string): PageNode[] {
+    const mine = this.className.split(' ').includes(cls) ? [this] : [];
+    return [...mine, ...this.children.flatMap((child) => child.all(cls))];
+  }
+}
+
+function withPageDocument<T>(run: () => T): T {
+  const doc = globalThis.document as unknown as Record<string, unknown>;
+  const before = { createElement: doc.createElement, createElementNS: doc.createElementNS, createTextNode: doc.createTextNode };
+  doc.createElement = (tag: string) => new PageNode(tag);
+  doc.createElementNS = (_ns: string, tag: string) => new PageNode(tag);
+  doc.createTextNode = (text: string) => Object.assign(new PageNode('#text'), { textContent: text });
+  try {
+    return run();
+  } finally {
+    Object.assign(doc, before);
+  }
+}
+
+test('P4 page: a starter card seeds the composer with its structured brief and its type', () => {
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  main.setPrompt('');
+  try {
+    const wrap = withPageDocument(() => main.renderStarters()) as unknown as PageNode;
+    const cards = wrap.all('ds-starter');
+    assert.equal(cards.length, 15, 'three starters for each of the five types');
+    const pitch = cards.find((card) => card.text().includes('Pitch'));
+    assert.ok(pitch, 'the Pitch starter renders');
+    withPageDocument(() => pitch!.click());
+    assert.equal(main.getPageDraft().prompt, 'Goal: a short pitch deck.\nSlides: problem, solution, proof, pricing, ask');
+    assert.equal(main.getPageChoice().type, 'deck', 'the starter picks its type');
+    const print = cards.find((card) => card.text().includes('Print page'));
+    withPageDocument(() => print!.click());
+    assert.equal(main.getPageDraft().prompt, 'Goal: a one-page A4 flyer.\nSize: 794×1123');
+    assert.equal(main.getPageChoice().type, 'custom');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: Structure brief turns a draft into the skeleton once (idempotent), with the chosen devices', async () => {
+  stubStorage();
+  main.setSurface('page');
+  try {
+    await main.setPagePrefs({ devices: ['tablet'] });
+    main.setPrompt('Budget app onboarding. Three screens, calm.');
+    main.applyStructureBrief();
+    const once = main.getPageDraft().prompt;
+    assert.match(once, /^Goal: Budget app onboarding\./);
+    assert.match(once, /\nDevices: tablet\n/);
+    assert.match(once, /\nNotes: Three screens, calm\.$/);
+    main.applyStructureBrief();
+    assert.equal(main.getPageDraft().prompt, once, 'running it again changes nothing');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: questions/options/devices/look persist to prefs/page and restore on the next mount', async () => {
+  const store = stubStorage();
+  main.setSurface('page');
+  try {
+    await main.setPagePrefs({ questions: false, options: 3, devices: ['tablet'], look: { kind: 'direction', presetId: null, direction: 'editorial' } });
+    const saved = { questions: false, options: 3, devices: ['tablet'], look: { kind: 'direction', presetId: null, direction: 'editorial' } };
+    assert.deepEqual(store.get('prefs/page'), saved, 'written under prefs/page');
+    main.resetPagePrefs(); // a fresh mount starts from the defaults…
+    assert.equal(main.getPagePrefs().questions, true);
+    await main.loadPagePrefs(); // …and restores what was remembered
+    assert.deepEqual(main.getPagePrefs(), saved);
+    const { spec } = main.getPageChoice();
+    assert.equal(spec.direction, 'editorial', 'the remembered direction is the Look');
+    assert.equal(spec.look, 'new');
+    assert.equal(spec.fidelity, 'hi-fi', 'fidelity follows the type');
+    store.set('prefs/page', { questions: 'nope', options: 9, devices: ['watch', 'phone'], look: { kind: 'bogus', presetId: 'no-such', direction: 'neon' } });
+    main.resetPagePrefs();
+    await main.loadPagePrefs();
+    assert.deepEqual(main.getPagePrefs(), { questions: true, options: 'ask', devices: ['phone'], look: { kind: null, presetId: null, direction: 'auto' } }, 'malformed fields are ignored');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: the hidden 1×1 resolve frame stays inert — no page prefs read, no claim, no service call', async () => {
+  const store = stubStorage();
+  const reads: string[] = [];
+  const storage = (api.host as unknown as { storage: { get: (key: string) => Promise<unknown> } }).storage;
+  storage.get = async (key) => {
+    reads.push(key);
+    return store.get(key);
+  };
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  setSessionId('ses_tiny_p4');
+  const frame = shim as { innerWidth: number; innerHeight: number };
+  frame.innerWidth = 1;
+  frame.innerHeight = 1;
+  main.setSurface('panel');
+  try {
+    assert.equal(main.isRealPane(), false);
+    await main.loadPagePrefs();
+    assert.equal(reads.includes('prefs/page'), false, 'the page prefs are a page-surface read only');
+    assert.equal(await main.runOpenHandoff(), 'none');
+    assert.equal(calls.length, 0, 'no service call from a 1×1 frame');
+  } finally {
+    frame.innerWidth = 1024;
+    frame.innerHeight = 768;
+    pageReset();
+  }
 });
