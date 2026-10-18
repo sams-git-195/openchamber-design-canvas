@@ -7053,14 +7053,8 @@ Source: ${reference.sourceDirectory}`;
     if (choice.direction) state.pageDirection = choice.direction;
     if (choice.fidelity) state.pageFidelity = choice.fidelity;
   }
-  function setDesignSystem(id) {
-    state.pageDesignSystemId = id;
-  }
   function allowResolve(value) {
     state.resolveAllowed = value;
-  }
-  function getAllProjects() {
-    return [...allProjects];
   }
   function setSessionBusy(busy) {
     state.sessionBusy = busy;

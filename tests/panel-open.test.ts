@@ -30,12 +30,12 @@ const {
   ATTACH_NEEDS_URL, DESIGN_READY_BADGE, NO_CONFIG_BADGE, NO_DESIGN_WORK_MESSAGE, NO_PROJECT_URL_MESSAGE,
   NO_WORKSPACE_MESSAGE, PICK_HINT, WORKSPACE_SLUG_LIMIT,
   ackPicks, allProjectsFromSnapshot, canvasSessionStatus, canvasSlug, closeLive, contrastRatio, countOtherActiveDesignSessions,
-  focusLive, formatOpenStatus, formatWindowStatus, getPicks, getScreens, getScaffoldStatus, getState, getWorkspaces,
+  focusLive, formatOpenStatus, getPicks, getScreens, getScaffoldStatus, getState, getWorkspaces,
   isLoopbackUrl, isModeChipData, isWorkspaceRecord, joinWorkspaceDir, joinWorkspaceSessions, normalizeDirPath,
-  openWorkspace, pathContains, pickAckLabel, pickHintActive, postAgentStatus, projectReady, putScreens,
+  openWorkspace, pathContains, pickAckLabel, pickHintActive, postAgentStatus, projectReady,
   referenceText, registryErrorToastMessage, resolveCanvasTarget, sameDirPath, scaffoldProgressText, scaffoldProject,
   screenUrl, sessionShowsDesignMode, setMode, ServiceUnavailable, shouldStopDevServer, shouldToastRegistryError, startDevServer,
-  syncScreens, tokenNameFor, uniqueCanvasSlug, workspaceMeta, WORKSPACE_MISSING_CODE, wsSessionIdFromKey,
+  syncScreens, uniqueCanvasSlug, workspaceMeta, WORKSPACE_MISSING_CODE, wsSessionIdFromKey,
 } = api;
 const { loadStudioConfig, setProjectDirectory, setWorkspace, surfaceKind, nextOverlayState } = main;
 const { workspaceStorageKey } = await import('../panel/mode.ts');
@@ -68,16 +68,6 @@ test('getScreens reads GET /screens?dir= and returns the normalized registry', a
   assert.deepEqual(result, body);
   assert.equal(calls[0]!.method, 'GET');
   assert.deepEqual(calls[0]!.query, { dir: '/p/site' });
-});
-
-test('putScreens PUTs the full registry and answers with its path', async () => {
-  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ path: '/p/site/screens.json' }) }));
-  const result = await putScreens('/p/site', { version: 1, screens: [] });
-  assert.deepEqual(result, { path: '/p/site/screens.json' });
-  assert.equal(calls[0]!.method, 'PUT');
-  assert.equal(calls[0]!.path, '/screens');
-  assert.deepEqual(calls[0]!.query, { dir: '/p/site' });
-  assert.deepEqual(JSON.parse(calls[0]!.body ?? ''), { version: 1, screens: [] });
 });
 
 test('setMode posts POST /mode {mode} and echoes the held mode', async () => {
@@ -380,15 +370,6 @@ test('pickHintActive is active only while the window is open', () => {
   assert.equal(pickHintActive({ windowOpen: false }), false);
 });
 
-test('formatWindowStatus reports open/closed with url and title', () => {
-  assert.equal(formatWindowStatus({ windowOpen: false, url: '', title: '' }), 'Window closed');
-  assert.equal(formatWindowStatus({ windowOpen: true, url: 'about:blank', title: '' }), 'Window open · no page open');
-  assert.equal(
-    formatWindowStatus({ windowOpen: true, url: 'http://localhost:5173/', title: 'App' }),
-    'Window open · http://localhost:5173/ — App',
-  );
-});
-
 test('formatOpenStatus summarizes the open result', () => {
   assert.equal(formatOpenStatus({ ok: true, url: 'u', title: '', settled: true }), 'Window open');
   assert.equal(
@@ -454,15 +435,11 @@ test('session detection: the mode chip data boundary is read loosely', () => {
   assert.equal(sessionShowsDesignMode({ items: [] }), false);
 });
 
-test('contrastRatio and tokenNameFor are pure colour helpers', () => {
+test('contrastRatio is a pure colour helper', () => {
   assert.equal(contrastRatio('#000000', '#ffffff'), 21);
   assert.equal(contrastRatio('#ffffff', '#ffffff'), 1);
   assert.equal(contrastRatio('rgb(255,255,255)', '#000'), 21);
   assert.equal(contrastRatio('oklch(0.5 0.1 10)', '#fff'), null, 'a colour it cannot parse is null, not a guess');
-  assert.equal(tokenNameFor({ backgroundColor: '#fff' }), '--color-surface');
-  assert.equal(tokenNameFor({ color: '#111' }), '--color-text');
-  assert.equal(tokenNameFor({ borderColor: '#333' }), '--color-border');
-  assert.equal(tokenNameFor({ fontSize: '16px' }), null);
 });
 
 test('referenceText builds a canvas reference chip and stamps Screen + Screen URL when given one', () => {

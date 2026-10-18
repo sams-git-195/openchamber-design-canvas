@@ -2940,11 +2940,6 @@ function attachProject(): AttachProject {
   return { dir, projectId, name, config };
 }
 
-/** The workspace directory resolved for pasted-path validation. */
-function referenceBaseDir(): string | null {
-  return attachProject().dir || null;
-}
-
 /**
  * Attach a workspace reference to the composer. A no-url workspace refuses with
  * the actionable line rather than sending a chip the host would reject.
@@ -4233,7 +4228,7 @@ export function resetReferenceDraft(): void {
   referenceError = '';
 }
 
-export { renderComposer, renderReferenceDraft };
+export { renderComposer };
 
 /** Test seam: pretend the host reported this session, so storage writes can target it. */
 export function setSessionId(id: string | null): void {
@@ -4257,11 +4252,6 @@ export function setPageChoice(choice: { type?: DesignType; direction?: 'auto' | 
   if (choice.fidelity) state.pageFidelity = choice.fidelity;
 }
 
-/** Test seam: set the chosen design-system preset id without replaying a page render. */
-export function setDesignSystem(id: string | null): void {
-  state.pageDesignSystemId = id;
-}
-
 /** Test seam: allow the `/canvas` resolver without replaying an `onReady` context. */
 export function allowResolve(value: boolean): void {
   state.resolveAllowed = value;
@@ -4269,11 +4259,6 @@ export function allowResolve(value: boolean): void {
 
 /** Test seam: run the New-design flow directly. */
 export { startNewDesign, resolveCanvasCommand, loadProjects, loadCanvasWorkspaces };
-
-/** Test seam: the registered projects the last load recorded (decision 4c). */
-export function getAllProjects(): RegisteredProject[] {
-  return [...allProjects];
-}
 
 /** Test seam: set the current session's busy flag without a host snapshot. */
 export function setSessionBusy(busy: boolean): void {

@@ -281,22 +281,6 @@ export function setMode(mode: 'edit' | 'play'): Promise<{ ok: boolean; mode?: 'e
 }
 
 /**
- * Claim (or heartbeat) the exclusive pick→chat bridge. Called by the hidden
- * pane `/canvas` mounts inside a chat window: while it holds a warm claim,
- * every OTHER panel stands down, so each Cmd/Ctrl-click becomes exactly one
- * chip in the window that owns the bridge. `token` renews an existing claim;
- * omit it to take ownership.
- */
-export function claimPickBridge(token?: string): Promise<{ ok: boolean; bridgeActive?: boolean; token?: string; ttlMs?: number }> {
-  return callService('/bridge', undefined, 'POST', JSON.stringify(token ? { token } : {}));
-}
-
-/** Give the bridge up (the holding pane is exiting). Harmless if already gone. */
-export function releasePickBridge(token: string): Promise<{ ok: boolean; bridgeActive?: boolean }> {
-  return callService('/bridge', undefined, 'POST', JSON.stringify({ release: true, token }));
-}
-
-/**
  * Raise the live Chrome window (POST /focus) without navigating or reloading
  * it, so the user can see the page they are about to click.
  */
@@ -323,14 +307,6 @@ export function postAgentStatus(busy: boolean, label?: string): Promise<{ ok: bo
  */
 export function syncScreens(dir: string): Promise<{ ok: boolean; error?: string }> {
   return callService<{ ok: boolean; error?: string }>('/screens/sync', undefined, 'POST', JSON.stringify({ dir }));
-}
-
-/**
- * Flash a picked element in the live preview window: `POST /highlight` with its
- * selector. Best-effort and fire-and-forget from the caller.
- */
-export function highlightElement(selector: string): Promise<{ ok: boolean }> {
-  return callService<{ ok: boolean }>('/highlight', undefined, 'POST', JSON.stringify({ selector }));
 }
 
 export type StudioConfig = {
@@ -398,12 +374,6 @@ export function getWorkspaces(): Promise<WorkspacesResult> {
 /** The normalized screens.json registry for a workspace dir (spec §B). */
 export function getScreens(dir: string): Promise<ScreensRegistry> {
   return callService<ScreensRegistry>('/screens', { dir });
-}
-
-/** Validate and write the full registry (spec §B). The panel offers this so a
- * row action can repair a registry; the agent normally writes screens.json. */
-export function putScreens(dir: string, registry: ScreensRegistry): Promise<{ path: string }> {
-  return callService<{ path: string }>('/screens', { dir }, 'PUT', JSON.stringify(registry));
 }
 
 // ---- export (SPEC-V3-P2-SCOPE.md D4, `POST /export` + `GET /export/status`) ----
@@ -715,11 +685,6 @@ export function workspaceMeta(row: WorkspaceRow): string {
   return url ? url : row.dir;
 }
 
-/** A workspace is "ready" when its `.design-studio.json` carries a non-empty url. */
-export function workspaceReady(url: string | null | undefined): boolean {
-  return Boolean(url?.trim());
-}
-
 // ---- session detection (pure) ----
 
 /**
@@ -758,13 +723,6 @@ export const PICK_HINT = 'Click an element in edit mode to add a reference';
  */
 export function pickHintActive(state: Pick<LiveState, 'windowOpen'>): boolean {
   return state.windowOpen;
-}
-
-/** One-line summary of the real window for the status row. */
-export function formatWindowStatus(state: Pick<LiveState, 'windowOpen' | 'url' | 'title'>): string {
-  if (!state.windowOpen) return 'Window closed';
-  const where = state.url && state.url !== 'about:blank' ? state.url : 'no page open';
-  return state.title ? `Window open · ${where} — ${state.title}` : `Window open · ${where}`;
 }
 
 /** One line describing the outcome of an open, for the status row. */
@@ -1003,15 +961,4 @@ export function contrastRatio(foreground: string, background: string): number | 
   const b = relativeLuminance(bg);
   const [hi, lo] = a >= b ? [a, b] : [b, a];
   return Math.round(((hi + 0.05) / (lo + 0.05)) * 10) / 10;
-}
-
-/**
- * The token a picked element's colour should come from. We can only guess from
- * the property that carries a hardcoded colour; `null` when there is none.
- */
-export function tokenNameFor(styles: Record<string, string>): string | null {
-  if (styles.backgroundColor) return '--color-surface';
-  if (styles.color) return '--color-text';
-  if (styles.borderColor) return '--color-border';
-  return null;
 }

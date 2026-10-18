@@ -241,11 +241,6 @@ export function getLastReport(): VerifyReport | null {
   return lastReport;
 }
 
-/** Forget cross-run oscillation history (tests and a fresh session). */
-export function resetVerifyHistory(): void {
-  history = [];
-}
-
 // ---- provider verification block ------------------------------------------
 
 /** The bounded block attached to `browser.open`/`capture`/`resize`/`snapshot`. */

@@ -16,7 +16,7 @@ const shim = {
   documentElement: {},
 };
 
-const { DEFAULT_MODE, GUEST_ATTACH_TEXT_MAX, VERIFY_PROTOCOL, attachUrl, buildModeChip, designSessionPrompt, isHttpUrl, modeStorageKey, workspaceStorageKey, parseDesignArgs, seedModeFromConfig, seedModeValue, seedSessionData, NO_DESIGN_SYSTEM, designSystemGroups, designSystemLabel, designSystemSwatches, filterDesignSystems, findDesignSystem, isColorTokenValue, attachAvailable, designMarkerKey, designMarkerValue, designSessionIdFromKey, fileBaseName, fileReferenceChip, isDesignMarker, popoverStep, projectHttpUrl, projectReferenceChip, parseCanvasExportArgs, exportJobSummary, exportFailureSummary, critiqueReviewText, critiqueReviewChip, CRITIQUE_ADVISORY } = await import('../panel/mode.ts');
+const { DEFAULT_MODE, GUEST_ATTACH_TEXT_MAX, VERIFY_PROTOCOL, attachUrl, buildModeChip, designSessionPrompt, isHttpUrl, modeStorageKey, workspaceStorageKey, parseDesignArgs, seedModeValue, seedSessionData, NO_DESIGN_SYSTEM, designSystemGroups, designSystemLabel, designSystemSwatches, filterDesignSystems, findDesignSystem, isColorTokenValue, designMarkerKey, designMarkerValue, designSessionIdFromKey, fileBaseName, fileReferenceChip, isDesignMarker, popoverStep, projectHttpUrl, projectReferenceChip, parseCanvasExportArgs, exportJobSummary, exportFailureSummary, critiqueReviewText, critiqueReviewChip, CRITIQUE_ADVISORY } = await import('../panel/mode.ts');
 const { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP } = await import('../shared/harness-text.ts');
 const { isModeChipData } = await import('../panel/api.ts');
 const { DESIGN_SYSTEMS } = await import('../shared/design-systems.ts');
@@ -113,12 +113,6 @@ test('design session prompt: the full craft rulebook ships here, not in the chip
   assert.match(text, /Build one modular scale/, 'the typography rules are in the session prompt');
   assert.match(text, /Hick: cut the number/, 'the laws-of-ux rules are in the session prompt');
   assert.match(text, /created by the Design Canvas service/, 'a missing workspace is described, not refused');
-});
-
-test('seed mode from config maps unknown types to custom', () => {
-  assert.deepEqual(seedModeFromConfig({ version: 1, type: 'prototype' }), { on: true, type: 'prototype' });
-  assert.deepEqual(seedModeFromConfig({ version: 1, type: 'banner' }), { on: true, type: 'custom' });
-  assert.deepEqual(seedModeFromConfig(null), { on: true, type: 'custom' });
 });
 
 test('seed mode value is a persisted Design Mode payload', () => {
@@ -259,9 +253,6 @@ test('a reference is attachable only when the workspace has an http(s) url', () 
   assert.equal(projectHttpUrl({ url: 'about:blank' }), null, 'a non-http url cannot become a chip');
   assert.equal(projectHttpUrl({ url: '' }), null);
   assert.equal(projectHttpUrl(null), null);
-  assert.equal(attachAvailable({ url: 'https://x.test' }), true);
-  assert.equal(attachAvailable({ url: 'about:blank' }), false);
-  assert.equal(attachAvailable(null), false, 'no config means no + at all');
 });
 
 test('the workspace reference chip names the workspace and its dir', () => {

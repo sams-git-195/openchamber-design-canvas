@@ -46,15 +46,6 @@ export const FIDELITY_HINT: Record<Fidelity, string> = {
   interactive: 'hi-fi plus working interactions and transitions',
 };
 
-/** Select options shared by the page composer. English only. */
-export const TYPE_OPTIONS: Array<[DesignType, string]> = [
-  ['wireframe', 'Wireframe'],
-  ['hi-fi', 'Hi-fi screens'],
-  ['prototype', 'Interactive prototype'],
-  ['deck', 'Presentation deck'],
-  ['custom', 'Custom'],
-];
-
 export const FIDELITY_OPTIONS: Array<[Fidelity, string]> = [
   ['hi-fi', 'Hi-fi'],
   ['wireframe', 'Wireframe'],
@@ -274,14 +265,6 @@ export function projectHttpUrl(config: StudioConfig | null | undefined): string 
 }
 
 /**
- * Whether the `+` attach control can offer anything at all: a source is attachable
- * only when the workspace has an http(s) url.
- */
-export function attachAvailable(config: StudioConfig | null | undefined): boolean {
-  return projectHttpUrl(config) !== null;
-}
-
-/**
  * The chat chip for a workspace reference. `url` must already be http(s) — callers
  * gate on `projectHttpUrl`. The id is the registered project id when there is one
  * (decision 4c), else the directory's basename, so a second reference replaces
@@ -346,12 +329,6 @@ export function seedSessionData(
   canvMode: CanvasMode = 'edit',
 ): { mode: Pick<DesignMode, 'on' | 'type' | 'brief' | 'canvMode'>; workspace: WorkspaceRecord | null } {
   return { mode: seedModeValue(type, brief, canvMode), workspace };
-}
-
-/** Map a `.design-studio.json` `type` onto a valid DesignType for the widget. */
-export function seedModeFromConfig(config: StudioConfig | null): { on: true; type: DesignType } {
-  const type = config && DESIGN_TYPES.includes(config.type as DesignType) ? (config.type as DesignType) : 'custom';
-  return { on: true, type };
 }
 
 export function directionLabel(value: 'auto' | DirectionId): string {

@@ -117,20 +117,4 @@ export const DIRECTIONS: Record<DirectionId, Direction> = {
   },
 };
 
-const DIRECTION_KEYWORDS: Array<[DirectionId, RegExp]> = [
-  ['tech-utility', /\b(dashboard|data|analytics|api|developer|devops|ops|admin|console|table|chart|metrics|monitoring)\b/i],
-  ['editorial', /\b(blog|article|editorial|magazine|journal|essay|news|long[- ]?form|publication)\b/i],
-  ['human', /\b(kids|children|wellness|health|community|marketplace|social|fitness|family|charity|nonprofit)\b/i],
-  ['modern-minimal', /\b(brand|marketing|landing|saas|startup|product|launch|agency|portfolio)\b/i],
-];
-
-// Order matters: the first matching bucket wins, so the more specific signals
-// (data/editorial/human) are tested before the broad product bucket.
-export function inferDirection(brief: string): DirectionId {
-  for (const [id, re] of DIRECTION_KEYWORDS) {
-    if (re.test(brief)) return id;
-  }
-  return 'modern-minimal';
-}
-
 
