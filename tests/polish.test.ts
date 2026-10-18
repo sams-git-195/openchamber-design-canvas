@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
+import { EXTENSION_VERSION } from '../panel/version.ts';
 
 type ServiceRequest = { method: string; path: string; query?: Record<string, string>; body?: string };
 type StubResult = { status: number; body: string };
@@ -440,7 +441,7 @@ test('diagnostics: the ring keeps the newest 20, the report carries version, ser
 
   serviceHandler = liveService(false);
   const report = await main.diagnosticsReport();
-  assert.match(report, /^Design Canvas 0\.2\.0 \(apiVersion 1\)/);
+  assert.match(report, new RegExp(`^Design Canvas ${EXTENSION_VERSION.replace(/\./g, '\\.')} \\(apiVersion 1\\)`));
   assert.match(report, /Service: ready/);
   assert.match(report, /Designs folder: \/docs\/Design Canvas \(source: default; previous folders: 2\)/);
   assert.match(report, /Workspace: \/docs\/Design Canvas\/one/);
@@ -476,7 +477,7 @@ test('diagnostics: the footer button opens the report and Copy diagnostics write
   copyBtn!.fire('click');
   await tick();
   assert.equal(clipboard.length, 1);
-  assert.match(clipboard[0]!, /Design Canvas 0\.2\.0/, 'version');
+  assert.match(clipboard[0]!, new RegExp(`Design Canvas ${EXTENSION_VERSION.replace(/\./g, '\\.')}`), 'version');
   assert.match(clipboard[0]!, /\/docs\/Design Canvas/, 'workspace root');
   assert.equal(pop!.find('ds-diag-text')?.textContent, clipboard[0], 'what you read is what you copy');
   assert.deepEqual(toasts.map((toast) => ({ kind: toast.kind, message: toast.message })), [{ kind: 'success', message: copy.DIAGNOSTICS_COPIED }]);

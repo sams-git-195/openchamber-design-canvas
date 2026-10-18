@@ -6,6 +6,8 @@ import path from 'node:path';
 
 import { parseManifestJson } from '@openchamber/sdk/schemas';
 
+import { EXTENSION_VERSION } from '../panel/version.ts';
+
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 test('package.json carries a valid OpenChamber manifest', async () => {
@@ -17,7 +19,7 @@ test('package.json carries a valid OpenChamber manifest', async () => {
 test('the npm package and manifest identity changed to the Design Canvas fork', async () => {
   const json = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')) as { name: string; version: string };
   assert.equal(json.name, 'openchamber-design-canvas');
-  assert.equal(json.version, '0.2.0');
+  assert.equal(json.version, EXTENSION_VERSION, 'package version follows panel/version.ts');
 });
 
 // The surface stays thin, but `panel.entry` is required because the SDK only
