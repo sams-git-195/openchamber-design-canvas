@@ -7263,6 +7263,9 @@ var SERVER_STATE_DIR = ".design-studio";
 var SERVER_STATE_FILE = "server.json";
 var activeSpawns = /* @__PURE__ */ new Map();
 var serverRecords = /* @__PURE__ */ new Map();
+function isDevServerStarting(dir) {
+  return activeSpawns.has(path5.resolve(dir));
+}
 function serverStatePath(dir) {
   return path5.join(dir, SERVER_STATE_DIR, SERVER_STATE_FILE);
 }
@@ -7539,6 +7542,10 @@ async function peekDevServer(dir) {
 }
 async function getDevServerStatus(dir) {
   const key = path5.resolve(dir);
+  if (isDevServerStarting(key)) {
+    const record2 = serverRecords.get(key);
+    return { up: false, port: record2?.port ?? null, starting: true };
+  }
   const record = serverRecords.get(key) ?? await readServerRecord(key);
   if (!record) {
     const { config } = await readStudioConfig(key);
@@ -10765,17 +10772,6 @@ async function resolveWorkspaceRoot(env = process.env) {
   if (override) return override;
   return (await resolveWorkspaceRootInfo(env)).root;
 }
-async function countWorkspaces(root) {
-  let count = 0;
-  try {
-    for (const entry of await fs9.readdir(root, { withFileTypes: true })) {
-      if (entry.isDirectory() && await resolveConfigPath(path10.join(root, entry.name)) !== null) count += 1;
-    }
-  } catch {
-    return 0;
-  }
-  return count;
-}
 var EXTENSION_DIR = path10.dirname(path10.dirname(fileURLToPath(import.meta.url)));
 function insideOrEqualCaseAware(root, dir) {
   if (process.platform !== "win32") return isInsideOrEqual(root, dir);
@@ -10843,7 +10839,7 @@ async function setWorkspaceRoot(value, env = process.env, opts = {}) {
   }
   const settings = await readSettings(env);
   let previous = (settings.previousRoots ?? []).filter((r) => !sameAbsoluteDir(r, next));
-  if (!sameAbsoluteDir(info.root, next) && await countWorkspaces(info.root) > 0) {
+  if (!sameAbsoluteDir(info.root, next)) {
     previous = [info.root, ...previous.filter((r) => !sameAbsoluteDir(r, info.root))];
   }
   previous = previous.slice(0, MAX_PREVIOUS_ROOTS);
@@ -11746,6 +11742,24 @@ if (!PORT || !TOKEN) {
   console.error("[design-canvas] missing OPENCHAMBER_SERVICE_PORT or OPENCHAMBER_SERVICE_TOKEN");
   process.exit(1);
 }
+var DEV_SERVER_ANSWER_MS = (() => {
+  const raw = Number(process.env.DS_DEV_SERVER_ANSWER_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15e3;
+})();
+async function ensureDevServerWithin(url, options) {
+  const joined = options.dir ? isDevServerStarting(options.dir) : false;
+  const boot = ensureDevServer(url, options);
+  boot.catch(() => void 0);
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), DEV_SERVER_ANSWER_MS);
+  });
+  try {
+    return { result: await Promise.race([boot, late]), joined };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 function sendJson(res, status, body) {
   const text = JSON.stringify(body);
   res.writeHead(status, {
@@ -12206,7 +12220,11 @@ var server = http.createServer(async (req, res) => {
           sendJson(res, 200, { ok: false, started: false, up: false, error: "configured url is not loopback" });
           return;
         }
-        const result = await ensureDevServer(configuredUrl, { dir, ownedOnly: true });
+        const { result, joined } = await ensureDevServerWithin(configuredUrl, { dir, ownedOnly: true });
+        if (!result) {
+          sendJson(res, 200, { ok: true, started: !joined, up: false, starting: true });
+          return;
+        }
         sendJson(res, 200, { ok: result.up, started: result.started, up: result.up, error: result.error });
       } catch (error) {
         sendJson(res, 200, { ok: false, started: false, up: false, error: error instanceof Error ? error.message : "could not start the dev server" });
@@ -12834,13 +12852,18 @@ var server = http.createServer(async (req, res) => {
         return;
       }
       let started = false;
+      let serverStarting = false;
       if (isLoopbackUrl(configUrl)) {
-        const dev = await ensureDevServer(configUrl, { dir: dirValue });
-        if (!dev.up) {
+        const { result: dev, joined } = await ensureDevServerWithin(configUrl, { dir: dirValue });
+        if (!dev) {
+          serverStarting = true;
+          started = !joined;
+        } else if (!dev.up) {
           sendJson(res, 200, { ok: false, error: dev.error ?? "the dev server is not available" });
           return;
+        } else {
+          started = dev.started;
         }
-        started = dev.started;
       }
       const registry = await readScreens(dirValue);
       if (screenParam !== null && !registry.screens.some((s) => s.id === screenParam)) {
@@ -12850,7 +12873,7 @@ var server = http.createServer(async (req, res) => {
       const view = await readView(dirValue);
       const mode = view.mode ?? getLastWorkspace()?.mode ?? "edit";
       const viewScreens = mergeRegistryWithView(registry, view, configUrl);
-      try {
+      const openWindow = async () => {
         if (viewScreens.length === 0) {
           const browser2 = await ensureBrowser(configUrl);
           const nav = await browser2.open(configUrl);
@@ -12858,7 +12881,7 @@ var server = http.createServer(async (req, res) => {
           setLastWorkspace({ dir: dirValue, screens: [], mode, activeScreen: null, view });
           startRegistryWatch(dirValue);
           wireBrowserHooks(browser2);
-          sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
+          return { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started };
         } else {
           const active = screenParam ?? viewScreens[0].id;
           const browser2 = await ensureBrowser();
@@ -12871,8 +12894,18 @@ var server = http.createServer(async (req, res) => {
           lastPushedRegistry = JSON.stringify(registry);
           if (focusRequested) await (dock ? applyDock(browser2, dock) : applyAutoDock(browser2));
           const state = await browser2.state();
-          sendJson(res, 200, { ok: true, started, ...state });
+          return { ok: true, started, ...state };
         }
+      };
+      if (serverStarting) {
+        void openWindow().catch((error) => {
+          console.error(`[design-canvas] background /open failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        sendJson(res, 200, { ok: true, opening: true, serverStarting: true, started, url: configUrl, title: "", settled: false });
+        return;
+      }
+      try {
+        sendJson(res, 200, await openWindow());
       } catch (error) {
         sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : "open failed" });
       }

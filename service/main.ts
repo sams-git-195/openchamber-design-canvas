@@ -14,7 +14,8 @@ import { promises as fs, type Dirent } from 'node:fs';
 import path from 'node:path';
 
 import { readStudioConfig, renameWorkspaceConfig, resolveConfigPath, writeStudioConfig } from './studio-config.ts';
-import { ensureDevServer, getDevServerStatus, isLoopbackUrl, peekDevServer, stopDevServer } from './project-server.ts';
+import { ensureDevServer, getDevServerStatus, isDevServerStarting, isLoopbackUrl, peekDevServer, stopDevServer } from './project-server.ts';
+import type { EnsureDevServerOptions, EnsureDevServerResult } from './project-server.ts';
 import { ensureBrowser, getBrowser, stopBrowser } from './surface.ts';
 import { dockPlacement, reapOrphanChrome } from './browser.ts';
 import { handleBrowserControl } from './browser-control.ts';
@@ -54,6 +55,41 @@ const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
 if (!PORT || !TOKEN) {
   console.error('[design-canvas] missing OPENCHAMBER_SERVICE_PORT or OPENCHAMBER_SERVICE_TOKEN');
   process.exit(1);
+}
+
+/**
+ * #9: the longest a request waits on a dev-server boot before it answers. The
+ * host caps a guest's service request at 20 s, while a cold npm/vite boot may
+ * take up to ensureDevServer's 60 s — so past this the route answers
+ * "starting" and the boot carries on in the background (the panel's status
+ * poll settles it). DS_DEV_SERVER_ANSWER_MS is a test seam only.
+ */
+const DEV_SERVER_ANSWER_MS = (() => {
+  const raw = Number(process.env.DS_DEV_SERVER_ANSWER_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15_000;
+})();
+
+/**
+ * ensureDevServer, waited on for at most DEV_SERVER_ANSWER_MS. Null means the
+ * boot is still running (it continues in the background); `joined` says a
+ * start for this dir was already in flight, i.e. this call spawned nothing.
+ */
+async function ensureDevServerWithin(
+  url: string,
+  options: EnsureDevServerOptions,
+): Promise<{ result: EnsureDevServerResult | null; joined: boolean }> {
+  const joined = options.dir ? isDevServerStarting(options.dir) : false;
+  const boot = ensureDevServer(url, options);
+  boot.catch(() => undefined);
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), DEV_SERVER_ANSWER_MS);
+  });
+  try {
+    return { result: await Promise.race([boot, late]), joined };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---- Design Canvas browser contract (spec §B) ----
@@ -758,7 +794,13 @@ const server = http.createServer(async (req, res) => {
         // announcing a foreign process on the configured port as our running
         // server: without a verified record it refuses with the port-in-use
         // error instead. (/open stays permissive for externally served previews.)
-        const result = await ensureDevServer(configuredUrl, { dir, ownedOnly: true });
+        // #9: a quick boot answers synchronously as before; a slow one answers
+        // `starting` and keeps booting — GET /server/status settles it.
+        const { result, joined } = await ensureDevServerWithin(configuredUrl, { dir, ownedOnly: true });
+        if (!result) {
+          sendJson(res, 200, { ok: true, started: !joined, up: false, starting: true });
+          return;
+        }
         sendJson(res, 200, { ok: result.up, started: result.started, up: result.up, error: result.error });
       } catch (error) {
         sendJson(res, 200, { ok: false, started: false, up: false, error: error instanceof Error ? error.message : 'could not start the dev server' });
@@ -1530,14 +1572,23 @@ const server = http.createServer(async (req, res) => {
 
       // Auto-start the dev server only for loopback URLs (the panel's Start
       // control owns manual starts; externally served workspaces skip this).
+      // #9: the wait is clamped (ensureDevServerWithin). A boot still running
+      // past it does not fail the open: the window launches anyway — its
+      // artboards show the error card + Retry until the server answers (V4-15)
+      // — and the answer says so: {ok:true, opening:true, serverStarting:true}.
       let started = false;
+      let serverStarting = false;
       if (isLoopbackUrl(configUrl)) {
-        const dev = await ensureDevServer(configUrl, { dir: dirValue });
-        if (!dev.up) {
+        const { result: dev, joined } = await ensureDevServerWithin(configUrl, { dir: dirValue });
+        if (!dev) {
+          serverStarting = true;
+          started = !joined;
+        } else if (!dev.up) {
           sendJson(res, 200, { ok: false, error: dev.error ?? 'the dev server is not available' });
           return;
+        } else {
+          started = dev.started;
         }
-        started = dev.started;
       }
 
       const registry = await readScreens(dirValue);
@@ -1554,7 +1605,7 @@ const server = http.createServer(async (req, res) => {
       const mode: CanvasMode = view.mode ?? getLastWorkspace()?.mode ?? 'edit';
       const viewScreens = mergeRegistryWithView(registry, view, configUrl);
 
-      try {
+      const openWindow = async (): Promise<Json> => {
         if (viewScreens.length === 0) {
           // No screens registered: fall back to the config url alone, exactly
           // like the { url } flow. The workspace echo still records the dir so
@@ -1567,7 +1618,7 @@ const server = http.createServer(async (req, res) => {
           setLastWorkspace({ dir: dirValue, screens: [], mode, activeScreen: null, view });
           startRegistryWatch(dirValue);
           wireBrowserHooks(browser);
-          sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
+          return { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started };
         } else {
           const active = screenParam ?? viewScreens[0]!.id;
           const browser: Browser = await ensureBrowser();
@@ -1603,8 +1654,21 @@ const server = http.createServer(async (req, res) => {
           // modeApplied and per-screen state/message; V4 adds registryError
           // and shellBridge).
           const state = await browser.state();
-          sendJson(res, 200, { ok: true, started, ...state });
+          return { ok: true, started, ...(state as unknown as Record<string, Json>) };
         }
+      };
+
+      if (serverStarting) {
+        // The launch outlives this answer; a failure lands in the log (the
+        // row's /state poll shows no window and its open path retries).
+        void openWindow().catch((error: unknown) => {
+          console.error(`[design-canvas] background /open failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        sendJson(res, 200, { ok: true, opening: true, serverStarting: true, started, url: configUrl, title: '', settled: false });
+        return;
+      }
+      try {
+        sendJson(res, 200, await openWindow());
       } catch (error) {
         sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'open failed' });
       }

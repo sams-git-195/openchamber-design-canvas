@@ -271,6 +271,29 @@ export function designSessionIdFromKey(key: string): string | null {
 }
 
 /**
+ * #11: the per-session prefixes a stale-key prune may drop. `design/` is NOT
+ * here on purpose — the marker is permanent by design.
+ */
+export const PRUNABLE_SESSION_KEY_PREFIXES: readonly string[] = ['ws/', 'mode/', 'canvas-open/'];
+
+/**
+ * #11: the storage keys whose session is gone: a `ws/`, `mode/` or
+ * `canvas-open/` key whose `<sessionId>` is not in `liveSessionIds`. Pure; the
+ * caller supplies a COMPLETE live set (or skips the prune).
+ */
+export function staleSessionKeys(keys: readonly string[], liveSessionIds: ReadonlySet<string>): string[] {
+  const stale: string[] = [];
+  for (const key of keys) {
+    const prefix = PRUNABLE_SESSION_KEY_PREFIXES.find((candidate) => key.startsWith(candidate));
+    if (!prefix) continue;
+    const id = key.slice(prefix.length);
+    if (id === '' || id.includes('/')) continue;
+    if (!liveSessionIds.has(id)) stale.push(key);
+  }
+  return stale;
+}
+
+/**
  * Every `attach` / `start-session` payload must carry an http(s) URL — the host
  * rejects anything else with "URL must be http or https.". The canvas session
  * has no real page yet, so fall back to a placeholder that the chips can show.
@@ -588,6 +611,9 @@ export function buildModeChip(
     `Artifact type: ${mode.type} — ${TYPE_HINT[mode.type]}`,
     `Visual direction: ${directionLabel(mode.direction)} · Fidelity: ${mode.fidelity}`,
     agreementStatusLine(mode),
+    // The 2000-char cut keeps the chip inside its 15.5k budget (pinned by the
+    // budget test). It is not the brief LIMIT: /canvas and the page both refuse
+    // a brief over BRIEF_MAX up front with the same briefLimitError (#10).
     mode.brief ? `Brief: ${mode.brief.slice(0, 2000)}` : 'Brief: the user will say or type it next.',
   ];
   if (workspace) {
@@ -810,5 +836,25 @@ export function critiqueReviewChip(
     title: 'Canvas critique — gate digest',
     url: attachUrl(workspaceUrl ?? undefined),
     text: critiqueReviewText(digest).slice(0, GUEST_COMPOSE_TEXT_MAX),
+  };
+}
+
+/**
+ * #6: the info chip `/canvas export|critique` answers with at once — the job
+ * itself outlives the host's resolve cap. The critique chip shares the review
+ * chip's id, so the digest attached later REPLACES it in the composer.
+ */
+export function canvasJobStartedChip(
+  kind: 'export' | 'critique',
+  sessionId: string | null,
+  workspaceUrl: string | null | undefined,
+  text: string,
+): AttachIssueRequest {
+  return {
+    providerId: 'design-canvas',
+    id: `canvas-${kind}-${(sessionId || 'adhoc').slice(0, 110)}`,
+    title: kind === 'export' ? 'Canvas export — started' : 'Canvas critique — started',
+    url: attachUrl(workspaceUrl ?? undefined),
+    text,
   };
 }

@@ -226,6 +226,13 @@ export type OpenResult = {
   error?: string;
   /** Machine code the panel reacts to; V4-15 answers `WORKSPACE_MISSING`. */
   code?: string;
+  /**
+   * #9: the dev server was still booting when the service's clamped wait ran
+   * out, so the window launches in the background (`ok` stays true). The
+   * row's `/state` and `/server/status` polls settle what happens next.
+   */
+  opening?: boolean;
+  serverStarting?: boolean;
 };
 
 /** The workspace folder no longer exists — the row clears its `ws/` record and offers a new create. */
@@ -233,6 +240,9 @@ export const WORKSPACE_MISSING_CODE = 'WORKSPACE_MISSING';
 
 /** Status shown in the dock while an open (and dev-server start) is in flight. */
 export const OPENING_STATUS = 'Starting dev server…';
+
+/** #9: the window is launching while the dev server keeps booting. */
+export const OPENING_SERVER_STARTING_STATUS = 'Opening the canvas · dev server still starting…';
 
 /**
  * Open (or warm-navigate) the workspace's live canvas: `POST /open`. Spec §B:
@@ -284,7 +294,14 @@ export function stopWorkspaceServer(dir: string): Promise<ServerStopResult> {
 }
 
 /** What `POST /server/start` answers: whether the dev server is up and who started it. */
-export type ServerStartResult = { ok: boolean; started?: boolean; up?: boolean; error?: string };
+export type ServerStartResult = {
+  ok: boolean;
+  started?: boolean;
+  up?: boolean;
+  error?: string;
+  /** #9: a slow boot answered early (`ok:true, up:false`); `/server/status` settles it. */
+  starting?: boolean;
+};
 
 /**
  * Start (or confirm) the dev server for `dir`. When `url` is omitted the
@@ -302,7 +319,14 @@ export function startDevServer(dir: string, url?: string): Promise<ServerStartRe
  * conflict). When present the reachability bit must not be rendered as a
  * trustworthy green Start.
  */
-export type ServerStatus = { up: boolean; port: number | null; pid?: number; error?: string };
+export type ServerStatus = {
+  up: boolean;
+  port: number | null;
+  pid?: number;
+  error?: string;
+  /** #9: a start for this dir is still booting service-side. */
+  starting?: boolean;
+};
 
 /** The recorded dev-server status for a workspace dir (never starts one). */
 export function getServerStatus(dir: string): Promise<ServerStatus> {
@@ -838,6 +862,7 @@ export function pickHintActive(state: Pick<LiveState, 'windowOpen'>): boolean {
 
 /** One line describing the outcome of an open, for the status row. */
 export function formatOpenStatus(result: OpenResult): string {
+  if (result.ok && result.serverStarting) return OPENING_SERVER_STARTING_STATUS;
   if (result.ok) return result.started ? 'Dev server started · window open' : 'Window open';
   return result.error ?? 'Could not open the window';
 }

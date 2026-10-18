@@ -133,6 +133,8 @@ import {
   buildCompactModeChip,
   buildModeChip,
   critiqueReviewChip,
+  canvasJobStartedChip,
+  staleSessionKeys,
   designMarkerKey,
   designMarkerValue,
   designSessionIdFromKey,
@@ -255,6 +257,12 @@ const state = {
   windowOpen: false,
   /** True while OUR side is bringing the window up (see openCanvasWindow). */
   pendingOpen: false,
+  /**
+   * #9: until this epoch ms a service-side background open (`opening:true`)
+   * may still be launching the window, so a `/state` "no window" is not read
+   * as the user closing it. 0 = no background open pending.
+   */
+  backgroundOpenUntil: 0,
   /**
    * V4-4: the last `/state.registryError` message we toasted while the condition
    * held. Null clears the arm, so a fixed-then-rebroken registry toasts again.
@@ -941,12 +949,17 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
   // they never fall through to the brief branch.
   if (copy.isHelpVerb(args)) return canvasHelpChip();
   const [head = '', ...rest] = args.trim().split(/\s+/);
+  // #6: both verbs outlast the host's 20 s resolve cap, so the resolve only
+  // KICKS them and answers at once with an info chip; this (real, long-lived)
+  // pane toasts or attaches the outcome when it lands. The hidden resolve pane
+  // dies with its answer, so there it is a thrown, shown failure instead.
   if (/^export$/i.test(head!)) {
-    await canvasExportCommand(rest.join(' '));
-    return null;
+    if (isHiddenResolvePane()) throw new Error(copy.CANVAS_JOBS_NEED_RAIL);
+    return startCanvasExportCommand(rest.join(' '));
   }
   if (/^critique$/i.test(head!)) {
-    return await canvasCritiqueCommand();
+    if (isHiddenResolvePane()) throw new Error(copy.CANVAS_JOBS_NEED_RAIL);
+    return startCanvasCritiqueCommand();
   }
   const parsed = parseDesignArgs(args);
   if (!parsed.on) {
@@ -954,6 +967,9 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
     await host.toast(copy.infoToast(copy.DESIGN_MODE_OFF));
     return null;
   }
+  // #10: the same refusal the page gives — never a silent slice of the brief.
+  const tooLong = briefLimitError(parsed.brief);
+  if (tooLong) throw new Error(tooLong);
   // F2: every ON path keys a workspace and a mode to the session. A new-chat
   // draft has none yet; null would surface only the host's generic "found
   // nothing to attach", while a THROWN error is shown to the user verbatim.
@@ -1271,45 +1287,63 @@ export async function runCanvasExport(
   }
 }
 
-/** `/canvas export [png|pdf]`: the workspace's screens → files under <dir>/exports. */
-export async function canvasExportCommand(raw: string): Promise<void> {
-  const parsed = parseCanvasExportArgs(raw);
-  if ('error' in parsed) {
-    await host.toast(copy.errorToast(parsed.error));
-    return;
-  }
-  const ws = state.workspace;
-  if (!ws || ws.dir.trim() === '') {
-    await host.toast(copy.errorToast(copy.NO_CANVAS_FOR_EXPORT));
-    return;
-  }
-  await runCanvasExport(ws.dir, 'formats' in parsed ? parsed.formats : undefined);
+/**
+ * The export/critique job this pane kicked last (#6), or null. The resolve has
+ * already answered; this is what toasts or attaches the outcome. Test seam.
+ */
+let canvasJobTask: Promise<void> | null = null;
+
+export function getCanvasJobTask(): Promise<void> | null {
+  return canvasJobTask;
 }
 
 /**
- * `/canvas critique`: POST /critique for the workspace and compose the bounded
- * gate digest into the chat as a REVIEW REQUEST (D7-C) — the agent writes the
- * prose; the service guarantees the gate-backed part. The chip text is capped
- * at GUEST_COMPOSE_TEXT_MAX by critiqueReviewChip.
+ * `/canvas export [png|pdf]` (#6): refuse a bad format or a missing workspace
+ * as a thrown, shown failure; otherwise kick POST /export + the status poll in
+ * THIS pane and answer with the info chip at once. The job survives the pane
+ * service-side; the outcome is toasted once, when the poll settles.
  */
-export async function canvasCritiqueCommand(): Promise<null | Awaited<ReturnType<typeof buildModeChip>>> {
+function startCanvasExportCommand(raw: string): ReturnType<typeof buildModeChip> {
+  const parsed = parseCanvasExportArgs(raw);
+  if ('error' in parsed) throw new Error(parsed.error);
   const ws = state.workspace;
-  if (!ws || ws.dir.trim() === '') {
-    await host.toast(copy.errorToast(copy.NO_CANVAS_FOR_CRITIQUE));
-    return null;
-  }
+  if (!ws || ws.dir.trim() === '') throw new Error(copy.NO_CANVAS_FOR_EXPORT);
+  canvasJobTask = runCanvasExport(ws.dir, 'formats' in parsed ? parsed.formats : undefined).catch(() => undefined);
+  return canvasJobStartedChip('export', state.sessionId, currentConfig()?.url, copy.EXPORT_STARTED);
+}
+
+/**
+ * `/canvas critique` (#6): POST /critique for the workspace in THIS pane and
+ * answer with the info chip at once; the bounded gate digest is attached as a
+ * REVIEW REQUEST (D7-C) when it lands — same chip id, so it replaces the info
+ * chip. The agent writes the prose; the service guarantees the gate-backed
+ * part. The chip text is capped at GUEST_COMPOSE_TEXT_MAX by critiqueReviewChip.
+ */
+function startCanvasCritiqueCommand(): ReturnType<typeof buildModeChip> {
+  const ws = state.workspace;
+  if (!ws || ws.dir.trim() === '') throw new Error(copy.NO_CANVAS_FOR_CRITIQUE);
+  const sessionId = state.sessionId;
+  canvasJobTask = runCanvasCritique(ws.dir, sessionId).catch(() => undefined);
+  return canvasJobStartedChip('critique', sessionId, currentConfig()?.url, copy.CRITIQUE_STARTED);
+}
+
+async function runCanvasCritique(dir: string, sessionId: string | null): Promise<void> {
   let digest: Awaited<ReturnType<typeof critiqueWorkspace>>;
   try {
-    digest = await critiqueWorkspace(ws.dir);
+    digest = await critiqueWorkspace(dir);
   } catch (error) {
     await host.toast(copy.errorToast(copy.critiqueFailed(copy.reason(error))));
-    return null;
+    return;
   }
   if (!digest.ok) {
     await host.toast(copy.errorToast(copy.critiqueFailed(digest.error || 'the service gave no reason')));
-    return null;
+    return;
   }
-  return critiqueReviewChip(state.sessionId, state.config?.url, digest);
+  try {
+    await host.attach(critiqueReviewChip(sessionId, state.config?.url, digest));
+  } catch (error) {
+    await host.toast(copy.errorToast(copy.critiqueFailed(copy.reason(error))));
+  }
 }
 
 // ---- canvas sessions ----
@@ -1859,6 +1893,13 @@ function openStatus(message: string, kind: 'info' | 'error' = 'info'): void {
  * `placeWindow` default stands. Needs a host API (e.g. a window-bounds read on
  * the bridge) — filed, not faked.
  */
+/**
+ * #9: how long a background open (`opening:true`) may take to show a window:
+ * the rest of ensureDevServer's 60 s boot past the service's 15 s answer, plus
+ * the Chrome launch.
+ */
+const BACKGROUND_OPEN_GRACE_MS = 60_000;
+
 async function openCanvasWindow(notify: boolean): Promise<void> {
   const ws = state.workspace;
   if (!ws) return;
@@ -1898,6 +1939,9 @@ async function openCanvasWindow(notify: boolean): Promise<void> {
     // Remember that THIS panel started the server, so Design Mode OFF may stop
     // it later (never a server we did not start).
     if (result.ok && result.started) markServerStartedByUs(ws.dir);
+    // #9: a slow boot answers before the window exists — success, but the
+    // window is still launching: hold off the "window closed → mode OFF" read.
+    if (result.ok && result.opening) state.backgroundOpenUntil = Date.now() + BACKGROUND_OPEN_GRACE_MS;
     openStatus(formatOpenStatus(result), result.ok ? 'info' : 'error');
   } catch (error) {
     openStatus(copy.openCanvasFailed(copy.reason(error)), 'error');
@@ -1948,6 +1992,10 @@ async function previewWorkspace(row: WorkspaceRow): Promise<void> {
     const result = await openWorkspace({ dir: row.dir, focus: true });
     if (!result.ok) {
       await host.toast(copy.errorToast(copy.openCanvasFailed(result.error ?? 'the service gave no reason')));
+      return;
+    }
+    if (result.opening) {
+      await host.toast(copy.infoToast(copy.openingWorkspace(row.name)));
       return;
     }
     await host.toast(copy.successToast(copy.openedWorkspace(row.name)));
@@ -2575,7 +2623,8 @@ async function refreshServerStatus(): Promise<void> {
     if (status.error) {
       state.serverError = status.error;
     } else {
-      state.serverStatus = status.up;
+      // #9: still booting reads as "checking", never as stopped.
+      state.serverStatus = status.starting && !status.up ? null : status.up;
       state.serverError = null;
     }
     announceServerTransition(before);
@@ -2703,6 +2752,8 @@ async function onServerControlClick(): Promise<void> {
   }
 }
 
+const SERVER_STARTING_MESSAGE = 'Preview dev server is starting…';
+
 /** Ask the service to start the workspace's dev server and mark it as ours. */
 async function startCurrentServer(): Promise<void> {
   const dir = actionDir();
@@ -2716,11 +2767,14 @@ async function startCurrentServer(): Promise<void> {
   renderServerControl();
   try {
     const result: ServerStartResult = await startDevServer(dir, url);
-    if (result.ok && result.up && result.started) markServerStartedByUs(dir);
+    // #9: a slow boot answers `starting` — ours when this request spawned it.
+    if (result.ok && (result.up || result.starting) && result.started) markServerStartedByUs(dir);
     if (directoryMovedSince(dir, gen)) return;
-    state.serverStatus = result.up ?? null;
+    state.serverStatus = result.starting ? null : result.up ?? null;
     state.serverError = result.error ?? null;
-    if (result.ok && result.started) {
+    if (result.ok && result.starting) {
+      announceServer(SERVER_STARTING_MESSAGE);
+    } else if (result.ok && result.started) {
       announceServer('Preview dev server started.');
     } else if (result.ok && result.up) {
       announceServer('Preview dev server is running.');
@@ -4999,8 +5053,11 @@ export async function applyState(stateData: LiveState): Promise<void> {
   renderWindowStatus();
   // The user closed the live window by hand: that IS Design Mode going off. Flip
   // the mode (persist it) and reflect it in the widget — never auto-reopen. The
-  // `pendingOpen` guard keeps our own opening window from being read as a close.
-  if (!state.windowOpen && state.mode.on && !state.pendingOpen) {
+  // `pendingOpen` guard keeps our own opening window from being read as a close;
+  // so does a background open the service is still launching (#9).
+  if (state.windowOpen) state.backgroundOpenUntil = 0;
+  const backgroundOpening = state.backgroundOpenUntil > Date.now();
+  if (!state.windowOpen && state.mode.on && !state.pendingOpen && !backgroundOpening) {
     await turnModeOffByWindowClose();
   }
 }
@@ -5467,10 +5524,72 @@ async function loadRailWork(): Promise<void> {
   renderRailLocation();
 }
 
+/** The stale-key prune ran (or was skipped) for this mount — at most once (#11). */
+let staleKeyPruneStarted = false;
+
+/**
+ * Every session id the host knows right now (archived ones included), or null
+ * when that CANNOT be said completely: a list that failed, is still loading,
+ * or covers a directory only partly. A prune must never act on a partial set.
+ */
+async function readLiveSessionIds(): Promise<Set<string> | null> {
+  try {
+    const projects = await host.listProjects();
+    if (projects.state !== 'ready') return null;
+    const live = new Set<string>();
+    for (const project of projects.projects) {
+      const snapshot = await host.listSessions(project.id);
+      if (snapshot.state !== 'ready') return null;
+      if ((snapshot.coverage ?? []).some((entry) => entry.state !== 'ready')) return null;
+      for (const session of snapshot.sessions) live.add(session.id);
+    }
+    return live;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #11: drop `ws/`, `mode/` and `canvas-open/` keys of sessions that no longer
+ * exist, so storage does not grow forever. Real panes only, once per mount;
+ * `design/<id>` is never touched (permanent marker). Any doubt — the session
+ * list failed or came back empty, keys() failed — prunes nothing.
+ */
+export async function pruneStaleSessionKeys(): Promise<string[]> {
+  if (staleKeyPruneStarted || !isRealPane()) return [];
+  staleKeyPruneStarted = true;
+  const live = await readLiveSessionIds();
+  if (!live || live.size === 0) return [];
+  if (state.sessionId) live.add(state.sessionId);
+  let keys: string[];
+  try {
+    keys = await host.storage.keys();
+  } catch {
+    return [];
+  }
+  const stale = staleSessionKeys(keys, live);
+  const pruned: string[] = [];
+  for (const key of stale) {
+    try {
+      await host.storage.delete(key);
+      pruned.push(key);
+    } catch {
+      /* the next mount tries again */
+    }
+  }
+  return pruned;
+}
+
+/** Test seam: let the next `pruneStaleSessionKeys` run, as a fresh mount would. */
+export function resetStaleKeyPrune(): void {
+  staleKeyPruneStarted = false;
+}
+
 /** Start the rail's refresh — once, and only when the frame is a real pane. */
 function startRailLive(): void {
   if (railLive || state.surface !== 'panel' || !isRealPane()) return;
   railLive = true;
+  void pruneStaleSessionKeys();
   // The panel is open: clear the icon, zero the count, and count turns again only once it closes.
   badgeTracking = true;
   void resetRailBadge();
@@ -5519,6 +5638,8 @@ function mountSurface(root: HTMLElement): void {
     startPickLoop();
   } else if (kind === 'rail') {
     startRailLive(); // a no-op in the 1×1 resolve pane
+  } else if (kind === 'page') {
+    void pruneStaleSessionKeys();
   }
 }
 

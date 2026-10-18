@@ -157,7 +157,8 @@ test('atomic write: 2-space JSON, trailing newline, no tmp files left behind', a
     const result = await setWorkspaceRoot(chosen, env, { extensionDir: root });
     assert.deepEqual(result, { ok: true, workspaceRoot: chosen });
     const text = await readFile(settingsFile, 'utf8');
-    assert.equal(text, `${JSON.stringify({ version: 1, workspaceRoot: chosen }, null, 2)}\n`);
+    // #12: the default root it switched away from is remembered unconditionally.
+    assert.equal(text, `${JSON.stringify({ version: 1, workspaceRoot: chosen, previousRoots: [await defaultWorkspaceRoot(env)] }, null, 2)}\n`);
     assert.deepEqual(await readdir(path.dirname(settingsFile)), ['settings.json'], 'tmp file renamed away');
     assert.equal(await resolveWorkspaceRoot(env), chosen, 'the next resolve sees the new root');
   } finally {
@@ -165,33 +166,40 @@ test('atomic write: 2-space JSON, trailing newline, no tmp files left behind', a
   }
 });
 
-test('previousRoots: the old root is pushed only when it holds a workspace; re-selecting removes it', async () => {
+test('previousRoots: the old root is pushed on every switch, even when empty; re-selecting removes it', async () => {
   const { base, env } = await sandbox();
   try {
+    const defaultRoot = await defaultWorkspaceRoot(env);
     const empty = path.join(base, 'empty-root');
     const full = path.join(base, 'full-root');
     const next = path.join(base, 'next-root');
     assert.equal((await setWorkspaceRoot(empty, env, { extensionDir: root })).ok, true);
+    assert.deepEqual((await readSettings(env)).previousRoots, [defaultRoot], 'the default root is remembered when switched away from');
     assert.equal((await setWorkspaceRoot(full, env, { extensionDir: root })).ok, true);
-    assert.equal((await readSettings(env)).previousRoots, undefined, 'an empty old root is not remembered');
+    assert.deepEqual((await readSettings(env)).previousRoots, [empty, defaultRoot], 'an empty old root is remembered too, newest first');
 
     await makeWorkspace(full, 'kept');
     assert.equal((await setWorkspaceRoot(next, env, { extensionDir: root })).ok, true);
-    assert.deepEqual((await readSettings(env)).previousRoots, [full], 'a non-empty old root is remembered');
-    assert.deepEqual((await resolveWorkspaceRootInfo(env)).previousRoots, [full]);
+    assert.deepEqual((await readSettings(env)).previousRoots, [full, empty, defaultRoot], 'a non-empty old root is remembered');
+    assert.deepEqual((await resolveWorkspaceRootInfo(env)).previousRoots, [full, empty, defaultRoot]);
 
     // Same root, different case on win32: still one entry (sameAbsoluteDir dedupe).
     const spelled = process.platform === 'win32' ? full.toUpperCase() : full;
     assert.equal((await setWorkspaceRoot(spelled, env, { extensionDir: root })).ok, true);
-    assert.equal((await readSettings(env)).previousRoots, undefined, 're-selecting the old root removes it from previousRoots');
+    assert.deepEqual((await readSettings(env)).previousRoots, [next, empty, defaultRoot], 're-selecting the old root removes it from previousRoots');
 
-    // Reset (null) → default; the non-empty current root is remembered.
+    // Re-setting the current root is no switch: nothing new is recorded.
+    assert.equal((await setWorkspaceRoot(spelled, env, { extensionDir: root })).ok, true);
+    assert.deepEqual((await readSettings(env)).previousRoots, [next, empty, defaultRoot], 'no self-entry, no duplicate');
+
+    // Reset (null) → default; the current root is remembered and the default leaves the list.
     const reset = await setWorkspaceRoot(null, env, { extensionDir: root });
-    assert.deepEqual(reset, { ok: true, workspaceRoot: await defaultWorkspaceRoot(env) });
+    assert.deepEqual(reset, { ok: true, workspaceRoot: defaultRoot });
     const after = await readSettings(env);
     assert.equal(after.workspaceRoot, undefined, 'null clears the choice');
-    assert.equal(after.previousRoots?.length, 1);
+    assert.equal(after.previousRoots?.length, 3);
     assert.equal(after.previousRoots![0]!.toLowerCase(), full.toLowerCase());
+    assert.deepEqual(after.previousRoots!.slice(1), [next, empty]);
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -300,12 +308,13 @@ test('GET/PUT /settings and /workspaces with previousRoots (spawned service)', {
     assert.deepEqual(await (await api('/settings', { method: 'PUT', body: JSON.stringify({ workspaceRoot: first }) })).json(), { ok: true, workspaceRoot: first });
     assert.deepEqual(await (await api('/settings', { method: 'PUT', body: JSON.stringify({ workspaceRoot: second }) })).json(), { ok: true, workspaceRoot: second });
     const now = (await (await api('/settings')).json()) as Record<string, unknown>;
-    assert.deepEqual([now.workspaceRoot, now.source, now.previousRoots], [second, 'settings', [first]]);
+    // The default root was switched away from first: it is remembered as well (#12, unconditional).
+    assert.deepEqual([now.workspaceRoot, now.source, now.previousRoots], [second, 'settings', [first, initial.defaultRoot]]);
 
     const fresh = await makeWorkspace(second, 'new-one');
     const listed = (await (await api('/workspaces')).json()) as { root: string; roots: string[]; workspaces: Array<Record<string, unknown>> };
     assert.equal(listed.root, second, 'root stays the CURRENT root');
-    assert.deepEqual(listed.roots, [second, first]);
+    assert.deepEqual(listed.roots, [second, first, initial.defaultRoot]);
     const byDir = new Map(listed.workspaces.map((w) => [w.dir, w]));
     assert.deepEqual([byDir.get(fresh)?.root, byDir.get(fresh)?.legacyRoot], [second, false]);
     assert.deepEqual([byDir.get(old)?.root, byDir.get(old)?.legacyRoot], [first, true]);

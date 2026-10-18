@@ -256,8 +256,10 @@ export async function validateWorkspaceRootCandidate(
 
 /**
  * PUT /settings: choose (string) or reset (null) the workspace root. The old
- * root joins previousRoots only when it still holds ≥1 workspace (so nothing
- * the user made disappears from the list); the new root leaves previousRoots.
+ * root always joins previousRoots on a real switch — even one that looks empty
+ * now (a workspace may land there later, or the scan may have failed) — so
+ * nothing the user made disappears from the list; the new root leaves
+ * previousRoots. Deduped, newest first, capped at MAX_PREVIOUS_ROOTS.
  */
 export async function setWorkspaceRoot(
   value: string | null,
@@ -282,7 +284,7 @@ export async function setWorkspaceRoot(
   }
   const settings = await readSettings(env);
   let previous = (settings.previousRoots ?? []).filter((r) => !sameAbsoluteDir(r, next));
-  if (!sameAbsoluteDir(info.root, next) && (await countWorkspaces(info.root)) > 0) {
+  if (!sameAbsoluteDir(info.root, next)) {
     previous = [info.root, ...previous.filter((r) => !sameAbsoluteDir(r, info.root))];
   }
   previous = previous.slice(0, MAX_PREVIOUS_ROOTS);

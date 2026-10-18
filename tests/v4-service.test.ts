@@ -944,6 +944,81 @@ test('v4 routes: malformed → 400, workspace-marker guards → 400, business fa
   }
 });
 
+// ---- #9: a slow dev-server boot answers "starting" inside the host's 20 s cap ----
+
+test('#9: /server/start and /open answer early on a slow boot; /server/status settles it', { timeout: 90_000 }, async () => {
+  const port = await pickFreePort(44000, 1500);
+  const wsRoot = await mkdtemp(path.join(tmpdir(), 'v4-slowboot-root-'));
+  const makeSlowWorkspace = async (name: string): Promise<{ dir: string; url: string }> => {
+    const devPort = await pickFreePort(46000, 1500);
+    const dir = await mkdtemp(path.join(tmpdir(), `v4-slowboot-${name}-`));
+    const url = `http://127.0.0.1:${devPort}/`;
+    // Answers only after 6 s — well past the 2 s answer clamp below (2 s, not less:
+    // the fast path's win32 identity check alone may take ~1 s).
+    await writeFile(path.join(dir, 'boot.cjs'), `setTimeout(() => require('http').createServer((q, r) => r.end('ok')).listen(${devPort}, '127.0.0.1'), 6000);\n`, 'utf8');
+    await writeFile(path.join(dir, '.design-studio.json'), JSON.stringify({ version: 1, name, type: 'hi-fi', url, command: 'node boot.cjs', entry: 'index.html' }), 'utf8');
+    await writeFile(path.join(dir, 'screens.json'), JSON.stringify({ version: 1, screens: [{ id: 'home', file: 'index.html', title: 'Home', width: 1280, height: 800 }] }), 'utf8');
+    return { dir, url };
+  };
+  const manual = await makeSlowWorkspace('manual');
+  const opened = await makeSlowWorkspace('open');
+  const child = spawn(process.execPath, [path.join(root, 'service', 'main.ts')], {
+    env: {
+      ...process.env,
+      DS_DEV_SERVER_ANSWER_MS: '2000',
+      // The background window launch must not start a real Chrome here.
+      DS_CHROME_PATH: path.join(wsRoot, 'no-such-chrome.exe'),
+      DS_WORKSPACE_ROOT: wsRoot,
+      OPENCHAMBER_SERVICE_PORT: String(port),
+      OPENCHAMBER_SERVICE_TOKEN: TOKEN,
+    },
+    stdio: 'ignore',
+  });
+  const api = (p: string, init?: RequestInit) => fetch(`http://127.0.0.1:${port}${p}`, {
+    ...init,
+    headers: { authorization: `Bearer ${TOKEN}`, ...(init?.body ? { 'content-type': 'application/json' } : {}) },
+  });
+  const status = async (dir: string) => await (await api(`/server/status?dir=${encodeURIComponent(dir)}`)).json() as { up: boolean; starting?: boolean; error?: string };
+  const waitUp = async (dir: string): Promise<boolean> => {
+    for (let i = 0; i < 100; i += 1) {
+      if ((await status(dir)).up) return true;
+      await pause(150);
+    }
+    return false;
+  };
+  try {
+    await waitForHealth(port, child);
+
+    // /server/start: the boot outlives the clamp → an immediate "starting" answer.
+    const t0 = Date.now();
+    const start = await (await api('/server/start', { method: 'POST', body: JSON.stringify({ dir: manual.dir, url: manual.url }) })).json() as Record<string, unknown>;
+    assert.ok(Date.now() - t0 < 5000, 'answered before the server came up');
+    assert.deepEqual(start, { ok: true, started: true, up: false, starting: true });
+    const mid = await status(manual.dir);
+    assert.equal(mid.up, false);
+    assert.equal(mid.starting, true, 'the status poll reports the boot in flight (not an error, not stopped)');
+    assert.equal(mid.error, undefined);
+    assert.equal(await waitUp(manual.dir), true, 'the background boot settles up');
+    assert.equal((await status(manual.dir)).starting, undefined, 'starting clears once up');
+    // Fast path stays synchronous: an up server answers at once with up:true.
+    const again = await (await api('/server/start', { method: 'POST', body: JSON.stringify({ dir: manual.dir, url: manual.url }) })).json() as Record<string, unknown>;
+    assert.deepEqual([again.ok, again.up, again.starting], [true, true, undefined]);
+
+    // /open {dir}: the clamped wait runs out → the window launches in the background.
+    const open = await (await api('/open', { method: 'POST', body: JSON.stringify({ dir: opened.dir, focus: false }) })).json() as Record<string, unknown>;
+    assert.equal(open.ok, true, 'a still-booting server does not fail the open');
+    assert.equal(open.opening, true);
+    assert.equal(open.serverStarting, true);
+    assert.equal(open.started, true);
+    assert.equal(await waitUp(opened.dir), true, 'the boot /open kicked still settles up');
+  } finally {
+    await api('/server/stop', { method: 'POST', body: JSON.stringify({ dir: manual.dir }) }).catch(() => undefined);
+    await api('/server/stop', { method: 'POST', body: JSON.stringify({ dir: opened.dir }) }).catch(() => undefined);
+    child.kill('SIGKILL');
+    for (const dir of [manual.dir, opened.dir, wsRoot]) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
 // ---- D3 pin (V4-2): the PDF target carries NO pick/probe world -------------------
 
 test('printScreenToPdf runs the D3 sequence WITHOUT injecting the pick/probe scripts (V4-2 PDF pin)', async () => {

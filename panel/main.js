@@ -1705,6 +1705,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   }
   var WORKSPACE_MISSING_CODE = "WORKSPACE_MISSING";
   var OPENING_STATUS = "Starting dev server\u2026";
+  var OPENING_SERVER_STARTING_STATUS = "Opening the canvas \xB7 dev server still starting\u2026";
   function openWorkspace(input) {
     const payload = { dir: input.dir };
     if (input.screen !== void 0) payload.screen = input.screen;
@@ -1891,6 +1892,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return state2.windowOpen;
   }
   function formatOpenStatus(result) {
+    if (result.ok && result.serverStarting) return OPENING_SERVER_STARTING_STATUS;
     if (result.ok) return result.started ? "Dev server started \xB7 window open" : "Window open";
     return result.error ?? "Could not open the window";
   }
@@ -2328,6 +2330,9 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   var FILE_REFERENCE_ADDED = "File reference added to the composer.";
   var FOLDER_PATH_COPIED = "Folder path copied.";
   var DROP_PATH_MESSAGE = "Dropped files cannot be attached by name. Paste a file path using + \u2192 File path.";
+  var EXPORT_STARTED = "Export started \u2014 the result is toasted when it finishes.";
+  var CRITIQUE_STARTED = "Critique started \u2014 the review chip follows when it finishes.";
+  var CANVAS_JOBS_NEED_RAIL = "Open the Design Canvas rail tab to run exports and critiques.";
   var EXPORT_STILL_RUNNING = "Export is still running. Files land in the workspace exports folder as each screen finishes.";
   var DIAGNOSTICS_COPIED = "Diagnostics copied. Paste them into your bug report.";
   var listWorkspacesFailed = (error) => withNext(`Could not list canvas workspaces: ${error}`, "Check that the Design Canvas service is running, then try again.");
@@ -2343,6 +2348,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   var startSessionFailed = (error) => withNext(`Could not start the design: ${error}`, "Your draft is unchanged; try again.");
   var openCanvasFailed = (error) => withNext(`Could not open the canvas: ${error}`, "Try again.");
   var openedWorkspace = (name) => `Opened ${name}. Its canvas window is live.`;
+  var openingWorkspace = (name) => `Opening ${name}. Its dev server is still starting; the screens load when it answers.`;
   var missingWorkspace = (message) => withNext(message, "Start creates a new canvas.");
   var attachFailed = (what, error) => withNext(`Could not add the ${what} reference: ${error}`, "Try again.");
   var openChatFailed = (error) => withNext(`Could not open the canvas chat: ${error}`, "Try again from Your design work.");
@@ -4004,6 +4010,18 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     const prefix = "design/";
     return key.startsWith(prefix) && key.length > prefix.length ? key.slice(prefix.length) : null;
   }
+  var PRUNABLE_SESSION_KEY_PREFIXES = ["ws/", "mode/", "canvas-open/"];
+  function staleSessionKeys(keys, liveSessionIds) {
+    const stale = [];
+    for (const key of keys) {
+      const prefix = PRUNABLE_SESSION_KEY_PREFIXES.find((candidate) => key.startsWith(candidate));
+      if (!prefix) continue;
+      const id = key.slice(prefix.length);
+      if (id === "" || id.includes("/")) continue;
+      if (!liveSessionIds.has(id)) stale.push(key);
+    }
+    return stale;
+  }
   var PLACEHOLDER_URL = "https://design.local/session";
   function isHttpUrl(value) {
     if (!value) return false;
@@ -4189,6 +4207,9 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       `Artifact type: ${mode.type} \u2014 ${TYPE_HINT[mode.type]}`,
       `Visual direction: ${directionLabel(mode.direction)} \xB7 Fidelity: ${mode.fidelity}`,
       agreementStatusLine(mode),
+      // The 2000-char cut keeps the chip inside its 15.5k budget (pinned by the
+      // budget test). It is not the brief LIMIT: /canvas and the page both refuse
+      // a brief over BRIEF_MAX up front with the same briefLimitError (#10).
       mode.brief ? `Brief: ${mode.brief.slice(0, 2e3)}` : "Brief: the user will say or type it next."
     ];
     if (workspace) {
@@ -4341,6 +4362,15 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       title: "Canvas critique \u2014 gate digest",
       url: attachUrl(workspaceUrl ?? void 0),
       text: critiqueReviewText(digest).slice(0, GUEST_COMPOSE_TEXT_MAX)
+    };
+  }
+  function canvasJobStartedChip(kind, sessionId, workspaceUrl, text) {
+    return {
+      providerId: "design-canvas",
+      id: `canvas-${kind}-${(sessionId || "adhoc").slice(0, 110)}`,
+      title: kind === "export" ? "Canvas export \u2014 started" : "Canvas critique \u2014 started",
+      url: attachUrl(workspaceUrl ?? void 0),
+      text
     };
   }
 
@@ -4536,6 +4566,12 @@ ${TRUNCATED_MARKUP}` };
     windowOpen: false,
     /** True while OUR side is bringing the window up (see openCanvasWindow). */
     pendingOpen: false,
+    /**
+     * #9: until this epoch ms a service-side background open (`opening:true`)
+     * may still be launching the window, so a `/state` "no window" is not read
+     * as the user closing it. 0 = no background open pending.
+     */
+    backgroundOpenUntil: 0,
     /**
      * V4-4: the last `/state.registryError` message we toasted while the condition
      * held. Null clears the arm, so a fixed-then-rebroken registry toasts again.
@@ -4984,11 +5020,12 @@ ${TRUNCATED_MARKUP}` };
     if (isHelpVerb(args)) return canvasHelpChip();
     const [head = "", ...rest] = args.trim().split(/\s+/);
     if (/^export$/i.test(head)) {
-      await canvasExportCommand(rest.join(" "));
-      return null;
+      if (isHiddenResolvePane()) throw new Error(CANVAS_JOBS_NEED_RAIL);
+      return startCanvasExportCommand(rest.join(" "));
     }
     if (/^critique$/i.test(head)) {
-      return await canvasCritiqueCommand();
+      if (isHiddenResolvePane()) throw new Error(CANVAS_JOBS_NEED_RAIL);
+      return startCanvasCritiqueCommand();
     }
     const parsed = parseDesignArgs(args);
     if (!parsed.on) {
@@ -4996,6 +5033,8 @@ ${TRUNCATED_MARKUP}` };
       await host.toast(infoToast(DESIGN_MODE_OFF));
       return null;
     }
+    const tooLong = briefLimitError(parsed.brief);
+    if (tooLong) throw new Error(tooLong);
     if (!state.sessionId) throw new Error(NO_SESSION_MESSAGE);
     if (parsed.mode) {
       try {
@@ -5194,37 +5233,42 @@ ${TRUNCATED_MARKUP}` };
       await sleep(timing.pollMs);
     }
   }
-  async function canvasExportCommand(raw) {
-    const parsed = parseCanvasExportArgs(raw);
-    if ("error" in parsed) {
-      await host.toast(errorToast(parsed.error));
-      return;
-    }
-    const ws = state.workspace;
-    if (!ws || ws.dir.trim() === "") {
-      await host.toast(errorToast(NO_CANVAS_FOR_EXPORT));
-      return;
-    }
-    await runCanvasExport(ws.dir, "formats" in parsed ? parsed.formats : void 0);
+  var canvasJobTask = null;
+  function getCanvasJobTask() {
+    return canvasJobTask;
   }
-  async function canvasCritiqueCommand() {
+  function startCanvasExportCommand(raw) {
+    const parsed = parseCanvasExportArgs(raw);
+    if ("error" in parsed) throw new Error(parsed.error);
     const ws = state.workspace;
-    if (!ws || ws.dir.trim() === "") {
-      await host.toast(errorToast(NO_CANVAS_FOR_CRITIQUE));
-      return null;
-    }
+    if (!ws || ws.dir.trim() === "") throw new Error(NO_CANVAS_FOR_EXPORT);
+    canvasJobTask = runCanvasExport(ws.dir, "formats" in parsed ? parsed.formats : void 0).catch(() => void 0);
+    return canvasJobStartedChip("export", state.sessionId, currentConfig()?.url, EXPORT_STARTED);
+  }
+  function startCanvasCritiqueCommand() {
+    const ws = state.workspace;
+    if (!ws || ws.dir.trim() === "") throw new Error(NO_CANVAS_FOR_CRITIQUE);
+    const sessionId = state.sessionId;
+    canvasJobTask = runCanvasCritique(ws.dir, sessionId).catch(() => void 0);
+    return canvasJobStartedChip("critique", sessionId, currentConfig()?.url, CRITIQUE_STARTED);
+  }
+  async function runCanvasCritique(dir, sessionId) {
     let digest;
     try {
-      digest = await critiqueWorkspace(ws.dir);
+      digest = await critiqueWorkspace(dir);
     } catch (error) {
       await host.toast(errorToast(critiqueFailed(reason(error))));
-      return null;
+      return;
     }
     if (!digest.ok) {
       await host.toast(errorToast(critiqueFailed(digest.error || "the service gave no reason")));
-      return null;
+      return;
     }
-    return critiqueReviewChip(state.sessionId, state.config?.url, digest);
+    try {
+      await host.attach(critiqueReviewChip(sessionId, state.config?.url, digest));
+    } catch (error) {
+      await host.toast(errorToast(critiqueFailed(reason(error))));
+    }
   }
   async function startDesignSession(spec) {
     state.pageBusy = true;
@@ -5539,6 +5583,7 @@ ${TRUNCATED_MARKUP}` };
   function openStatus(message, kind = "info") {
     setStatus(message, kind);
   }
+  var BACKGROUND_OPEN_GRACE_MS = 6e4;
   async function openCanvasWindow(notify) {
     const ws = state.workspace;
     if (!ws) return;
@@ -5566,6 +5611,7 @@ ${TRUNCATED_MARKUP}` };
       }
       if (result.ok) await saveLastUrl(ws.dir, result.url || url);
       if (result.ok && result.started) markServerStartedByUs(ws.dir);
+      if (result.ok && result.opening) state.backgroundOpenUntil = Date.now() + BACKGROUND_OPEN_GRACE_MS;
       openStatus(formatOpenStatus(result), result.ok ? "info" : "error");
     } catch (error) {
       openStatus(openCanvasFailed(reason(error)), "error");
@@ -5600,6 +5646,10 @@ ${TRUNCATED_MARKUP}` };
       const result = await openWorkspace({ dir: row.dir, focus: true });
       if (!result.ok) {
         await host.toast(errorToast(openCanvasFailed(result.error ?? "the service gave no reason")));
+        return;
+      }
+      if (result.opening) {
+        await host.toast(infoToast(openingWorkspace(row.name)));
         return;
       }
       await host.toast(successToast(openedWorkspace(row.name)));
@@ -6041,7 +6091,7 @@ ${TRUNCATED_MARKUP}` };
       if (status.error) {
         state.serverError = status.error;
       } else {
-        state.serverStatus = status.up;
+        state.serverStatus = status.starting && !status.up ? null : status.up;
         state.serverError = null;
       }
       announceServerTransition(before);
@@ -6131,6 +6181,7 @@ ${TRUNCATED_MARKUP}` };
       await startCurrentServer();
     }
   }
+  var SERVER_STARTING_MESSAGE = "Preview dev server is starting\u2026";
   async function startCurrentServer() {
     const dir = actionDir();
     if (!dir) return;
@@ -6143,11 +6194,13 @@ ${TRUNCATED_MARKUP}` };
     renderServerControl();
     try {
       const result = await startDevServer(dir, url);
-      if (result.ok && result.up && result.started) markServerStartedByUs(dir);
+      if (result.ok && (result.up || result.starting) && result.started) markServerStartedByUs(dir);
       if (directoryMovedSince(dir, gen)) return;
-      state.serverStatus = result.up ?? null;
+      state.serverStatus = result.starting ? null : result.up ?? null;
       state.serverError = result.error ?? null;
-      if (result.ok && result.started) {
+      if (result.ok && result.starting) {
+        announceServer(SERVER_STARTING_MESSAGE);
+      } else if (result.ok && result.started) {
         announceServer("Preview dev server started.");
       } else if (result.ok && result.up) {
         announceServer("Preview dev server is running.");
@@ -8009,7 +8062,9 @@ Source: ${reference.sourceDirectory}`;
       await host.toast(errorToast(registryErrorToastMessage(stateData.registryError)));
     }
     renderWindowStatus();
-    if (!state.windowOpen && state.mode.on && !state.pendingOpen) {
+    if (state.windowOpen) state.backgroundOpenUntil = 0;
+    const backgroundOpening = state.backgroundOpenUntil > Date.now();
+    if (!state.windowOpen && state.mode.on && !state.pendingOpen && !backgroundOpening) {
       await turnModeOffByWindowClose();
     }
   }
@@ -8353,9 +8408,53 @@ Source: ${reference.sourceDirectory}`;
     await Promise.all([loadDesignHome(), loadDesignsSettings()]);
     renderRailLocation();
   }
+  var staleKeyPruneStarted = false;
+  async function readLiveSessionIds() {
+    try {
+      const projects = await host.listProjects();
+      if (projects.state !== "ready") return null;
+      const live = /* @__PURE__ */ new Set();
+      for (const project of projects.projects) {
+        const snapshot = await host.listSessions(project.id);
+        if (snapshot.state !== "ready") return null;
+        if ((snapshot.coverage ?? []).some((entry) => entry.state !== "ready")) return null;
+        for (const session of snapshot.sessions) live.add(session.id);
+      }
+      return live;
+    } catch {
+      return null;
+    }
+  }
+  async function pruneStaleSessionKeys() {
+    if (staleKeyPruneStarted || !isRealPane()) return [];
+    staleKeyPruneStarted = true;
+    const live = await readLiveSessionIds();
+    if (!live || live.size === 0) return [];
+    if (state.sessionId) live.add(state.sessionId);
+    let keys;
+    try {
+      keys = await host.storage.keys();
+    } catch {
+      return [];
+    }
+    const stale = staleSessionKeys(keys, live);
+    const pruned = [];
+    for (const key of stale) {
+      try {
+        await host.storage.delete(key);
+        pruned.push(key);
+      } catch {
+      }
+    }
+    return pruned;
+  }
+  function resetStaleKeyPrune() {
+    staleKeyPruneStarted = false;
+  }
   function startRailLive() {
     if (railLive || state.surface !== "panel" || !isRealPane()) return;
     railLive = true;
+    void pruneStaleSessionKeys();
     badgeTracking = true;
     void resetRailBadge();
     void loadDiagnostics().then(() => {
@@ -8393,6 +8492,8 @@ Source: ${reference.sourceDirectory}`;
       startPickLoop();
     } else if (kind === "rail") {
       startRailLive();
+    } else if (kind === "page") {
+      void pruneStaleSessionKeys();
     }
   }
   async function main() {

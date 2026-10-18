@@ -379,6 +379,19 @@ test('formatOpenStatus summarizes the open result', () => {
   assert.equal(formatOpenStatus({ ok: false, url: '', title: '', settled: false }), 'Could not open the window');
   const failure = 'the dev server is not running and .design-studio.json has no "command" to start it';
   assert.equal(formatOpenStatus({ ok: false, url: '', title: '', settled: false, error: failure }), failure);
+  // #9: a slow boot answered early is a success — the window is on its way.
+  assert.equal(
+    formatOpenStatus({ ok: true, url: 'u', title: '', settled: false, started: true, opening: true, serverStarting: true }),
+    'Opening the canvas · dev server still starting…',
+  );
+});
+
+test('#11: staleSessionKeys picks ws/ mode/ canvas-open/ of gone sessions and never design/', async () => {
+  const { staleSessionKeys, PRUNABLE_SESSION_KEY_PREFIXES } = await import('../panel/mode.ts');
+  assert.deepEqual([...PRUNABLE_SESSION_KEY_PREFIXES], ['ws/', 'mode/', 'canvas-open/']);
+  const keys = ['ws/a', 'mode/a', 'canvas-open/a', 'design/a', 'ws/b', 'mode/b', 'design/b', 'prefs/page', 'badge/count', 'ws/', 'mode/x/y'];
+  assert.deepEqual(staleSessionKeys(keys, new Set(['b'])), ['ws/a', 'mode/a', 'canvas-open/a']);
+  assert.deepEqual(staleSessionKeys(keys, new Set(['a', 'b'])), []);
 });
 
 test('projectReady is true only for a config with a non-empty url', () => {

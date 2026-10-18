@@ -99,6 +99,10 @@ export const WORKSPACE_REFERENCE_ADDED = 'Workspace reference added to the compo
 export const FILE_REFERENCE_ADDED = 'File reference added to the composer.';
 export const FOLDER_PATH_COPIED = 'Folder path copied.';
 export const DROP_PATH_MESSAGE = 'Dropped files cannot be attached by name. Paste a file path using + → File path.';
+export const EXPORT_STARTED = 'Export started — the result is toasted when it finishes.';
+export const CRITIQUE_STARTED = 'Critique started — the review chip follows when it finishes.';
+/** #6: the hidden resolve pane dies with its answer, so it cannot carry a job. */
+export const CANVAS_JOBS_NEED_RAIL = 'Open the Design Canvas rail tab to run exports and critiques.';
 export const EXPORT_STILL_RUNNING = 'Export is still running. Files land in the workspace exports folder as each screen finishes.';
 export const DIAGNOSTICS_COPIED = 'Diagnostics copied. Paste them into your bug report.';
 
@@ -121,6 +125,8 @@ export const startSessionFailed = (error: string): string =>
   withNext(`Could not start the design: ${error}`, 'Your draft is unchanged; try again.');
 export const openCanvasFailed = (error: string): string => withNext(`Could not open the canvas: ${error}`, 'Try again.');
 export const openedWorkspace = (name: string): string => `Opened ${name}. Its canvas window is live.`;
+export const openingWorkspace = (name: string): string =>
+  `Opening ${name}. Its dev server is still starting; the screens load when it answers.`;
 export const missingWorkspace = (message: string): string => withNext(message, 'Start creates a new canvas.');
 export const attachFailed = (what: 'workspace' | 'file', error: string): string =>
   withNext(`Could not add the ${what} reference: ${error}`, 'Try again.');

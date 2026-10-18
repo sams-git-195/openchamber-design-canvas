@@ -178,6 +178,32 @@ test('toggleMode(true) reads the workspace config and opens the canvas via POST 
   assert.deepEqual(JSON.parse(open!.body ?? ''), { dir: '/p/site', focus: true }, 'spec §B + V4-8: {dir, focus:true} — the toggle turning ON IS user-initiated, so it may raise the window; the config url stays authoritative');
 });
 
+test('#9: an /open answered {opening, serverStarting} is success: Design Mode stays ON while the window launches', async () => {
+  stubService((request) => {
+    if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
+    if (request.path === '/open') {
+      return { status: 200, body: JSON.stringify({ ok: true, opening: true, serverStarting: true, started: true, url: 'http://localhost:5173', title: '', settled: false }) };
+    }
+    return { status: 404, body: '{}' };
+  });
+  const toasts = stubToast();
+  stubStorage();
+  useWorkspace();
+  setSessionId('ses_slowopen');
+
+  await resetToClosedWindow();
+  await toggleMode(true);
+  // The row's next /state tick: no window YET — it must not read as the user closing it.
+  await applyState({ url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false });
+  assert.equal(getModeState().on, true, 'a background open holds Design Mode ON');
+  assert.equal(toasts.some((toast) => toast.kind === 'error'), false, 'no failure toast for a slow boot');
+  // The window arrives, and a later close by hand still turns the mode OFF.
+  await applyState({ url: 'http://localhost:5173/', title: 'Site', lastPick: null, pickSeq: 0, windowOpen: true });
+  await applyState({ url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false });
+  assert.equal(getModeState().on, false, 'once the window was seen, a close is a close again');
+  setSessionId(null);
+});
+
 test('toggleMode(true) with the window already open focuses it and never opens a second', async () => {
   const calls = stubService((request) => {
     if (request.path === '/focus') return { status: 200, body: JSON.stringify({ ok: true }) };
@@ -957,9 +983,16 @@ test('/canvas export png posts POST /export and polls /export/status until done,
   setWorkspace({ dir: '/p/site', name: 'Site' });
   allowResolve(true);
 
+  setSessionId('ses_exp');
   const chip = await resolveCanvasCommand('export png');
 
-  assert.equal(chip, null, 'export toasts, it never returns a chat chip');
+  // #6: the resolve answers at once with the info chip (never bare null) …
+  assert.ok(chip, 'export answers with an info chip, never null');
+  assert.equal(chip!.id, 'canvas-export-ses_exp');
+  assert.equal(chip!.text, 'Export started — the result is toasted when it finishes.');
+  // … and this real pane toasts the outcome once the poll settles.
+  await main.getCanvasJobTask();
+  setSessionId(null);
   const post = calls.find((call) => call.path === '/export');
   assert.ok(post, 'POST /export reached the service');
   assert.equal(post!.method, 'POST');
@@ -987,6 +1020,7 @@ test('/canvas export without format args omits formats (the service writes both)
   allowResolve(true);
 
   await resolveCanvasCommand('export');
+  await main.getCanvasJobTask();
 
   const post = calls.find((call) => call.path === '/export');
   assert.deepEqual(JSON.parse(post!.body ?? ''), { dir: '/p/site' }, 'formats omitted → both formats');
@@ -1007,6 +1041,7 @@ test('/canvas export surfaces a failed job with the per-screen failures', async 
   allowResolve(true);
 
   await resolveCanvasCommand('export pdf');
+  await main.getCanvasJobTask();
 
   assert.ok(toasts.some((toast) => toast.kind === 'error' && /Export failed: 1 screen — checkout \(print failed\)/.test(toast.message)), 'the failure is named');
   assert.ok(!toasts.some((toast) => toast.kind === 'success'), 'no success summary on failure');
@@ -1018,10 +1053,11 @@ test('/canvas export with an unknown format refuses before touching the service'
   setWorkspace({ dir: '/p/site', name: 'Site' });
   allowResolve(true);
 
-  await resolveCanvasCommand('export svg');
+  // #6: a refusal is a THROWN failure the host shows, not a toast + "found nothing to attach".
+  await assert.rejects(resolveCanvasCommand('export svg'), /Unknown export format "svg"/);
 
   assert.equal(calls.some((call) => call.path === '/export'), false, 'no export is posted for a bad format');
-  assert.ok(toasts.some((toast) => toast.kind === 'error' && /Unknown export format "svg"/.test(toast.message)));
+  assert.equal(toasts.length, 0);
 });
 
 test('/canvas export with no workspace refuses with the actionable line', async () => {
@@ -1031,10 +1067,10 @@ test('/canvas export with no workspace refuses with the actionable line', async 
   setWorkspace(null);
   allowResolve(true);
 
-  await resolveCanvasCommand('export png');
+  await assert.rejects(resolveCanvasCommand('export png'), /No canvas workspace yet/);
 
   assert.equal(calls.some((call) => call.path === '/export'), false);
-  assert.ok(toasts.some((toast) => toast.kind === 'error' && /No canvas workspace yet/.test(toast.message)));
+  assert.equal(toasts.length, 0);
 });
 
 test('a still-running export beyond the budget toasts the heads-up instead of polling forever', async () => {
@@ -1074,17 +1110,27 @@ test('/canvas critique posts POST /critique and returns the digest chip as a rev
   });
   stubToast();
   stubStorage();
+  const attached = stubAttach();
   setWorkspace({ dir: '/p/site', name: 'Site' });
   setSessionId('ses_crit');
   await loadStudioConfig();
   allowResolve(true);
 
-  const chip = await resolveCanvasCommand('critique');
+  // #6: the resolve answers at once with the info chip …
+  const started = await resolveCanvasCommand('critique');
+  assert.ok(started, 'critique answers with an info chip, never null');
+  assert.equal(started!.id, 'canvas-critique-ses_crit');
+  assert.equal(started!.text, 'Critique started — the review chip follows when it finishes.');
+  // … and the digest chip is attached when it lands, under the SAME id (it replaces the info chip).
+  await main.getCanvasJobTask();
+  assert.equal(attached.length, 1, 'the review chip follows');
+  const chip = attached[0];
 
   const critique = calls.find((call) => call.path === '/critique');
   assert.ok(critique, 'POST /critique reached the service');
   assert.deepEqual(JSON.parse(critique!.body ?? ''), { dir: '/p/site' }, 'D7-C body: {dir}');
   assert.ok(chip, 'the digest returns as a chat chip (the compose path)');
+  assert.equal(chip!.id, started!.id, 'the review chip replaces the info chip');
   assert.equal(chip!.providerId, 'design-canvas');
   assert.match(chip!.text ?? '', /^Canvas critique — deterministic gate digest \(advisory\):/);
   assert.match(chip!.text ?? '', /- home · 1280×800 · ready · http:\/\/localhost:5173\/home\.html/);
@@ -1093,7 +1139,7 @@ test('/canvas critique posts POST /critique and returns the digest chip as a rev
   assert.equal(chip!.url, 'http://localhost:5173', 'the chip carries the workspace url');
 });
 
-test('/canvas critique service failure toasts the error and returns no chip', async () => {
+test('/canvas critique service failure toasts the error and attaches no review chip', async () => {
   const calls = stubService((request) =>
     request.path === '/critique'
       ? { status: 200, body: JSON.stringify({ ok: false, error: 'no browser window open' }) }
@@ -1101,12 +1147,15 @@ test('/canvas critique service failure toasts the error and returns no chip', as
   );
   const toasts = stubToast();
   stubStorage();
+  const attached = stubAttach();
   setWorkspace({ dir: '/p/site', name: 'Site' });
   allowResolve(true);
 
   const chip = await resolveCanvasCommand('critique');
+  await main.getCanvasJobTask();
 
-  assert.equal(chip, null);
+  assert.match(chip?.text ?? '', /Critique started/, 'the resolve answered with the info chip');
+  assert.equal(attached.length, 0, 'no digest to attach');
   assert.ok(toasts.some((toast) => toast.kind === 'error' && /no browser window open/.test(toast.message)));
 });
 
@@ -1117,11 +1166,139 @@ test('/canvas critique without a workspace refuses without posting', async () =>
   setWorkspace(null);
   allowResolve(true);
 
-  const chip = await resolveCanvasCommand('critique');
+  await assert.rejects(resolveCanvasCommand('critique'), /No canvas workspace yet/);
 
-  assert.equal(chip, null);
   assert.equal(calls.some((call) => call.path === '/critique'), false);
-  assert.ok(toasts.some((toast) => toast.kind === 'error' && /No canvas workspace yet/.test(toast.message)));
+  assert.equal(toasts.length, 0);
+});
+
+test('#6: in the hidden 1×1 resolve pane export and critique throw the rail-tab line and touch nothing', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true, jobId: 'job-x' }) }));
+  const toasts = stubToast();
+  stubStorage();
+  setWorkspace({ dir: '/p/site', name: 'Site' });
+  allowResolve(true);
+  const frame = shim as { innerWidth: number; innerHeight: number };
+  frame.innerWidth = 1;
+  frame.innerHeight = 1;
+  main.setSurface('panel');
+  try {
+    await assert.rejects(resolveCanvasCommand('export png'), { message: 'Open the Design Canvas rail tab to run exports and critiques.' });
+    await assert.rejects(resolveCanvasCommand('critique'), { message: 'Open the Design Canvas rail tab to run exports and critiques.' });
+    assert.equal(calls.length, 0, 'no job is kicked from a pane that dies with its answer');
+    assert.equal(toasts.length, 0);
+  } finally {
+    frame.innerWidth = 1024;
+    frame.innerHeight = 768;
+    setWorkspace(null);
+  }
+});
+
+test('#10: /canvas with a brief over BRIEF_MAX throws the page\'s limit line and writes nothing', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  const store = stubStorage();
+  stubToast();
+  setWorkspace(null);
+  setSessionId('ses_long');
+  allowResolve(true);
+  try {
+    const brief = 'b'.repeat(BRIEF_MAX + 1);
+    await assert.rejects(resolveCanvasCommand(brief), { message: briefLimitError(brief)! });
+    await assert.rejects(resolveCanvasCommand(`wireframe ${brief}`), /limit is 3000/);
+    assert.equal(calls.length, 0, 'no scaffold for a refused brief');
+    assert.equal(store.size, 0, 'no mode/ws/handoff write — nothing is silently sliced and stored');
+  } finally {
+    setSessionId(null);
+  }
+});
+
+// ---- #11: stale per-session storage keys are pruned on a real pane mount ----
+
+function stubSessionList(byProject: Record<string, string[] | Error>, state: 'ready' | 'loading' = 'ready'): void {
+  (api.host as unknown as { listSessions: (id: string) => Promise<unknown> }).listSessions = async (projectId) => {
+    const entry = byProject[projectId];
+    if (entry instanceof Error) throw entry;
+    return { kind: 'sessions', projectId, state, coverage: [], sessions: (entry ?? []).map((id) => ({ id, archivedAt: null })) };
+  };
+}
+
+function seedSessionKeys(store: Map<string, unknown>, ids: string[]): void {
+  for (const id of ids) {
+    store.set(workspaceStorageKey(id)!, { dir: `/p/${id}`, name: id });
+    store.set(modeStorageKey(id)!, { on: false });
+    store.set(main.openHandoffKey(id)!, { dir: `/p/${id}`, jobId: null, at: 1 });
+    store.set(designMarkerKey(id)!, { on: true, at: '2026-01-01T00:00:00.000Z' });
+  }
+  store.set('prefs/first-run', true);
+}
+
+test('#11: a real pane prunes ws/ mode/ canvas-open/ keys of gone sessions, never design/, once per mount', async () => {
+  const store = stubStorage();
+  seedSessionKeys(store, ['ses_live', 'ses_gone', 'ses_archived']);
+  stubListProjects([{ id: 'p1', name: 'one', directory: '/p/one' }, { id: 'p2', name: 'two', directory: '/p/two' }]);
+  stubSessionList({ p1: ['ses_live'], p2: ['ses_archived'] });
+  main.setSurface('panel');
+  main.resetStaleKeyPrune();
+  setSessionId(null);
+
+  const pruned = await main.pruneStaleSessionKeys();
+
+  assert.deepEqual(pruned.sort(), ['canvas-open/ses_gone', 'mode/ses_gone', 'ws/ses_gone']);
+  for (const id of ['ses_live', 'ses_archived']) {
+    assert.ok(store.has(workspaceStorageKey(id)!) && store.has(modeStorageKey(id)!) && store.has(main.openHandoffKey(id)!), `${id} keeps its keys`);
+  }
+  assert.ok(store.has(designMarkerKey('ses_gone')!), 'the permanent design marker is never pruned');
+  assert.ok(store.has('prefs/first-run'), 'unrelated keys are untouched');
+
+  // At most once per mount: a second call (even with more stale keys) does nothing.
+  seedSessionKeys(store, ['ses_gone2']);
+  assert.deepEqual(await main.pruneStaleSessionKeys(), []);
+  assert.ok(store.has(workspaceStorageKey('ses_gone2')!));
+});
+
+test('#11: a failed, loading or empty session list prunes nothing; the hidden pane never prunes', async () => {
+  const store = stubStorage();
+  seedSessionKeys(store, ['ses_a']);
+  const before = [...store.keys()].sort();
+  stubListProjects([{ id: 'p1', name: 'one', directory: '/p/one' }, { id: 'p2', name: 'two', directory: '/p/two' }]);
+  main.setSurface('panel');
+
+  stubSessionList({ p1: ['ses_other'], p2: new Error('host unavailable') });
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'one failed project list → no prune at all');
+
+  stubSessionList({ p1: ['ses_other'], p2: [] }, 'loading');
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'a list still loading is not complete');
+
+  stubSessionList({ p1: [], p2: [] });
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'an empty live set is treated as unknown');
+
+  (api.host as unknown as { listProjects: () => Promise<unknown> }).listProjects = async () => { throw new Error('nope'); };
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'the project list failing prunes nothing');
+
+  stubListProjects([{ id: 'p1', name: 'one', directory: '/p/one' }]);
+  stubSessionList({ p1: ['ses_other'] });
+  const frame = shim as { innerWidth: number; innerHeight: number };
+  frame.innerWidth = 1;
+  frame.innerHeight = 1;
+  try {
+    main.resetStaleKeyPrune();
+    assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'the 1×1 resolve pane never prunes');
+  } finally {
+    frame.innerWidth = 1024;
+    frame.innerHeight = 768;
+  }
+  assert.deepEqual([...store.keys()].sort(), before, 'every key survived');
+
+  // The current session is always live, even when the host list lags behind it.
+  setSessionId('ses_a');
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), []);
+  assert.ok(store.has(workspaceStorageKey('ses_a')!));
+  setSessionId(null);
 });
 
 // The panel command verbs never leak into the brief/mode paths.
@@ -1394,6 +1571,9 @@ test('registryError toasts once per distinct message, repeats are silent, a clea
 // ---- V4-12: the agent turn is mirrored to the canvas (display-only) ----
 
 test('busy transitions post /agent-status exactly on the flip; a completed turn backstops /screens/sync (V4-12/V4-4)', async () => {
+  // Hermetic: the snapshot names the CURRENT session, so it never re-binds
+  // (and unbinds) the workspace whatever session an earlier test left behind.
+  setSessionId('ses_as');
   setWorkspace({ dir: '/p/site', name: 'Site' });
   stubStorage();
   stubToast();
