@@ -134,7 +134,7 @@ export const copyFolderFailed = (error: string): string => withNext(`Could not c
 export const focusFailed = (error: string): string => withNext(`Could not raise the canvas window: ${error}`, 'Try Open canvas.');
 export const switchModeFailed = (error: string): string => withNext(`Could not switch the canvas mode: ${error}`, 'Try again.');
 export const switchScreenFailed = (error: string): string => withNext(`Could not switch screens: ${error}`, 'Try again.');
-export const attachPickFailed = (error: string): string => withNext(`Could not attach a canvas pick: ${error}`, 'Click the element again.');
+export const attachPickFailed = (error: string): string => withNext(`Could not attach a canvas pick: ${error}`, 'It will be retried automatically.');
 export const stopPreviewFailed = (error: string): string => withNext(`Could not stop the preview: ${error}`, 'Try the Stop button again.');
 export const serviceNotReady = (error: string): string => withNext(`Local service not ready: ${error}`, 'It starts with the extension; reload if this persists.');
 export const configError = (error: string): string => withNext(`Config error: ${error}`, 'Check .design-studio.json in the workspace.');

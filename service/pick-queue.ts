@@ -48,9 +48,12 @@ export const PICKS_PAGE_MAX = 20;
 export const PICK_UNACKED_WARN_MS = 2500;
 export const PICK_WAIT_MAX_MS = 12_000;
 export const PICK_LABEL_MAX = 80;
-/** R2-fix (m14): the panel paces a batch (~150 ms per element) and acks once
- *  at its end, so the watchdog scales with what is unacked: 2500 ms for one
- *  element, +400 ms per further element, capped at 8000 ms. */
+/** R2-fix (m14): the panel acks once at the end of a batch, so the watchdog
+ *  scales with what is still unacked (a bigger batch needs more time before it
+ *  can fairly be judged lost): 2500 ms for one element, +400 ms per further
+ *  element, capped at 8000 ms. There is no per-element delivery pacing — the
+ *  150 ms figure is PICK_IDLE_POLL_MS, only the pace between idle long-poll
+ *  rounds. */
 export const PICK_UNACKED_WARN_MAX_MS = 8000;
 export function pickUnackedWarnMs(pending: number): number {
   return Math.min(PICK_UNACKED_WARN_MAX_MS, PICK_UNACKED_WARN_MS + 400 * Math.max(0, pending - 1));
@@ -151,7 +154,12 @@ export class PickQueue {
   }
 
   private pageSince(since: number): QueuedPick[] {
-    return this.items.filter((pick) => pick.seq > since).slice(0, PICKS_PAGE_MAX);
+    // Floor every read at the ack watermark: an acked pick is delivered and must
+    // never replay — including for a remounted panel whose in-memory cursor
+    // restarted at 0 while this queue's `acked` kept the higher seq. Held
+    // (unacked) picks stay unacked, so they still read regardless of `since`.
+    const floor = Math.max(since, this.acked);
+    return this.items.filter((pick) => pick.seq > floor).slice(0, PICKS_PAGE_MAX);
   }
 
   private flushWaiters(): void {

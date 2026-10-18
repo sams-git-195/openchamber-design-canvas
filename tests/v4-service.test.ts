@@ -140,6 +140,21 @@ test('pick queue ack toasts once and the unacked watchdog fires after 2.5s', asy
   await pause(2800);
 });
 
+test('ack watermark floors reads: an acked pick never replays at since=0, held (unacked) picks still read', async () => {
+  const queue = new PickQueue(() => undefined);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 1, additive: false, ...fakePicked(), selector: '#a' });
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 2, additive: false, ...fakePicked(), selector: '#b' });
+  queue.ack(2, '2 elements');
+  // Everything consumed: a remounted panel whose cursor restarted at 0 sees nothing.
+  assert.equal((await queue.read(0, 0)).picks.length, 0, 'no pick replay when an acked watermark floors since=0');
+  // A held (unacked) pick still reads, from any lower since.
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 3, additive: false, ...fakePicked(), selector: '#c' });
+  const held = await queue.read(0, 0);
+  assert.equal(held.picks.length, 1, 'the held (unacked) pick still reads');
+  assert.equal(held.picks[0]?.selector, '#c');
+  assert.equal((await queue.read(2, 0)).picks.length, 1, 'it reads at the ack watermark too');
+});
+
 // ---- V4-4/V4-17: loud registry reads + rename ---------------------------------
 
 test('readScreensStrict answers drops with reasons, clamps silently, and names parse errors', async () => {
@@ -472,6 +487,7 @@ test('V4-10: menu send-to-chat rides the queue as kind:screen; copy-path toasts 
   assert.equal(pick.height, 844);
   assert.equal(pick.file, 'phone.html');
   assert.equal(pick.selector, undefined, 'screen picks carry NO element payload');
+  assert.equal(pick.dir, dir, 'screen picks carry the workspace dir, so a foreign send is skippable');
 
   await canvasCommand({ type: 'screen-menu', screen: 'phone', action: 'copy-path' }, {});
   const expect = path.join(dir, 'phone.html');

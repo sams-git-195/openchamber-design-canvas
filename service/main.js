@@ -3099,7 +3099,8 @@ var PickQueue = class {
     }
   }
   pageSince(since) {
-    return this.items.filter((pick) => pick.seq > since).slice(0, PICKS_PAGE_MAX);
+    const floor = Math.max(since, this.acked);
+    return this.items.filter((pick) => pick.seq > floor).slice(0, PICKS_PAGE_MAX);
   }
   flushWaiters() {
     const still = [];
@@ -6243,7 +6244,8 @@ var Browser = class {
       additive: false,
       width: record.width,
       height: record.height,
-      ...record.file ? { file: record.file } : {}
+      ...record.file ? { file: record.file } : {},
+      ...this.workspaceDir ? { dir: this.workspaceDir } : {}
     });
   }
   /** V4-11/main.ts: single-screen export jobs answer through this hook. */

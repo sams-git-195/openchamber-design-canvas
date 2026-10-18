@@ -533,7 +533,7 @@ export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceR
     '',
     defaultCraft(CRAFT_BY_TYPE[spec.type]),
     '',
-    'Workflow: in the live canvas (edit mode) the user clicks elements; EACH click arrives as its own reference chip with its screen id. Sending a whole artboard from its menu arrives as a `Screen: <id> (<w>×<h>) — <file>` chip with the screen URL — edit that file.',
+    'Workflow: in the live canvas (edit mode) clicking an element selects it. A referenced selection arrives as one chip per element, each naming its screen; the artboard menu\'s Send to chat arrives as a `Screen: <id> (<w>×<h>) — <file>` chip with the screen URL — edit that file.',
     '',
     VERIFY_PROTOCOL,
     '',
@@ -584,7 +584,7 @@ export function buildModeChip(
   const id = `design-mode-${(sessionId || 'adhoc').slice(0, 110)}`;
   const lines: string[] = [
     'Design Mode: ON',
-    `Canvas mode: ${mode.canvMode}${mode.canvMode === 'edit' ? ' — clicking an element sends a pick chip' : ' — clicks and links drive the screens'}`,
+    `Canvas mode: ${mode.canvMode}${mode.canvMode === 'edit' ? ' — clicking an element selects it; Reference in chat sends the selection (one chip per element)' : ' — clicks and links drive the screens'}`,
     `Artifact type: ${mode.type} — ${TYPE_HINT[mode.type]}`,
     `Visual direction: ${directionLabel(mode.direction)} · Fidelity: ${mode.fidelity}`,
     agreementStatusLine(mode),

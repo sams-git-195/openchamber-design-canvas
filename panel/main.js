@@ -2353,7 +2353,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
   var focusFailed = (error) => withNext(`Could not raise the canvas window: ${error}`, "Try Open canvas.");
   var switchModeFailed = (error) => withNext(`Could not switch the canvas mode: ${error}`, "Try again.");
   var switchScreenFailed = (error) => withNext(`Could not switch screens: ${error}`, "Try again.");
-  var attachPickFailed = (error) => withNext(`Could not attach a canvas pick: ${error}`, "Click the element again.");
+  var attachPickFailed = (error) => withNext(`Could not attach a canvas pick: ${error}`, "It will be retried automatically.");
   var stopPreviewFailed = (error) => withNext(`Could not stop the preview: ${error}`, "Try the Stop button again.");
   var serviceNotReady = (error) => withNext(`Local service not ready: ${error}`, "It starts with the extension; reload if this persists.");
   var configError = (error) => withNext(`Config error: ${error}`, "Check .design-studio.json in the workspace.");
@@ -4155,7 +4155,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       "",
       defaultCraft(CRAFT_BY_TYPE[spec.type]),
       "",
-      "Workflow: in the live canvas (edit mode) the user clicks elements; EACH click arrives as its own reference chip with its screen id. Sending a whole artboard from its menu arrives as a `Screen: <id> (<w>\xD7<h>) \u2014 <file>` chip with the screen URL \u2014 edit that file.",
+      "Workflow: in the live canvas (edit mode) clicking an element selects it. A referenced selection arrives as one chip per element, each naming its screen; the artboard menu's Send to chat arrives as a `Screen: <id> (<w>\xD7<h>) \u2014 <file>` chip with the screen URL \u2014 edit that file.",
       "",
       VERIFY_PROTOCOL,
       "",
@@ -4185,7 +4185,7 @@ ${CRAFT_RULES[id]}`).join("\n\n");
     const id = `design-mode-${(sessionId || "adhoc").slice(0, 110)}`;
     const lines = [
       "Design Mode: ON",
-      `Canvas mode: ${mode.canvMode}${mode.canvMode === "edit" ? " \u2014 clicking an element sends a pick chip" : " \u2014 clicks and links drive the screens"}`,
+      `Canvas mode: ${mode.canvMode}${mode.canvMode === "edit" ? " \u2014 clicking an element selects it; Reference in chat sends the selection (one chip per element)" : " \u2014 clicks and links drive the screens"}`,
       `Artifact type: ${mode.type} \u2014 ${TYPE_HINT[mode.type]}`,
       `Visual direction: ${directionLabel(mode.direction)} \xB7 Fidelity: ${mode.fidelity}`,
       agreementStatusLine(mode),
@@ -4628,6 +4628,7 @@ ${TRUNCATED_MARKUP}` };
   var DROP_PATH_MESSAGE2 = DROP_PATH_MESSAGE;
   var wsSessionMap = /* @__PURE__ */ new Map();
   var allProjects = [];
+  var workspaceRootErrors = null;
   function announceReference(message) {
     if (!referenceLiveEl) return;
     referenceLiveEl.textContent = "";
@@ -6276,6 +6277,7 @@ ${TRUNCATED_MARKUP}` };
       return;
     }
     const rows = Array.isArray(result.workspaces) ? result.workspaces : [];
+    workspaceRootErrors = result.rootError && Object.keys(result.rootError).length > 0 ? result.rootError : null;
     state.workspaces = rows.length === 0 ? { kind: "empty" } : { kind: "list", rows: joinWorkspaceSessions(rows, wsSessionMap) };
     rerender();
   }
@@ -7330,6 +7332,11 @@ Source: ${reference.sourceDirectory}`;
     section.append(head);
     const list = q("div", "ds-list");
     const view = state.workspaces ?? { kind: "loading" };
+    if (view.kind === "list" || view.kind === "empty") {
+      for (const [rootName, message] of Object.entries(workspaceRootErrors ?? {})) {
+        list.append(listNote(`Can't read ${rootName}: ${message} \u2014 its designs are hidden.`, "error"));
+      }
+    }
     if (view.kind === "loading") {
       list.append(listNote("Loading\u2026"));
     } else if (view.kind === "error") {
@@ -7371,6 +7378,7 @@ Source: ${reference.sourceDirectory}`;
       if (ui.renaming) titleLine.append(renderRenameField(row, ui));
       else titleLine.append(q("span", "ds-list-name", name));
       titleLine.append(q("span", `ds-badge${ready ? " ready" : ""}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
+      if (row.legacyRoot) titleLine.append(q("span", "ds-badge legacy", "Old location"));
       if (running) titleLine.append(q("span", "ds-badge running", "\u25CF Running"));
       main2.append(titleLine);
       main2.append(q("div", "ds-list-meta", workspaceMeta(row)));

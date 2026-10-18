@@ -3961,6 +3961,7 @@ export class Browser {
       width: record.width,
       height: record.height,
       ...(record.file ? { file: record.file } : {}),
+      ...(this.workspaceDir ? { dir: this.workspaceDir } : {}),
     });
   }
 

@@ -442,3 +442,28 @@ test('copy-path uses writeClipboard', async () => {
   assert.equal(item.find('ds-row-menu'), undefined, 'the menu closes');
   assert.deepEqual(serviceCalls, [], 'copying needs no service call');
 });
+
+test('legacy-root row shows an "Old location" badge beside the readiness badge', () => {
+  reset();
+  const legacy = main.renderWorkspaceListRow(rowOf({ dir: '/docs/Design Canvas/old', legacyRoot: true })) as unknown as FakeNode;
+  const badges = legacy.findAll('ds-badge');
+  assert.ok(badges.some((b) => b.has('legacy') && b.textContent === 'Old location'), 'the legacy root gets its own badge');
+  assert.ok(badges.some((b) => b.has('ready')), 'the readiness badge stays');
+  // A current-root row has no such badge.
+  const plain = main.renderWorkspaceListRow(rowOf({ dir: '/docs/Design Canvas/now' })) as unknown as FakeNode;
+  assert.equal(plain.findAll('ds-badge').some((b) => b.has('legacy')), false, 'no Old location badge on a current root');
+});
+
+test('rootError renders an error list-note naming the unreadable root', async () => {
+  reset();
+  serviceHandler = (request) => {
+    if (request.path === '/workspaces') return ok({ root: '/docs/Design Canvas', workspaces: [], rootError: { 'Z:\\old designs': 'permission denied' } });
+    return defaultService(request);
+  };
+  await main.loadCanvasWorkspaces();
+  const section = main.renderCanvasSection() as unknown as FakeNode;
+  const note = section.findAll('ds-list-note').find((node) => node.has('error'));
+  assert.ok(note, 'an unreadable root renders an error list-note');
+  const span = note!.children.find((child) => child.tagName === 'SPAN');
+  assert.equal(span?.textContent, "Can't read Z:\\old designs: permission denied — its designs are hidden.", 'the note names the root and the reason');
+});

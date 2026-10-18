@@ -386,6 +386,10 @@ const DROP_PATH_MESSAGE = copy.DROP_PATH_MESSAGE;
 let wsSessionMap = new Map<string, string>();
 /** Every registered project, for decision 4c detection only. */
 let allProjects: RegisteredProject[] = [];
+/** R4-fix (F3): roots the service could not read on the last /workspaces read
+ *  (map root → why), kept apart from `WorkspacesView` so the work list can say
+ *  which designs are hidden. null = no unreadable roots. */
+let workspaceRootErrors: Record<string, string> | null = null;
 
 function announceReference(message: string): void {
   if (!referenceLiveEl) return;
@@ -2882,6 +2886,10 @@ async function loadCanvasWorkspaces(options: { quiet?: boolean } = {}): Promise<
     return;
   }
   const rows = Array.isArray(result.workspaces) ? result.workspaces : [];
+  // R4-fix (F3): roots the service could not read (map root → why) are kept on
+  // `workspaceRootErrors` so the work list can say which designs are hidden,
+  // instead of letting them vanish silently.
+  workspaceRootErrors = result.rootError && Object.keys(result.rootError).length > 0 ? result.rootError : null;
   // The join NEVER drops a row: an unmapped workspace stays visible, sessionId null.
   state.workspaces = rows.length === 0
     ? { kind: 'empty' }
@@ -4149,13 +4157,20 @@ function listNote(message: string, kind: 'info' | 'error' = 'info'): HTMLElement
 }
 
 /** The workspaces list below the composer: one heading, one list. */
-function renderCanvasSection(): HTMLElement {
+export function renderCanvasSection(): HTMLElement {
   const section = q('section', 'ds-section');
   const head = q('div', 'ds-section-head');
   head.append(q('div', 'ds-section-label', 'Your design work'));
   section.append(head);
   const list = q('div', 'ds-list');
   const view = state.workspaces ?? { kind: 'loading' };
+  // R4-fix (F3): a root the service could not read means its designs are
+  // hidden — say which, as an error note, above whatever else is listed.
+  if (view.kind === 'list' || view.kind === 'empty') {
+    for (const [rootName, message] of Object.entries(workspaceRootErrors ?? {})) {
+      list.append(listNote(`Can't read ${rootName}: ${message} — its designs are hidden.`, 'error'));
+    }
+  }
   if (view.kind === 'loading') {
     list.append(listNote('Loading…'));
   } else if (view.kind === 'error') {
@@ -4211,6 +4226,9 @@ export function renderWorkspaceListRow(row: WorkspaceWorkRow): HTMLElement {
     if (ui.renaming) titleLine.append(renderRenameField(row, ui));
     else titleLine.append(q('span', 'ds-list-name', name));
     titleLine.append(q('span', `ds-badge${ready ? ' ready' : ''}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
+    // R4: a workspace found under an earlier designs location. The badge sits
+    // beside the readiness badge; the row's meta already names its dir.
+    if (row.legacyRoot) titleLine.append(q('span', 'ds-badge legacy', 'Old location'));
     if (running) titleLine.append(q('span', 'ds-badge running', '● Running'));
     main.append(titleLine);
     main.append(q('div', 'ds-list-meta', workspaceMeta(row)));
