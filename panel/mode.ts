@@ -527,6 +527,39 @@ export function buildModeChip(
   };
 }
 
+/**
+ * The COMPACT mode chip (F7) the row re-attaches with the first pick of every
+ * delivered batch while Design Mode is ON. The full `buildModeChip` reaches the
+ * model once, at `/canvas`; every later design request was a bare pick chip
+ * with no standing instructions. This one is only the load-bearing part — mode
+ * ON, the canvas mode, the workspace path + its rule, the screens — and shares
+ * the full chip's id, so it REPLACES the composer's mode chip instead of
+ * stacking a new one per batch. Same `data` shape, so `isModeChipData` still
+ * reads it as a design session.
+ */
+export function buildCompactModeChip(
+  sessionId: string | null,
+  mode: DesignMode,
+  workspace: WorkspaceRecord,
+  screens: ReadonlyArray<Pick<ScreenInfo, 'id' | 'file' | 'title'>> = [],
+  workspaceUrl?: string | null,
+): AttachIssueRequest {
+  const full = buildModeChip(sessionId, mode, workspace, screens, workspaceUrl);
+  const lines: string[] = [
+    'Design Mode: ON — every pick below is a design request for this workspace.',
+    `Canvas mode: ${mode.canvMode} · Artifact type: ${mode.type}`,
+    `Workspace: ${workspace.dir}`,
+    workspacePathRule(workspace.dir),
+  ];
+  if (screens.length > 0) {
+    const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);
+    lines.push(`Screens (${screens.length}):`);
+    for (const screen of shown) lines.push(`- ${screen.id} · ${screen.file}`);
+    if (screens.length > MODE_CHIP_SCREEN_CAP) lines.push(`… ${screens.length - MODE_CHIP_SCREEN_CAP} more in screens.json at the workspace root.`);
+  }
+  return { ...full, text: lines.join('\n').slice(0, GUEST_ATTACH_TEXT_MAX) };
+}
+
 // ---- /canvas export (SPEC-V3-P2-SCOPE.md D4/D7-B) ----
 
 /** Preset chars the export summary may spend enumerating file paths. */

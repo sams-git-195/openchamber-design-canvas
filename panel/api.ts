@@ -517,12 +517,17 @@ export function scaffoldProject(dir: string, spec: ScaffoldSpec): Promise<Scaffo
 /** The states of an async scaffold job (V4-11). */
 export type ScaffoldState = 'installing' | 'booting' | 'done' | 'failed';
 
-/** What `GET /scaffold/status?job=` answers. */
+/** What `GET /scaffold/status?dir=&job=` answers. */
 export type ScaffoldStatus = { state: ScaffoldState; elapsedMs: number; error?: string };
 
-/** Poll one async scaffold job by the id `POST /scaffold` returned. */
-export function getScaffoldStatus(job: string): Promise<ScaffoldStatus> {
-  return callService<ScaffoldStatus>('/scaffold/status', { job });
+/**
+ * Poll one async scaffold job by the id `POST /scaffold` returned. The service
+ * route REQUIRES `dir` next to `job` (F10: a poll must name the job's own
+ * workspace, or it answers 400 / "unknown scaffold job") — sending `job` alone
+ * was the F1 break that killed `/canvas` and Start on first use.
+ */
+export function getScaffoldStatus(job: string, dir: string): Promise<ScaffoldStatus> {
+  return callService<ScaffoldStatus>('/scaffold/status', { job, dir });
 }
 
 /**
@@ -660,6 +665,27 @@ export function joinWorkspaceDir(root: string, slug: string): string {
   const trimmed = root.replace(/[\\/]+$/, '');
   const sep = trimmed.includes('\\') && !trimmed.startsWith('/') ? '\\' : '/';
   return `${trimmed}${sep}${slug}`;
+}
+
+/** Whether `file` is already absolute: POSIX `/…`, a win32 drive `C:\…`/`C:/…`, or a UNC `\\host\…`. */
+function isAbsoluteFilePath(file: string): boolean {
+  return file.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(file) || file.startsWith('\\\\');
+}
+
+/**
+ * The absolute path of a workspace file for the chips the model edits from
+ * (F6). A registry `file` is workspace-relative and always `/`-separated; the
+ * join takes the WORKSPACE dir's separator style (the service hands win32 dirs
+ * with `\`), so the model is never handed a mixed `C:\ws/pages/home.html`. An
+ * already-absolute file passes through untouched.
+ */
+export function workspaceFilePath(dir: string, file: string): string {
+  const trimmedFile = file.trim();
+  if (isAbsoluteFilePath(trimmedFile)) return trimmedFile;
+  const root = dir.replace(/[\\/]+$/, '');
+  const sep = root.includes('\\') && !root.startsWith('/') ? '\\' : '/';
+  const relative = trimmedFile.replace(/^\.?[\\/]+/, '').split(/[\\/]+/).filter(Boolean).join(sep);
+  return `${root}${sep}${relative}`;
 }
 
 /** The screen url for a workspace-relative file, on a workspace base url (decision 6). */
@@ -894,8 +920,11 @@ export type PickScreen = { id: string; url: string };
 /**
  * The text of a picked element's chat reference chip. `screen` adds the
  * `Screen: <id>` line and that screen's URL (spec §F pick-chip payload).
+ * `location` (F6) is the `Workspace:` / `File:` / path-rule block the caller
+ * resolved — it rides right under the URLs, ABOVE the selector and markup, so
+ * a chip the host trims from the end never loses the path the model edits.
  */
-export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, screen?: PickScreen): string {
+export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, screen?: PickScreen, location: string[] = []): string {
   const styles = PICK_STYLE_KEYS
     .filter((key) => pick.styles[key] && pick.styles[key] !== 'normal' && pick.styles[key] !== 'none')
     .map((key) => `  ${key}: ${pick.styles[key]};`)
@@ -905,6 +934,7 @@ export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, s
     ...(pickedAt ? [`Picked at ${localTimeOf(pickedAt)}`] : []),
     ...(screen ? [`Screen: ${screen.id}`, `Screen URL: ${screen.url}`] : []),
     `URL: ${url}`,
+    ...location,
     `Selector: ${pick.selector}`,
     `Tag: ${pick.tag}${pick.classes ? `  Classes: ${pick.classes}` : ''}`,
     pick.text ? `Text: ${JSON.stringify(pick.text)}` : 'Text: (empty)',
@@ -926,12 +956,15 @@ export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, s
 export function screenReferenceText(
   entry: Pick<QueuedScreenPick, 'screen' | 'screenUrl' | 'width' | 'height' | 'file'>,
   pickedAt?: Date,
+  location: string[] = [],
 ): string {
+  // `location` (F6): the `Workspace:` / `File:` / path-rule block.
   return [
     'Reference from Design Canvas',
     ...(pickedAt ? [`Picked at ${localTimeOf(pickedAt)}`] : []),
     `Screen: ${entry.screen} (${entry.width}×${entry.height}) — ${entry.file}`,
     `Screen URL: ${entry.screenUrl}`,
+    ...location,
   ].join('\n');
 }
 

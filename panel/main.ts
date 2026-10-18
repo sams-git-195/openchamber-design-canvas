@@ -76,6 +76,7 @@ import {
   syncScreens,
   uniqueCanvasSlug,
   validateReferencePath,
+  workspaceFilePath,
   workspaceMeta,
   wsSessionIdFromKey,
   type CanvasScreenState,
@@ -103,6 +104,7 @@ import {
   NO_DESIGN_SYSTEM,
   TYPE_HINT,
   attachUrl,
+  buildCompactModeChip,
   buildModeChip,
   critiqueReviewChip,
   designMarkerKey,
@@ -118,6 +120,7 @@ import {
   fileReferenceChip,
   filterDesignSystems,
   findDesignSystem,
+  isDesignMarker,
   modeStorageKey,
   parseCanvasExportArgs,
   parseDesignArgs,
@@ -135,7 +138,7 @@ import {
 } from './mode.ts';
 import type { DesignSystemPreset } from '../shared/design-systems.ts';
 import { addDraftReference, removeDraftReference, buildReferenceSubmission, type DraftReference } from './reference-draft.ts';
-import { buildAttachPayload } from './attach-dialog.ts';
+import { buildAttachPayload, type PickContext } from './attach-dialog.ts';
 
 const POLL_MS = 900;
 
@@ -449,6 +452,30 @@ type ScaffoldOutcome =
   | { ok: false; error: string };
 
 /**
+ * What the new workspace is scaffolded AS (F8). Each caller passes its own
+ * explicit selections — the page its type/direction/fidelity/design-system
+ * pickers, `/canvas` its parsed type over the session mode — instead of the
+ * scaffold reading `state.mode`, which on the page is the DEFAULT mode, not
+ * what the user picked.
+ */
+type ScaffoldChoice = {
+  type: DesignType;
+  direction: DesignMode['direction'];
+  fidelity: Fidelity;
+  designSystemId: string | null;
+};
+
+/** The session mode as a scaffold choice (the row and `/canvas` flows). */
+function modeScaffoldChoice(type?: DesignType | null): ScaffoldChoice {
+  return {
+    type: type ?? state.mode.type,
+    direction: state.mode.direction,
+    fidelity: state.mode.fidelity,
+    designSystemId: state.pageDesignSystemId,
+  };
+}
+
+/**
  * Create the workspace: `GET /workspaces` for the service-resolved ROOT (the
  * panel never constructs the Documents path itself — decision 3), a slug that
  * no existing workspace clashes with, then `POST /scaffold {…, async:true}`
@@ -456,14 +483,23 @@ type ScaffoldOutcome =
  * V4-11: the POST answers as soon as the FILES are written — the returned
  * `jobId` covers npm install + dev boot, which the caller polls so the request
  * can NEVER hit the 20 s host cap (E15).
+ * `notify:false` leaves the error toast to the caller — the `/canvas` resolver
+ * THROWS it instead, so the host shows it once rather than a toast followed by
+ * "found nothing to attach".
  */
-async function scaffoldCanvasWorkspace(brief: string, seed: string, designSystemId: string | null): Promise<ScaffoldOutcome> {
+async function scaffoldCanvasWorkspace(
+  brief: string,
+  seed: string,
+  choice: ScaffoldChoice,
+  options: { notify?: boolean } = {},
+): Promise<ScaffoldOutcome> {
+  const notify = options.notify ?? true;
   let result: WorkspacesResult;
   try {
     result = await getWorkspaces();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await host.toast({ kind: 'error', message: `Could not list canvas workspaces: ${message}` });
+    if (notify) await host.toast({ kind: 'error', message: `Could not list canvas workspaces: ${message}` });
     return { ok: false, error: `Could not list canvas workspaces: ${message}` };
   }
   const slug = uniqueCanvasSlug(brief || 'canvas', seed, result.workspaces.map((row) => row.dir));
@@ -472,18 +508,18 @@ async function scaffoldCanvasWorkspace(brief: string, seed: string, designSystem
   let scaffold: ScaffoldResult;
   try {
     scaffold = await scaffoldProject(dir, {
-      type: state.mode.type,
-      direction: state.mode.direction,
-      fidelity: state.mode.fidelity,
+      type: choice.type,
+      direction: choice.direction,
+      fidelity: choice.fidelity,
       brief: brief || undefined,
       // Omitted for "No design system" so the request stays as before.
-      designSystemId: designSystemId ?? undefined,
+      designSystemId: choice.designSystemId ?? undefined,
     });
   } catch (error) {
     scaffold = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   if (!scaffold.ok) {
-    await host.toast({ kind: 'error', message: scaffold.error });
+    if (notify) await host.toast({ kind: 'error', message: scaffold.error });
     return { ok: false, error: scaffold.error };
   }
   await maybeShowPermissionToast(dir);
@@ -503,13 +539,16 @@ const SCAFFOLD_TOAST_STEP_MS = 10_000;
 const SCAFFOLD_MAX_MS = 15 * 60_000;
 
 /**
- * Poll `GET /scaffold/status?job=` (every `timing.pollMs`, production 2 s) until
- * the job reports done/failed, TOASTING progress as it goes (V4-11): once per
- * state change, refreshed at most per `SCAFFOLD_TOAST_STEP_MS` inside a state.
- * `timing` is a test seam. Returns 'done' or an actionable error.
+ * Poll `GET /scaffold/status?job=&dir=` (every `timing.pollMs`, production 2 s)
+ * until the job reports done/failed, TOASTING progress as it goes (V4-11): once
+ * per state change, refreshed at most per `SCAFFOLD_TOAST_STEP_MS` inside a
+ * state. `dir` is the workspace the job scaffolds — the service matches it
+ * against the job (F10) and refuses a poll without it (F1). `timing` is a test
+ * seam. Returns 'done' or an actionable error.
  */
 export async function runScaffoldJob(
   jobId: string,
+  dir: string,
   timing: { pollMs?: number; maxMs?: number } = {},
 ): Promise<'done' | { error: string }> {
   const pollMs = timing.pollMs ?? SCAFFOLD_POLL_MS;
@@ -519,9 +558,19 @@ export async function runScaffoldJob(
   for (;;) {
     let job: ScaffoldStatus;
     try {
-      job = await getScaffoldStatus(jobId);
+      job = await getScaffoldStatus(jobId, dir);
     } catch (error) {
       const message = `Canvas setup failed: the job status could not be read (${error instanceof Error ? error.message : String(error)}).`;
+      await host.toast({ kind: 'error', message });
+      return { error: message };
+    }
+    // An unknown job (the service restarted, or the single slot moved on)
+    // answers 200 `{ok:false,error}` with NO state. Read as "still running" it
+    // would poll for the full 15 minutes; it is a settled failure — the files
+    // exist, so Start retries the open.
+    if (job?.state !== 'installing' && job?.state !== 'booting' && job?.state !== 'done' && job?.state !== 'failed') {
+      const reason = (job as { error?: unknown } | null)?.error;
+      const message = `Canvas setup status is unavailable${typeof reason === 'string' && reason ? ` (${reason})` : ''} — the workspace files exist; press Start to try opening it.`;
       await host.toast({ kind: 'error', message });
       return { error: message };
     }
@@ -557,9 +606,35 @@ export async function runScaffoldJob(
  * (files written) — before the install/boot job finishes — so an interrupted
  * wait can never orphan a second workspace. The window opens only after `done`.
  */
-async function ensureCanvasWorkspace(brief: string, forSessionId: string | null = null): Promise<WorkspaceRecord | null> {
-  const sessionId = forSessionId ?? state.sessionId;
-  if (state.workspace && state.workspace.dir.trim() !== '') return state.workspace;
+async function ensureCanvasWorkspace(brief: string, forSessionId: string | null = null, choice?: ScaffoldChoice): Promise<WorkspaceRecord | null> {
+  const prepared = await prepareCanvasWorkspace(brief, forSessionId ?? state.sessionId, choice ?? modeScaffoldChoice());
+  if ('error' in prepared) return null;
+  if (!prepared.jobId) return prepared.record;
+  const job = await runScaffoldJob(prepared.jobId, prepared.record.dir);
+  if (job !== 'done') return null; // `ws/` stays stored — the dir is real, Start retries the open
+  return prepared.record;
+}
+
+/** What the FAST half of the workspace ensure answers (F3). */
+type PreparedWorkspace =
+  | { record: WorkspaceRecord; jobId: string | null; url: string | null }
+  | { error: string; noSession?: true };
+
+/**
+ * The fast half of `ensureCanvasWorkspace` (F3): an existing record, or the
+ * scaffold POST (files only — the service answers before npm install) plus the
+ * `ws/<sessionId>` save. NEVER waits on the install/boot job: `jobId` is handed
+ * back for a long-lived surface to poll. This is all the `/canvas` resolver may
+ * await, because a hidden resolve pane is unmounted the moment it answers and
+ * must answer inside `GUEST_REQUEST_TIMEOUT_MS` (20 s).
+ */
+async function prepareCanvasWorkspace(
+  brief: string,
+  sessionId: string | null,
+  choice: ScaffoldChoice,
+  options: { notify?: boolean } = {},
+): Promise<PreparedWorkspace> {
+  if (state.workspace && state.workspace.dir.trim() !== '') return { record: state.workspace, jobId: null, url: null };
   const stored = await readStoredWorkspace(sessionId);
   if (stored) {
     if (!state.workspace) {
@@ -567,21 +642,27 @@ async function ensureCanvasWorkspace(brief: string, forSessionId: string | null 
       renderRow();
       rerender();
     }
-    return stored;
+    return { record: stored, jobId: null, url: null };
   }
   if (!sessionId) {
-    return null; // no session to key a workspace to — the caller surfaces it
+    return { error: NO_SESSION_MESSAGE, noSession: true }; // no session to key a workspace to — the caller surfaces it
   }
-  const outcome = await scaffoldCanvasWorkspace(brief, sessionId, state.pageDesignSystemId);
-  if (!outcome.ok) return null;
+  const outcome = await scaffoldCanvasWorkspace(brief, sessionId, choice, options);
+  if (!outcome.ok) return { error: outcome.error };
   await saveWorkspaceRecord(sessionId, outcome.record);
   state.workspace = outcome.record;
   renderRow();
   rerender();
-  const job = await runScaffoldJob(outcome.jobId);
-  if (job !== 'done') return null; // `ws/` stays stored — the dir is real, Start retries the open
-  return outcome.record;
+  return { record: outcome.record, jobId: outcome.jobId, url: outcome.url };
 }
+
+/**
+ * F2: a new-chat draft has no session id yet, so there is nothing to key a
+ * workspace or a mode to. Said plainly (the resolver throws it — the host shows
+ * a thrown message verbatim; the row toasts it and hints it on the Start control).
+ */
+const NO_SESSION_MESSAGE = 'Start this chat by sending any message first, then run /canvas again.';
+const NO_SESSION_HINT = 'Send a message to start this chat first';
 
 // ---- Design Mode ----
 
@@ -596,14 +677,66 @@ function modeStoragePayload(): { on: boolean; type: DesignType; direction: Desig
   };
 }
 
+/**
+ * Bumped by every LOCAL mode write. A storage read that started before a local
+ * write may return the pre-write value; `syncModeFromStorage` drops any read
+ * whose generation moved, so this frame never adopts its own stale echo.
+ */
+let modeWriteGeneration = 0;
+
 async function saveMode(): Promise<void> {
   const key = modeStorageKey(state.sessionId);
   if (!key) return;
+  modeWriteGeneration += 1;
   try {
     await host.storage.set(key, modeStoragePayload());
   } catch {
     /* mode is a convenience; chat still works */
   }
+}
+
+/** Apply a stored `mode/<sessionId>` value onto `state.mode`. Garbage keeps the current fields. */
+function applyStoredMode(stored: unknown): void {
+  if (!stored || typeof stored !== 'object') return;
+  const value = stored as Partial<DesignMode>;
+  state.mode.on = Boolean(value.on);
+  if (DESIGN_TYPES.includes(value.type as DesignType)) state.mode.type = value.type as DesignType;
+  if (value.direction !== undefined && (value.direction === 'auto' || value.direction in DIRECTIONS)) state.mode.direction = value.direction as DesignMode['direction'];
+  if (FIDELITIES.includes(value.fidelity as Fidelity)) state.mode.fidelity = value.fidelity as Fidelity;
+  if (value.canvMode === 'play' || value.canvMode === 'edit') state.mode.canvMode = value.canvMode;
+  state.mode.brief = typeof value.brief === 'string' ? value.brief : '';
+}
+
+/**
+ * Re-read `mode/<sessionId>` and adopt it when it disagrees with memory (F3/F5).
+ * Another frame — the hidden `/canvas` resolve pane above all — writes this key
+ * while the row holds its own copy from mount; without the re-read the row kept
+ * holding picks ("mode off") and never opened what `/canvas` turned ON. Returns
+ * whether Design Mode is ON after the read. A read raced by a local write is
+ * discarded (the local write is newer by construction).
+ */
+async function syncModeFromStorage(): Promise<boolean> {
+  const key = modeStorageKey(state.sessionId);
+  if (!key) return state.mode.on;
+  const generation = modeWriteGeneration;
+  const sessionId = state.sessionId;
+  let stored: unknown;
+  try {
+    stored = await host.storage.get(key);
+  } catch {
+    return state.mode.on;
+  }
+  if (generation !== modeWriteGeneration || sessionId !== state.sessionId) return state.mode.on;
+  if (!stored || typeof stored !== 'object') return state.mode.on;
+  const value = stored as Partial<DesignMode>;
+  const differs = Boolean(value.on) !== state.mode.on
+    || (DESIGN_TYPES.includes(value.type as DesignType) && value.type !== state.mode.type)
+    || (typeof value.brief === 'string' && value.brief !== state.mode.brief);
+  if (differs) {
+    applyStoredMode(stored);
+    renderModeUi();
+  }
+  return state.mode.on;
 }
 
 /**
@@ -625,15 +758,7 @@ async function loadMode(): Promise<void> {
   const key = modeStorageKey(state.sessionId);
   if (!key) return;
   try {
-    const stored = (await host.storage.get(key)) as Partial<DesignMode> | undefined;
-    if (stored && typeof stored === 'object') {
-      state.mode.on = Boolean(stored.on);
-      if (DESIGN_TYPES.includes(stored.type as DesignType)) state.mode.type = stored.type as DesignType;
-      if (stored.direction !== undefined && (stored.direction === 'auto' || stored.direction in DIRECTIONS)) state.mode.direction = stored.direction as DesignMode['direction'];
-      if (FIDELITIES.includes(stored.fidelity as Fidelity)) state.mode.fidelity = stored.fidelity as Fidelity;
-      if (stored.canvMode === 'play' || stored.canvMode === 'edit') state.mode.canvMode = stored.canvMode;
-      state.mode.brief = typeof stored.brief === 'string' ? stored.brief : '';
-    }
+    applyStoredMode(await host.storage.get(key));
   } catch {
     /* keep defaults */
   }
@@ -724,6 +849,10 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
     await host.toast({ kind: 'info', message: 'Design Mode is off.' });
     return null;
   }
+  // F2: every ON path keys a workspace and a mode to the session. A new-chat
+  // draft has none yet; null would surface only the host's generic "found
+  // nothing to attach", while a THROWN error is shown to the user verbatim.
+  if (!state.sessionId) throw new Error(NO_SESSION_MESSAGE);
   // `/canvas play|edit`: the canvas mode switch (spec §B `POST /mode`), in-memory
   // echo drives the row; persisted with the session's mode.
   if (parsed.mode) {
@@ -737,18 +866,230 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
     state.mode.canvMode = parsed.mode;
     await saveMode();
   }
-  if (parsed.brief.trim() !== '') {
-    // `/canvas <brief>`: ensure/create THIS chat's canvas workspace, then turn
-    // Design Mode ON with the brief. No registered project is required, and no
-    // second session is started (decision 2/3) — this chat designs.
-    const ws = await ensureCanvasWorkspace(parsed.brief);
-    if (!ws) return null;
-    if (parsed.type) state.mode.type = parsed.type;
-    await toggleMode(true, parsed.type, parsed.brief);
-    return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), state.config?.url);
+  // `/canvas [<type>] [<brief>]`: ensure/create THIS chat's canvas workspace,
+  // then turn Design Mode ON (with the brief, when given). No registered
+  // project is required, and no second session is started (decision 2/3) —
+  // this chat designs.
+  //
+  // F3 — the 20 s budget: this resolve usually runs in a HIDDEN pane the host
+  // mounts only for the resolve and unmounts the moment it answers. So it
+  // awaits ONLY the fast half — the scaffold's file write and the `ws/` save —
+  // and hands npm install, the dev-server boot and the Chrome open to the
+  // status row (`canvas-open/<sessionId>`, consumed by `beginOpenHandoff`).
+  const ws = await prepareCanvasWorkspace(parsed.brief, state.sessionId, modeScaffoldChoice(parsed.type), { notify: false });
+  if ('error' in ws) throw new Error(ws.error); // F2/F3: the host shows a thrown message verbatim
+  await armDesignModeForRow(ws, parsed.type, parsed.brief || undefined);
+  const url = (await readWorkspaceUrl(ws.record.dir)) ?? ws.url ?? undefined;
+  return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), url);
+}
+
+/**
+ * The workspace's config url for the mode chip — one quick `/config` read
+ * (a file read service-side; never a boot). Null when the service cannot say.
+ */
+async function readWorkspaceUrl(dir: string): Promise<string | null> {
+  const cached = currentConfig()?.url?.trim();
+  if (cached) return cached;
+  try {
+    const read = await getConfig(dir);
+    if (state.workspace?.dir === dir) {
+      state.config = read.config;
+      state.configPath = read.path;
+      state.configDir = dir;
+    }
+    return read.config?.url?.trim() || null;
+  } catch {
+    return null;
   }
-  await toggleMode(true, parsed.type, parsed.brief || undefined);
-  return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), state.config?.url);
+}
+
+// ---- the resolve → row open handoff (F3) ----
+//
+// The `/canvas` resolver must answer fast and usually runs in a pane that dies
+// with its answer, while the status row stays mounted and already polls. So
+// the resolver records WHAT to open in `canvas-open/<sessionId>` and turns the
+// mode ON; the row's poll finds the record, waits out the install/boot job (if
+// the resolve scaffolded one), and opens the canvas window. The record is
+// written BEFORE `mode/` flips ON: a row reading ON must already find the
+// handoff, or its `/state` mirror would read "ON, no window" as the user
+// closing it and turn the mode straight back OFF.
+
+/** A pending open the row owes a resolve (F3). */
+type OpenHandoff = { dir: string; jobId: string | null; at: number };
+
+/** A handoff older than this is not acted on — opening Chrome long after `/canvas` would be a surprise. */
+const OPEN_HANDOFF_MAX_AGE_MS = 5 * 60_000;
+/**
+ * A fresh handoff seen while `mode/` still reads OFF is LEFT for the next tick
+ * this long: the resolver writes `mode/` right after the handoff, and the row
+ * may have read between the two writes.
+ */
+const OPEN_HANDOFF_SETTLE_MS = 5_000;
+
+export function openHandoffKey(sessionId: string | null): string | null {
+  return sessionId ? `canvas-open/${sessionId}` : null;
+}
+
+function isOpenHandoff(value: unknown): value is OpenHandoff {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Partial<OpenHandoff>;
+  return typeof record.dir === 'string' && record.dir.trim() !== ''
+    && (record.jobId === null || typeof record.jobId === 'string')
+    && typeof record.at === 'number' && Number.isFinite(record.at);
+}
+
+/**
+ * Turn Design Mode ON for the row to act on (F3): the handoff record first,
+ * then `mode/`, then the one-time design marker. No window work happens here.
+ */
+async function armDesignModeForRow(
+  ws: { record: WorkspaceRecord; jobId: string | null },
+  type: DesignType | null | undefined,
+  brief: string | undefined,
+): Promise<void> {
+  const key = openHandoffKey(state.sessionId);
+  if (key) {
+    const handoff: OpenHandoff = { dir: ws.record.dir, jobId: ws.jobId, at: Date.now() };
+    try {
+      await host.storage.set(key, handoff);
+    } catch {
+      /* without the record the row cannot open; Start/the toggle still can */
+    }
+  }
+  state.mode.on = true;
+  if (type) state.mode.type = type;
+  if (brief !== undefined && brief !== '') state.mode.brief = brief;
+  await saveMode();
+  // The marker is written once, ever. A hidden resolve pane may answer before
+  // its own `loadMode` lands, so "was it off?" is asked of the marker itself.
+  const markerKey = designMarkerKey(state.sessionId);
+  let marked = false;
+  if (markerKey) {
+    try {
+      marked = isDesignMarker(await host.storage.get(markerKey));
+    } catch {
+      marked = false;
+    }
+  }
+  if (!marked) await writeDesignMarker();
+  renderModeUi();
+}
+
+/** True while a handoff open is in progress (one at a time per row). */
+let handoffInFlight = false;
+let handoffTask: Promise<'opened' | 'skipped' | 'failed'> | null = null;
+
+/**
+ * Phase 1 of the row's handoff (awaited by the poll BEFORE it applies `/state`):
+ * read `canvas-open/<sessionId>`, and when it is actionable claim it — hold the
+ * pending-open guard, delete the record (one row, one open) — and start phase 2
+ * in the background. Returns that task WRAPPED (`{ task }`): an async function
+ * returning a bare promise would flatten it, and the poll would then sit on the
+ * whole install instead of only on the claim. Null when there is nothing to do.
+ */
+async function beginOpenHandoff(timing: { pollMs?: number; maxMs?: number } = {}): Promise<{ task: Promise<'opened' | 'skipped' | 'failed'> } | null> {
+  if (handoffInFlight) return handoffTask ? { task: handoffTask } : null;
+  const key = openHandoffKey(state.sessionId);
+  if (!key) return null;
+  let handoff: unknown;
+  try {
+    handoff = await host.storage.get(key);
+  } catch {
+    return null;
+  }
+  if (handoffInFlight) return handoffTask ? { task: handoffTask } : null;
+  if (!isOpenHandoff(handoff)) return null;
+  const pending: OpenHandoff = handoff;
+  const age = Date.now() - pending.at;
+  if (!state.mode.on) await syncModeFromStorage();
+  if (!state.mode.on && age >= 0 && age < OPEN_HANDOFF_SETTLE_MS) return null; // mode/ not written yet — next tick
+  handoffInFlight = true;
+  const hold = ++pendingOpenHoldSeq;
+  state.pendingOpen = true;
+  try {
+    await host.storage.delete(key);
+  } catch {
+    /* the in-flight flag still stops this row from running it twice */
+  }
+  const sessionId = state.sessionId;
+  handoffTask = (async (): Promise<'opened' | 'skipped' | 'failed'> => {
+    try {
+      if (!state.mode.on || age > OPEN_HANDOFF_MAX_AGE_MS) return 'skipped';
+      // Bind the workspace the resolve created; the row may not have read it yet.
+      if (!state.workspace || !sameDirPath(state.workspace.dir, pending.dir)) {
+        const stored = await readStoredWorkspace(sessionId);
+        if (stored && sameDirPath(stored.dir, pending.dir)) bindWorkspace(stored);
+      }
+      if (!state.workspace || !sameDirPath(state.workspace.dir, pending.dir)) return 'failed';
+      if (pending.jobId) {
+        const job = await runScaffoldJob(pending.jobId, pending.dir, timing);
+        if (job !== 'done') return 'failed'; // the job's own toast said why; `ws/` stays — Start retries
+      }
+      // The user may have switched it OFF (or the session) while the job ran.
+      if (!state.mode.on || state.sessionId !== sessionId) return 'skipped';
+      if (state.windowOpen) {
+        try {
+          await focusLive();
+        } catch (error) {
+          setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+        }
+      } else {
+        await openCanvasWindow(false);
+      }
+      return 'opened';
+    } finally {
+      handoffInFlight = false;
+      if (hold === pendingOpenHoldSeq) state.pendingOpen = false;
+    }
+  })();
+  return { task: handoffTask };
+}
+
+/** Run the row's handoff to completion (test seam; the poll only awaits the claim). */
+export async function runOpenHandoff(timing: { pollMs?: number; maxMs?: number } = {}): Promise<'none' | 'opened' | 'skipped' | 'failed'> {
+  const claimed = await beginOpenHandoff(timing);
+  return claimed ? await claimed.task : 'none';
+}
+
+/** Bind a workspace record to this frame (the same reset `loadWorkspace` does). */
+function bindWorkspace(record: WorkspaceRecord): void {
+  state.workspace = record;
+  state.configDir = null;
+  state.config = null;
+  renderRow();
+  rerender();
+  void loadStudioConfig();
+}
+
+/**
+ * The row's per-tick storage sync (F3/F5): adopt a `ws/<sessionId>` another
+ * frame created ("No canvas workspace yet" no longer sticks after a hidden-pane
+ * `/canvas`), adopt `mode/<sessionId>`, and claim a pending open handoff. All of
+ * it is awaited BEFORE the tick applies `/state`, so an ON adopted here is
+ * already guarded when the closed window is read.
+ */
+export async function syncRowFromStorage(): Promise<void> {
+  const sessionId = state.sessionId;
+  if (!sessionId) return;
+  const record = await readStoredWorkspace(sessionId);
+  if (record && sessionId === state.sessionId && !(state.workspace && sameDirPath(state.workspace.dir, record.dir))) {
+    bindWorkspace(record);
+  }
+  const wasOn = state.mode.on;
+  // While memory says OFF, hold the guard across the gap between adopting ON
+  // and claiming the handoff; released below when there is no handoff (the
+  // plain "ON but no window" case keeps its old meaning: the window was
+  // closed, the mode follows it OFF). Memory already ON needs no hold — its
+  // own transition owns the guard.
+  const hold = wasOn ? 0 : ++pendingOpenHoldSeq;
+  if (hold) state.pendingOpen = true;
+  try {
+    await syncModeFromStorage();
+    if (state.mode.on && !wasOn) renderRow();
+    await beginOpenHandoff();
+  } finally {
+    if (hold && hold === pendingOpenHoldSeq) state.pendingOpen = false;
+  }
 }
 
 // ---- /canvas export & critique (SPEC-V3-P2-SCOPE.md D4/D7-B/D7-C) ----
@@ -959,7 +1300,12 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
 type CanvasPrep =
   | { kind: 'workspace'; workspace: WorkspaceRecord; url: string; projectId?: string }
   | { kind: 'new'; workspace: WorkspaceRecord; url: string }
-  | { kind: 'failed'; error: string };
+  /**
+   * `workspace` (F4): set when the scaffold POST created the folder and only
+   * the install/boot job failed — the dir is REAL, so the session's prompt and
+   * its `ws/` record must point at it instead of orphaning it.
+   */
+  | { kind: 'failed'; error: string; workspace?: WorkspaceRecord };
 
 /**
  * Make sure a canvas workspace exists for the composer's brief, scaffolding one
@@ -984,16 +1330,23 @@ async function scaffoldCurrentProject(spec: DesignBriefSpec): Promise<CanvasPrep
     const projectId = target.kind === 'workspace' ? target.projectId : undefined;
     return { kind: 'workspace', workspace: state.workspace, url, projectId };
   }
-  const outcome = await scaffoldCanvasWorkspace(spec.brief, `new-design:${Date.now()}`, spec.designSystemId ?? null);
+  // F8: the page's OWN selections (type / direction / fidelity / design
+  // system) shape the scaffold — never the session row's `state.mode`.
+  const outcome = await scaffoldCanvasWorkspace(spec.brief, `new-design:${Date.now()}`, {
+    type: spec.type,
+    direction: spec.direction,
+    fidelity: spec.fidelity,
+    designSystemId: spec.designSystemId ?? null,
+  }, { notify: false });
   if (!outcome.ok) {
     await host.toast({ kind: 'error', message: outcome.error });
     return { kind: 'failed', error: outcome.error };
   }
   // The session starts once the workspace is REAL (installed and booted), not
   // half-written; the progress toasts tell the user where it is.
-  const job = await runScaffoldJob(outcome.jobId);
+  const job = await runScaffoldJob(outcome.jobId, outcome.record.dir);
   if (job !== 'done') {
-    return { kind: 'failed', error: job.error };
+    return { kind: 'failed', error: job.error, workspace: outcome.record };
   }
   return { kind: 'new', workspace: outcome.record, url: outcome.url };
 }
@@ -1033,18 +1386,22 @@ async function startNewDesign(): Promise<void> {
     }
     const prep = await scaffoldCurrentProject(spec);
     if (prep.kind === 'failed') {
-      // The session still starts in the agent-scaffolds fallback: the prompt
-      // carries the workspace once it exists (the flow below describes it).
+      // The session still starts in the agent-scaffolds fallback. F4: when the
+      // scaffold DID write the folder (only install/boot failed), the prompt
+      // names that real path and the new session's `ws/` binds to it — never
+      // "ask if the path is missing" next to a folder that exists on disk.
       state.pageError = prep.error;
       rerender();
+      const workspace = prep.workspace ?? state.workspace ?? undefined;
       await startDesignSession({
         id: `new-design:${Date.now()}`,
         title: `New design · ${spec.type}`,
         url: '',
         type: spec.type,
         brief: spec.brief,
-        dir: state.workspace?.dir ?? '',
-        text: designSessionPrompt(spec, state.workspace),
+        dir: workspace?.dir ?? '',
+        workspace,
+        text: designSessionPrompt(spec, workspace ?? null),
         references,
       });
       return;
@@ -1082,11 +1439,45 @@ async function startNewDesign(): Promise<void> {
  */
 async function addToChat(entry: QueuedPick): Promise<boolean> {
   try {
-    await host.attach(buildAttachPayload(entry));
+    await host.attach(buildAttachPayload(entry, pickContext()));
     return true;
   } catch (error) {
     setStatus(`Could not attach a canvas pick: ${error instanceof Error ? error.message : String(error)}`, 'error');
     return false;
+  }
+}
+
+/** Where the row's picks live on disk (F6): the bound workspace + the live screens. */
+function pickContext(): PickContext | null {
+  const dir = state.workspace?.dir?.trim();
+  return dir ? { workspaceDir: dir, screens: state.liveScreens } : null;
+}
+
+/** The live screens with ABSOLUTE files, for the compact mode chip (F7). */
+function currentScreenFiles(dir: string): Array<{ id: string; file: string; title: string }> {
+  return currentScreens().map((screen) => {
+    const live = state.liveScreens.find((candidate) => candidate.id === screen.id);
+    let file = screen.file;
+    try {
+      if (live) file = decodeURIComponent(new URL(live.url).pathname).replace(/^\/+/, '') || 'index.html';
+    } catch {
+      /* keep the basename */
+    }
+    return { ...screen, file: workspaceFilePath(dir, file) };
+  });
+}
+
+/**
+ * F7: attach the compact Design Mode chip ahead of a pick batch. Best-effort —
+ * a failure here never blocks or un-acks the picks themselves.
+ */
+async function attachCompactModeChip(): Promise<void> {
+  const ws = state.workspace;
+  if (!state.mode.on || !ws || ws.dir.trim() === '') return;
+  try {
+    await host.attach(buildCompactModeChip(state.sessionId, state.mode, ws, currentScreenFiles(ws.dir), currentConfig()?.url));
+  } catch {
+    /* the pick chips still carry Workspace:/File: lines (F6) */
   }
 }
 
@@ -1140,9 +1531,25 @@ export function getPickCursor(): number {
  */
 async function deliverPickBatch(picks: QueuedPick[]): Promise<boolean> {
   let lastDelivered: QueuedPick | null = null;
+  let modeRechecked = false;
+  let modeChipSent = false;
   for (const entry of [...picks].sort((a, b) => a.seq - b.seq)) {
     if (entry.seq <= pickCursor) continue; // already delivered-and-acked (defensive)
+    // F5: memory may say OFF only because another frame (the `/canvas` resolve
+    // pane) turned the mode ON in storage after this row loaded it. One cheap
+    // storage read per batch beats holding the pick for another long-poll.
+    if (!state.mode.on && !modeRechecked) {
+      modeRechecked = true;
+      await syncModeFromStorage();
+    }
     if (!state.mode.on || state.bridgeActive) break; // held — the queue keeps it
+    // F7: the FIRST deliverable pick of a batch carries the standing Design
+    // Mode instructions (workspace path + rule + screens) — at most once per
+    // batch, and under the mode chip's own id so it replaces, never stacks.
+    if (!modeChipSent) {
+      modeChipSent = true;
+      await attachCompactModeChip();
+    }
     if (!(await addToChat(entry))) break; // no ack past a failed attach; retry next poll
     lastDelivered = entry;
   }
@@ -1192,6 +1599,9 @@ export async function runPickLoop(stop: () => boolean): Promise<void> {
   while (!stop()) {
     if (!state.mode.on || state.bridgeActive) {
       await sleep(PICK_HELD_POLL_MS);
+      // F5: a mode turned ON by another frame must release the hold without
+      // waiting for anything else to refresh this row's copy.
+      if (!state.mode.on) await syncModeFromStorage();
       continue;
     }
     const outcome = await pollPicksOnce(PICK_LONG_POLL_MS);
@@ -1574,7 +1984,10 @@ export async function applySessionSnapshot(session: { id: string; busy: boolean 
     const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
     reportHonouredStop(result, request.dir);
   }
-  if (changed) await loadWorkspace();
+  if (changed) {
+    await loadWorkspace();
+    renderRow(); // F2: the Start control's "send a message first" hint follows the session
+  }
   await loadMode();
 }
 
@@ -1688,7 +2101,12 @@ function renderServerControl(): void {
     serverBtn.disabled = state.serverPending;
     serverBtn.classList.remove('is-stopped', 'is-running', 'is-loading', 'is-error');
     serverBtn.classList.add(state.serverPending ? 'is-loading' : 'is-stopped');
-    serverBtn.title = state.serverPending ? 'Working…' : 'Create canvas — start a Design Canvas workspace';
+    // F2: with no session yet the click can only explain itself — label it so.
+    serverBtn.title = state.serverPending
+      ? 'Working…'
+      : state.sessionId
+        ? 'Create canvas — start a Design Canvas workspace'
+        : `${NO_SESSION_HINT}, then press Start to create a canvas`;
     serverBtn.setAttribute('aria-label', serverBtn.title);
     const icon = q('span', 'ds-server-icon');
     serverBtn.replaceChildren(icon);
@@ -1746,14 +2164,32 @@ function currentConfig(): StudioConfig | null {
 async function onServerControlClick(): Promise<void> {
   if (state.serverPending) return;
   if (!state.workspace) {
-    // First use: Start creates the canvas workspace (spec §F), then turns
-    // Design Mode ON, which opens it.
-    const ws = await ensureCanvasWorkspace('');
-    if (!ws) {
-      announceServer('Could not create the canvas workspace.');
+    // F2: a new-chat draft has no session to key the workspace to — say so
+    // where the user is looking (the live region alone is screen-reader-only).
+    if (!state.sessionId) {
+      announceServer(NO_SESSION_MESSAGE);
+      await host.toast({ kind: 'error', message: NO_SESSION_MESSAGE });
       return;
     }
-    await toggleMode(true);
+    // First use: Start creates the canvas workspace (spec §F), then turns
+    // Design Mode ON, which opens it. The row is long-lived, so it may wait
+    // out the install/boot job here; `serverPending` keeps the button busy
+    // and swallows double clicks for the whole flow.
+    state.serverPending = true;
+    renderServerControl();
+    try {
+      const ws = await ensureCanvasWorkspace('');
+      if (!ws) {
+        // The scaffold / job paths toast their own cause; this names the outcome.
+        announceServer('Could not create the canvas workspace.');
+        await host.toast({ kind: 'error', message: 'Could not create the canvas workspace — see the message above, then press Start to retry.' });
+        return;
+      }
+      await toggleMode(true);
+    } finally {
+      state.serverPending = false;
+      renderServerControl();
+    }
     return;
   }
   const url = currentConfig()?.url?.trim();
@@ -3021,7 +3457,8 @@ function renderSessionStatus(): void {
   if (!sessionLineEl) return;
   const ws = state.workspace;
   if (!ws) {
-    sessionLineEl.textContent = NO_WORKSPACE_MESSAGE;
+    // F2: the visible hint for a draft chat — Start cannot work until it exists.
+    sessionLineEl.textContent = state.sessionId ? NO_WORKSPACE_MESSAGE : `${NO_SESSION_HINT}, then press Start.`;
     sessionLineEl.classList.add('off');
     return;
   }
@@ -3173,6 +3610,14 @@ async function turnModeOffByWindowClose(): Promise<void> {
 }
 
 async function poll(): Promise<void> {
+  // F3: adopt what another frame wrote (`ws/`, `mode/`) and claim a pending
+  // `/canvas` open BEFORE anything else — and before the visibility guard: a
+  // collapsed sidebar must not strand a `/canvas` the user just ran.
+  try {
+    await syncRowFromStorage();
+  } catch {
+    /* storage is a convenience; the tick still reads /state */
+  }
   if (document.visibilityState !== 'visible') return;
   // Re-detect `.design-studio.json` on every tick so the agent scaffolding one
   // mid-session flips the row to ready without a reload. Silent (mount reports
@@ -3470,6 +3915,13 @@ export function getModeState(): DesignMode {
 /** Test seam: whether the pending-open guard is held (an open or an ON transition). */
 export function getPendingOpen(): boolean {
   return state.pendingOpen;
+}
+
+/** Test seam: the page's creation selections, without replaying the pickers. */
+export function setPageChoice(choice: { type?: DesignType; direction?: 'auto' | DirectionId; fidelity?: Fidelity }): void {
+  if (choice.type) state.pageType = choice.type;
+  if (choice.direction) state.pageDirection = choice.direction;
+  if (choice.fidelity) state.pageFidelity = choice.fidelity;
 }
 
 /** Test seam: set the chosen design-system preset id without replaying a page render. */

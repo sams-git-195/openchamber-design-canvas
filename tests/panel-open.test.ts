@@ -130,11 +130,15 @@ test('scaffoldProject posts {dir, type, …, async:true} and the design system t
   assert.deepEqual(JSON.parse(calls[1]!.body ?? ''), { dir: '/root/slug', type: 'hi-fi', designSystemId: 'apple', async: true });
 });
 
-test('getScaffoldStatus polls GET /scaffold/status?job= — the async job state (V4-11)', async () => {
+test('getScaffoldStatus polls GET /scaffold/status?job=&dir= — the async job state (V4-11, F1)', async () => {
   const calls = stubService(() => ({ status: 200, body: JSON.stringify({ state: 'installing', elapsedMs: 4400 }) }));
-  const status = await getScaffoldStatus('job-1');
+  const status = await getScaffoldStatus('job-1', 'C:\\Docs\\Design Canvas\\landing-1');
   assert.deepEqual(status, { state: 'installing', elapsedMs: 4400 });
-  assert.deepEqual(calls[0], { method: 'GET', path: '/scaffold/status', query: { job: 'job-1' }, body: undefined });
+  assert.deepEqual(
+    calls[0],
+    { method: 'GET', path: '/scaffold/status', query: { job: 'job-1', dir: 'C:\\Docs\\Design Canvas\\landing-1' }, body: undefined },
+    'F1: the service route requires dir next to job (job alone answers 400) — the real round trip is pinned in scaffold-contract.test.ts',
+  );
 });
 
 test('scaffoldProgressText words each async-scaffold state for the progress toast (V4-11)', () => {
@@ -652,8 +656,11 @@ test('the /canvas resolver ensures the workspace, switches modes via POST /mode 
   assert.match(resolver, /const parsed = parseDesignArgs\(args\)/);
   assert.match(resolver, /await toggleMode\(false\)/, 'off turns the mode off');
   assert.match(resolver, /await setMode\(parsed\.mode\)/, 'play/edit posts POST /mode');
-  assert.match(resolver, /const ws = await ensureCanvasWorkspace\(parsed\.brief\)/, 'a brief ensures (creates) the workspace');
-  assert.match(resolver, /return buildModeChip\(state\.sessionId, state\.mode, state\.workspace, currentScreens\(\), state\.config\?\.url\)/, 'the chip carries the workspace and screens');
+  assert.match(resolver, /const ws = await prepareCanvasWorkspace\(parsed\.brief, state\.sessionId, modeScaffoldChoice\(parsed\.type\), \{ notify: false \}\)/, 'F3: the resolve awaits only the FAST half (files + ws/), with the parsed type (F8)');
+  assert.match(resolver, /if \(!state\.sessionId\) throw new Error\(NO_SESSION_MESSAGE\)/, 'F2: no session → a thrown, user-actionable message');
+  assert.match(resolver, /await armDesignModeForRow\(ws, parsed\.type, parsed\.brief \|\| undefined\)/, 'F3: install/boot/open are handed to the status row');
+  assert.doesNotMatch(resolver.slice(0, resolver.indexOf('async function readWorkspaceUrl(')), /toggleMode\(true|runScaffoldJob|openCanvasWindow/, 'F3: nothing long-lived runs inside the resolve');
+  assert.match(resolver, /return buildModeChip\(state\.sessionId, state\.mode, state\.workspace, currentScreens\(\), url\)/, 'the chip carries the workspace and screens');
 });
 
 test('the workspace scaffold creates under the SERVICE root via a unique slug (decision 3)', async () => {

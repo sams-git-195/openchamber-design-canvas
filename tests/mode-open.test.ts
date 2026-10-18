@@ -92,7 +92,7 @@ function scaffoldJob(request: ServiceRequest): StubResult {
 
 const IS_SCAFFOLD_PATH = (path: string): boolean => path === '/scaffold' || path.startsWith('/scaffold/');
 
-function stubService(handler: (request: ServiceRequest) => StubResult): ServiceRequest[] {
+function stubService(handler: (request: ServiceRequest) => StubResult | Promise<StubResult>): ServiceRequest[] {
   const calls: ServiceRequest[] = [];
   (api.host as unknown as { serviceRequest: (r: ServiceRequest) => Promise<StubResult> }).serviceRequest = async (request) => {
     calls.push(request);
@@ -434,18 +434,26 @@ test('/canvas <brief> creates the chat\'s workspace in the service root, toasts 
   const chip = await resolveCanvasCommand('checkout flow');
 
   const root = JSON.parse(WORKSPACES_BODY).root as string;
+  const dir = `${root}\\checkout-flow-3f2ad8`;
   const scaffold = calls.find((call) => call.path === '/scaffold');
   assert.ok(scaffold, 'the brief scaffolds the workspace');
   const scaffoldBody = JSON.parse(scaffold!.body ?? '') as { dir: string; type: string; brief: string; async?: boolean };
-  assert.equal(scaffoldBody.dir, `${root}\\checkout-flow-3f2ad8`, 'the dir is <service root>/<slug> — never a Documents path of our own');
+  assert.equal(scaffoldBody.dir, dir, 'the dir is <service root>/<slug> — never a Documents path of our own');
   assert.equal(scaffoldBody.brief, 'checkout flow');
   assert.match(scaffoldBody.type, /^(wireframe|hi-fi|prototype|deck|custom)$/, 'the scaffold uses a real design type');
   assert.equal(scaffoldBody.async, true, 'V4-11: the first-run scaffold is the async job — it can never hit the 20 s host cap');
-  assert.ok(calls.some((call) => call.path === '/scaffold/status'), 'the job is polled until it reports done');
-  assert.ok(calls.some((call) => call.path === '/open'), 'Design Mode ON opens the canvas');
-  assert.deepEqual(store.get(workspaceStorageKey('ses_3f2ad8')!), { dir: `${root}\\checkout-flow-3f2ad8`, name: 'checkout flow' }, 'the ws/<sessionId> record is stored');
+  assert.equal(calls.some((call) => call.path === '/scaffold/status' || call.path === '/open'), false, 'F3: the resolve neither polls the job nor opens — the row does');
+  assert.deepEqual(store.get(workspaceStorageKey('ses_3f2ad8')!), { dir, name: 'checkout flow' }, 'the ws/<sessionId> record is stored');
+  assert.deepEqual({ ...(store.get(main.openHandoffKey('ses_3f2ad8')!) as object), at: 0 }, { dir, jobId: 'job-1', at: 0 }, 'F3: the open is handed to the row with the job to wait out');
   assert.equal(getModeState().on, true);
   assert.match(chip?.text ?? '', /Brief: checkout flow/);
+
+  // The status row picks the handoff up: polls the job WITH its dir (F1), then opens.
+  assert.equal(await main.runOpenHandoff(), 'opened');
+  const status = calls.find((call) => call.path === '/scaffold/status');
+  assert.deepEqual(status?.query, { job: 'job-1', dir }, 'F1: the status poll names the job AND its dir');
+  assert.ok(calls.some((call) => call.path === '/open'), 'Design Mode ON opens the canvas — from the row');
+  assert.equal(store.has(main.openHandoffKey('ses_3f2ad8')!), false, 'the handoff is consumed — one row, one open');
   assert.ok(
     toasts.some((toast) => toast.kind === 'info' && /permission prompts/.test(toast.message)),
     'the FIRST scaffold toasts the out-of-folder permission heads-up (decision 4b)',
@@ -476,7 +484,7 @@ test('the permission heads-up fires only ONCE (decision 4b)', async () => {
   assert.equal(toasts.filter((toast) => /permission prompts/.test(toast.message)).length, 1, 'the heads-up never repeats');
 });
 
-test('/canvas <brief> scaffold failure toasts the error and returns no chip', async () => {
+test('/canvas <brief> scaffold failure THROWS the error (the host shows it) and attaches nothing', async () => {
   setWorkspace(null);
   const calls = stubService((request) => {
     if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
@@ -484,18 +492,60 @@ test('/canvas <brief> scaffold failure toasts the error and returns no chip', as
     return { status: 200, body: JSON.stringify({ ok: true }) };
   });
   const toasts = stubToast();
-  stubStorage();
+  const store = stubStorage();
   setSessionId('ses_fail');
   allowResolve(true);
 
-  const chip = await resolveCanvasCommand('hi-fi landing page');
+  await assert.rejects(() => resolveCanvasCommand('hi-fi landing page'), /no template for type/, 'the scaffold error is surfaced verbatim through the host\'s command-failed toast');
 
   assert.equal(calls.some((call) => call.path === '/scaffold'), true, 'the scaffold was attempted');
-  assert.ok(
-    toasts.some((toast) => toast.kind === 'error' && /no template for type/.test(toast.message)),
-    'the scaffold error is surfaced, not swallowed',
-  );
-  assert.equal(chip, null, 'no chip without a workspace');
+  assert.equal(toasts.some((toast) => /no template for type/.test(toast.message)), false, 'no second copy of the same error as our own toast');
+  assert.equal(store.has(modeStorageKey('ses_fail')!), false, 'no workspace → Design Mode is never armed for the row');
+});
+
+test('F2: /canvas in a new-chat draft (no session yet) throws the "send a message first" instruction', async () => {
+  setWorkspace(null);
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  stubToast();
+  stubStorage();
+  setSessionId(null);
+  allowResolve(true);
+
+  await assert.rejects(() => resolveCanvasCommand('checkout flow'), /Start this chat by sending any message first, then run \/canvas again\./);
+  await assert.rejects(() => resolveCanvasCommand(''), /sending any message first/, 'a bare /canvas too');
+  assert.equal(calls.some((call) => call.path === '/scaffold' || call.path === '/workspaces'), false, 'nothing is created without a session to key it to');
+});
+
+test('F3: the resolve returns BEFORE install/boot — no status poll, dev-server, focus or Chrome call while it is pending', async () => {
+  setWorkspace(null);
+  setSessionId('ses_fast');
+  stubToast();
+  const store = stubStorage();
+  const calls = stubService((request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (request.path === '/scaffold') {
+      const body = JSON.parse(request.body ?? '{}') as { dir?: string };
+      return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-fast', dir: body.dir, url: 'http://localhost:5173/' }) };
+    }
+    if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
+    // A job that never finishes: a resolve still awaiting it would hang here.
+    if (request.path === '/scaffold/status') return { status: 200, body: JSON.stringify({ state: 'installing', elapsedMs: 1000 }) };
+    return { status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/', title: 'Site', settled: true }) };
+  });
+  allowResolve(true);
+  await resetToClosedWindow();
+  try {
+    const chip = await resolveCanvasCommand('fast landing');
+    assert.ok(chip, 'the mode chip comes back at once');
+    const forbidden = ['/scaffold/status', '/open', '/server/start', '/focus'];
+    assert.deepEqual(calls.filter((call) => forbidden.includes(call.path)).map((call) => call.path), [], 'no install/boot/window work inside the resolve');
+    assert.equal(getModeState().on, true, 'Design Mode is ON for the row to act on');
+    assert.ok(store.has(main.openHandoffKey('ses_fast')!), 'the open is handed off');
+  } finally {
+    store.delete(main.openHandoffKey('ses_fast')!);
+    setWorkspace(null);
+    setSessionId(null);
+  }
 });
 
 // ---- the page's New-design flow (no registered project required) ----
@@ -1449,14 +1499,17 @@ test('async first run: ws/ stored AT THE POST, progress toasts per state, ONE wo
   await resetToClosedWindow();
   mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    const pending = resolveCanvasCommand('slow landing');
+    const chip = await resolveCanvasCommand('slow landing');
+    assert.ok(chip, 'F3: the command answers with its chip as soon as the files + ws/ exist');
+    assert.deepEqual(timeline, ['scaffold-post', 'ws-stored'], 'F3: the resolve stops at the fast half — no job poll, no open');
+    // The status row owns the long half: it claims the handoff and polls the job.
+    const pending = main.runOpenHandoff();
     await flush();
     for (let i = 0; i < 10 && !timeline.includes('open'); i += 1) {
       mock.timers.tick(2000);
       await flush();
     }
-    const chip = await pending;
-    assert.ok(chip, 'the command answers with its chip once the job is done');
+    assert.equal(await pending, 'opened');
     assert.deepEqual(timeline.slice(0, 7), ['scaffold-post', 'ws-stored', 'status:installing', 'status:installing', 'status:booting', 'status:done', 'open'], 'the V4-11 order: ws/ stored BEFORE any poll, the window opens only AFTER done');
     assert.equal(calls.filter((call) => call.path === '/scaffold').length, 1, 'exactly ONE scaffold POST — no orphan second workspace');
     assert.ok(base.has(workspaceStorageKey('ses_slow')!), 'ws/ses_slow persisted at the {ok:true, jobId} answer');
@@ -1491,8 +1544,9 @@ test('a failed scaffold job: error toast, NO open, and the ws/ record STAYS (V4-
   await resetToClosedWindow();
   mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    const chip = await resolveCanvasCommand('doomed brief'); // the first status answers failed — no sleeps needed
-    assert.equal(chip, null, 'no chip for a workspace whose job failed');
+    const chip = await resolveCanvasCommand('doomed brief');
+    assert.ok(chip, 'F3: the files exist, so the chip (with the real path) still lands — the job is the row\'s');
+    assert.equal(await main.runOpenHandoff(), 'failed', 'the row reads the failed job'); // the first status answers failed — no sleeps needed
     assert.equal(calls.some((call) => call.path === '/open'), false, 'the window never opens on a failed job');
     assert.equal(calls.filter((call) => call.path === '/scaffold').length, 1, 'ONE workspace POST');
     assert.ok(store.has(workspaceStorageKey('ses_broke')!), 'the ws/ record STAYS — a retry re-opens this dir, it never scaffolds a second workspace');
@@ -1525,4 +1579,196 @@ test('a WORKSPACE_MISSING /open deletes the ws/ record, unbinds, and offers a ne
   assert.ok(toasts.some((toast) => /no longer exists/.test(toast.message) && /Start creates a new canvas/.test(toast.message)), 'the toast states the loss and the next action');
   assert.equal(store.has('lastUrl//p/gone'), false, 'a failed open persists nothing');
   setSessionId(null);
+});
+// =====================================================================
+// The /canvas + Start repair (F1–F8): the resolve hands the long half to
+// the status row, the row re-reads what other frames wrote, and every pick
+// chip carries the workspace path the model must edit.
+// =====================================================================
+
+test('F3/F5: the row adopts ws/ + mode/ another frame wrote and claims the open BEFORE /state can read "ON, no window" as a close', async () => {
+  setWorkspace(null);
+  setSessionId('ses_row');
+  stubToast();
+  const store = stubStorage();
+  await applySessionSnapshot({ id: 'ses_row', busy: false });
+  await resetToClosedWindow();
+  assert.equal(getModeState().on, false, 'the row loaded OFF before the hidden pane ran');
+  const calls = stubService((request) => {
+    if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
+    if (request.path === '/open') return { status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/home.html', title: 'Site', settled: true }) };
+    return { status: 404, body: '{}' };
+  });
+  // What the hidden resolve pane leaves behind, in its write order.
+  store.set(workspaceStorageKey('ses_row')!, { dir: '/p/site', name: 'Site' });
+  store.set(main.openHandoffKey('ses_row')!, { dir: '/p/site', jobId: null, at: Date.now() });
+  store.set(modeStorageKey('ses_row')!, { on: true, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: 'landing' });
+
+  await main.syncRowFromStorage();
+  assert.deepEqual(getWorkspaceState(), { dir: '/p/site', name: 'Site' }, 'the row binds the workspace the resolve created — no more "No canvas workspace yet"');
+  assert.equal(getModeState().on, true, 'the row adopts Design Mode ON from storage');
+  assert.equal(getPendingOpen(), true, 'the handoff holds the pending-open guard');
+  await applyState({ url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false });
+  assert.equal(getModeState().on, true, 'a closed-window /state read during the handoff is NOT a user close');
+  await flush();
+  await flush();
+  assert.ok(calls.some((call) => call.path === '/open'), 'the row opens the canvas the resolve asked for');
+  assert.equal(store.has(main.openHandoffKey('ses_row')!), false, 'the handoff is consumed');
+  setWorkspace(null);
+  setSessionId(null);
+});
+
+test('F5: a row holding picks because its in-memory mode is OFF re-reads mode/ and delivers once another frame turned it ON', async () => {
+  setWorkspace(null);
+  stubToast();
+  const store = stubStorage();
+  store.set(modeStorageKey('ses_held')!, { on: false, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' });
+  await applySessionSnapshot({ id: 'ses_held', busy: false });
+  assert.equal(getModeState().on, false);
+  const chips = stubAttach();
+  const queue = stubPickQueue();
+  queue.push(queuedElement(1));
+  resetPickLoop();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let stop = false;
+    const loop = runPickLoop(() => stop);
+    await flush();
+    assert.equal(chips.length, 0, 'held while the mode reads OFF');
+    store.set(modeStorageKey('ses_held')!, { on: true, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' });
+    mock.timers.tick(900); await flush(); await flush();
+    assert.deepEqual(chips.map((chip) => chip.id), ['element-1'], 'the storage re-read releases the hold — the pick lands');
+    assert.deepEqual(queue.acks.map((ack) => ack.seq), [1]);
+    stop = true;
+    mock.timers.tick(12_000);
+    await flush();
+    mock.timers.tick(1_000);
+    await loop;
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('F6/F7: with a workspace bound, a batch carries ONE compact mode chip first, and each pick chip names Workspace: and File:', async () => {
+  setWorkspace(null);
+  stubToast();
+  const store = stubStorage();
+  await seedModeOn('ses_paths', store);
+  const ws = ['C:', 'Docs', 'Design Canvas', 'site'].join('\\');
+  const homeFile = `${ws}\\home.html`;
+  setWorkspace({ dir: ws, name: 'Site' });
+  await applyState(live({ screens: [{ id: 'home', title: 'Home', url: 'http://127.0.0.1:5173/home.html', width: 1280, height: 800, active: true }] }));
+  const chips = stubAttach();
+  const queue = stubPickQueue();
+  queue.push(queuedElement(1));
+  queue.push(queuedElement(2, '#second'));
+  resetPickLoop();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let stop = false;
+    const loop = runPickLoop(() => stop);
+    await flush();
+    assert.deepEqual(chips.map((chip) => chip.id), ['design-mode-ses_paths', 'element-1', 'element-2'], 'F7: at most one mode chip per batch, ahead of the first pick');
+    const mode = chips[0]!.text ?? '';
+    assert.match(mode, /^Design Mode: ON/);
+    const modeLines = mode.split('\n');
+    assert.ok(modeLines.includes(`Workspace: ${ws}`), mode);
+    assert.match(mode, /it is the ONLY place design files are written/, 'the same path rule the full mode chip carries');
+    assert.ok(modeLines.includes(`- home · ${homeFile}`), 'screens are listed with absolute files');
+    for (const chip of chips.slice(1)) {
+      const chipLines = (chip.text ?? '').split('\n');
+      assert.ok(chipLines.includes(`Workspace: ${ws}`), 'F6: the pick names its workspace');
+      assert.ok(chipLines.includes(`File: ${homeFile}`), 'F6: …and the screen file to edit');
+    }
+    assert.deepEqual(queue.acks.map((ack) => ack.seq), [2], 'the mode chip never changes the ack');
+    stop = true;
+    mock.timers.tick(12_000);
+    await flush();
+    mock.timers.tick(1_000);
+    await loop;
+  } finally {
+    mock.timers.reset();
+    setWorkspace(null);
+  }
+});
+
+test('F2: Start in a draft chat (no session) toasts the "send a message first" instruction and creates nothing', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  const toasts = stubToast();
+  stubStorage();
+  await main.clickServerControl();
+  assert.ok(toasts.some((toast) => toast.kind === 'error' && /sending any message first/.test(toast.message)), 'a visible error, not only the screen-reader live region');
+  assert.equal(calls.length, 0, 'nothing is scaffolded');
+});
+
+test('F2: Start shows a busy state across the workspace creation and swallows a double click; a failure toasts', async () => {
+  setWorkspace(null);
+  setSessionId('ses_start');
+  const toasts = stubToast();
+  stubStorage();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const calls = stubService(async (request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (request.path === '/scaffold') {
+      const body = JSON.parse(request.body ?? '{}') as { dir?: string };
+      return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-s', dir: body.dir, url: 'http://localhost:5173/' }) };
+    }
+    if (request.path === '/scaffold/status') {
+      await gate;
+      return { status: 200, body: JSON.stringify({ state: 'failed', elapsedMs: 1000, error: 'npm exited with code 1' }) };
+    }
+    return { status: 404, body: '{}' };
+  });
+  const first = main.clickServerControl();
+  await flush();
+  assert.equal(main.getServerControlState().pending, true, 'the button is busy while the workspace is created');
+  await main.clickServerControl();
+  release();
+  await first;
+  assert.equal(calls.filter((call) => call.path === '/scaffold').length, 1, 'the second click was swallowed');
+  assert.equal(main.getServerControlState().pending, false, 'the busy state clears');
+  assert.ok(toasts.some((toast) => toast.kind === 'error' && /Could not create the canvas workspace/.test(toast.message)), 'the failure is a visible toast');
+  setWorkspace(null);
+  setSessionId(null);
+});
+
+test('F4/F8: the page flow scaffolds with the PAGE selections, and a failed job still ships the real path and binds ws/', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  const store = stubStorage();
+  stubToast();
+  const sessions = stubStartSession();
+  stubListProjects([]);
+  const calls = stubService((request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (request.path === '/scaffold') {
+      const body = JSON.parse(request.body ?? '{}') as { dir?: string };
+      return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-p', dir: body.dir, url: 'http://localhost:5173/' }) };
+    }
+    if (request.path === '/scaffold/status') return { status: 200, body: JSON.stringify({ state: 'failed', elapsedMs: 3000, error: 'npm exited with code 1' }) };
+    return { status: 200, body: JSON.stringify({ ok: true }) };
+  });
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  main.setPrompt('Quarterly review deck');
+  main.setPageChoice({ type: 'deck', direction: 'auto', fidelity: 'wireframe' });
+  try {
+    await startNewDesign();
+    const body = JSON.parse(calls.find((call) => call.path === '/scaffold')!.body ?? '{}') as { dir: string; type: string; fidelity: string };
+    assert.equal(body.type, 'deck', 'F8: the page\'s chosen type, not the row mode');
+    assert.equal(body.fidelity, 'wireframe', 'F8: the page\'s chosen fidelity');
+    assert.deepEqual(calls.find((call) => call.path === '/scaffold/status')?.query, { job: 'job-p', dir: body.dir }, 'F1: the page poll names the dir too');
+    assert.equal(sessions.length, 1, 'the session still starts');
+    assert.ok((sessions[0]!.text ?? '').includes(`Design Canvas workspace: ${body.dir}`), 'F4: the prompt names the folder that exists on disk');
+    assert.doesNotMatch(sessions[0]!.text ?? '', /ask if the path is missing/, 'F4: never the "missing path" fallback next to a real folder');
+    assert.deepEqual((store.get(workspaceStorageKey('s1')!) as { dir?: string } | undefined)?.dir, body.dir, 'F4: ws/ binds the new session to the real folder');
+  } finally {
+    main.setPageChoice({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi' });
+    main.setSurface('panel');
+    main.setPrompt('');
+    setWorkspace(null);
+  }
 });
