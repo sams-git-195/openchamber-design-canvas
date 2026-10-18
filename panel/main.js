@@ -4,95 +4,9 @@
   var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
   var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
 
-  // node_modules/@openchamber/sdk/dist/ui/theme.js
-  var TOKEN_VARS = [
-    ["--oc-bg", "background"],
-    ["--oc-elevated", "elevated"],
-    ["--oc-fg", "foreground"],
-    ["--oc-muted", "muted"],
-    ["--oc-subtle", "subtle"],
-    ["--oc-border", "border"],
-    ["--oc-hover", "hover"],
-    ["--oc-selection", "selection"],
-    ["--oc-focus", "focus"],
-    ["--oc-primary", "primary"],
-    ["--oc-muted-surface", "mutedSurface"],
-    ["--oc-elevated-fg", "elevatedForeground"],
-    ["--oc-active", "active"],
-    ["--oc-selection-fg", "selectionForeground"],
-    ["--oc-primary-fg", "primaryForeground"],
-    ["--oc-primary-text", "primaryText"],
-    ["--oc-success-text", "successText"],
-    ["--oc-warning-text", "warningText"],
-    ["--oc-error-text", "errorText"],
-    ["--oc-info-text", "infoText"],
-    ["--oc-success", "success"],
-    ["--oc-warning", "warning"],
-    ["--oc-error", "error"],
-    ["--oc-info", "info"],
-    ["--oc-font", "font"],
-    ["--oc-mono", "mono"],
-    ["--oc-radius", "radius"],
-    ["--surface-background", "background"],
-    ["--surface-elevated", "elevated"],
-    ["--surface-foreground", "foreground"],
-    ["--surface-muted-foreground", "muted"],
-    ["--surface-subtle", "subtle"],
-    ["--interactive-border", "border"],
-    ["--interactive-hover", "hover"],
-    ["--interactive-selection", "selection"],
-    ["--interactive-focus-ring", "focus"],
-    ["--primary", "primary"],
-    ["--surface-muted", "mutedSurface"],
-    ["--surface-elevated-foreground", "elevatedForeground"],
-    ["--interactive-active", "active"],
-    ["--interactive-selection-foreground", "selectionForeground"],
-    ["--primary-foreground", "primaryForeground"],
-    ["--primary-text", "primaryText"],
-    ["--success-text", "successText"],
-    ["--warning-text", "warningText"],
-    ["--error-text", "errorText"],
-    ["--info-text", "infoText"],
-    ["--status-success", "success"],
-    ["--status-warning", "warning"],
-    ["--status-error", "error"],
-    ["--status-info", "info"],
-    ["--font-sans", "font"],
-    ["--font-mono", "mono"],
-    ["--radius", "radius"]
-  ];
-  var SYNTAX_TOKEN_VARS = [
-    ["--oc-syntax-keyword", "--syntax-keyword", "syntaxKeyword"],
-    ["--oc-syntax-string", "--syntax-string", "syntaxString"],
-    ["--oc-syntax-number", "--syntax-number", "syntaxNumber"],
-    ["--oc-syntax-function", "--syntax-function", "syntaxFunction"],
-    ["--oc-syntax-type", "--syntax-type", "syntaxType"],
-    ["--oc-syntax-comment", "--syntax-comment", "syntaxComment"],
-    ["--oc-syntax-variable", "--syntax-variable", "syntaxVariable"],
-    ["--oc-syntax-operator", "--syntax-operator", "syntaxOperator"]
-  ];
-  var applyHostTheme = (theme, root) => {
-    root.style.colorScheme = theme.mode;
-    for (const [name, key] of TOKEN_VARS) {
-      root.style.setProperty(name, theme.tokens[key]);
-    }
-    for (const [alias, hostName, key] of SYNTAX_TOKEN_VARS) {
-      const value = theme.tokens[key] ?? "";
-      root.style.setProperty(alias, value);
-      root.style.setProperty(hostName, value);
-    }
-    root.style.setProperty("font-family", theme.tokens.font);
-    root.style.setProperty("font-size", "0.875rem");
-    root.style.setProperty("line-height", "1.45");
-    root.style.setProperty("color", theme.tokens.foreground);
-  };
-  var applyHostReady = (ctx, root) => {
-    applyHostTheme(ctx.theme, root);
-    if (root.dataset) {
-      root.dataset.ocSurface = ctx.surface;
-      root.dataset.ocTheme = ctx.theme.mode;
-    }
-  };
+  // node_modules/@openchamber/sdk/dist/api-version.js
+  var OPENCHAMBER_SDK_CHANNEL = "openchamber.sdk";
+  var OPENCHAMBER_SDK_API_VERSION = 1;
 
   // node_modules/@openchamber/sdk/dist/scrollbar-style.js
   var GUEST_SCROLLING_ATTRIBUTE = "data-oc-scrolling";
@@ -152,212 +66,6 @@
     }, { capture: true, passive: true });
   }
   var GUEST_SCROLLBAR_SCRIPT = `(${installGuestScrollbarActivity.toString()})(document);`;
-
-  // node_modules/@openchamber/sdk/dist/ui/style.js
-  var OC_ALIAS = {
-    "surface-background": "bg",
-    "surface-elevated": "elevated",
-    "surface-elevated-foreground": "elevated-fg",
-    "surface-foreground": "fg",
-    "surface-muted-foreground": "muted",
-    "surface-muted": "muted-surface",
-    "surface-subtle": "subtle",
-    "interactive-border": "border",
-    "interactive-hover": "hover",
-    "interactive-active": "active",
-    "interactive-selection": "selection",
-    "interactive-selection-foreground": "selection-fg",
-    "interactive-focus-ring": "focus",
-    "primary": "primary",
-    "primary-foreground": "primary-fg",
-    "primary-text": "primary-text",
-    "success-text": "success-text",
-    "warning-text": "warning-text",
-    "error-text": "error-text",
-    "info-text": "info-text",
-    "status-success": "success",
-    "status-warning": "warning",
-    "status-error": "error",
-    "status-info": "info",
-    "font-sans": "font",
-    "font-mono": "mono",
-    "radius": "radius"
-  };
-  var v = (name, fallback) => `var(--${name}, var(--oc-${OC_ALIAS[name]}, ${fallback}))`;
-  var bg = v("surface-background", "transparent");
-  var elevated = v("surface-elevated", "transparent");
-  var elevatedFg = v("surface-elevated-foreground", "inherit");
-  var fg = v("surface-foreground", "inherit");
-  var muted = v("surface-muted-foreground", "gray");
-  var secondary = v("surface-muted", "transparent");
-  var border = v("interactive-border", "currentColor");
-  var hover = v("interactive-hover", "transparent");
-  var active = v("interactive-active", "transparent");
-  var selection = v("interactive-selection", "transparent");
-  var selectionFg = v("interactive-selection-foreground", "inherit");
-  var focus = v("interactive-focus-ring", "currentColor");
-  var primary = v("primary", "currentColor");
-  var primaryText = v("primary-text", "inherit");
-  var errorText = v("error-text", "inherit");
-  var font = v("font-sans", "inherit");
-  var mono = v("font-mono", "monospace");
-  var radius = v("radius", "9px");
-  var mix = (color, pct, base = "transparent") => `color-mix(in srgb, ${color} ${pct}%, ${base})`;
-  var focusRing = `box-shadow: 0 0 0 2px ${focus};`;
-  var tone = (name) => {
-    const color = v(`status-${name}`, "currentColor");
-    return `
-.oc-sdk[data-tone="${name}"], .oc-sdk [data-tone="${name}"] { --oc-sdk-tone: ${color}; --oc-sdk-tone-text: ${v(`${name}-text`, "inherit")}; }`;
-  };
-  var UI_CSS = `
-${GUEST_SCROLLBAR_CSS}
-.oc-sdk { box-sizing: border-box; color: ${fg}; font-family: ${font}; font-size: 0.875rem; line-height: 1.45; }
-.oc-sdk *, .oc-sdk *::before, .oc-sdk *::after { box-sizing: border-box; }
-/* :where() keeps the reset at zero specificity so every primitive class below overrides it. */
-:where(.oc-sdk) :where(button, input, textarea), :where(button.oc-sdk, input.oc-sdk, textarea.oc-sdk) { font: inherit; color: inherit; margin: 0; }
-:where(.oc-sdk) :where(button), :where(button.oc-sdk) { cursor: pointer; background: none; border: 0; padding: 0; }
-.oc-sdk button:disabled, button.oc-sdk:disabled, .oc-sdk[aria-disabled="true"], .oc-sdk [aria-disabled="true"] { opacity: .5; pointer-events: none; }
-.oc-sdk :focus-visible { outline: none; ${focusRing} }
-.oc-sdk-mono { font-family: ${mono}; }
-.oc-sdk-muted { color: ${muted}; }
-${tone("success")}${tone("warning")}${tone("error")}${tone("info")}
-.oc-sdk[data-tone="primary"], .oc-sdk [data-tone="primary"] { --oc-sdk-tone: ${primary}; --oc-sdk-tone-text: ${primaryText}; }
-
-.oc-sdk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px; border: 1px solid transparent; border-radius: ${radius}; font-size: 0.875rem; font-weight: 500; line-height: 1; white-space: nowrap; transition: background 150ms ease-out, color 150ms ease-out; }
-.oc-sdk-btn[data-size="sm"] { height: 32px; padding: 0 10px; font-size: 0.8125rem; }
-.oc-sdk-btn[data-size="xs"] { height: 24px; padding: 0 8px; font-size: 0.75rem; border-radius: 6px; }
-.oc-sdk-btn[data-variant="default"] { color: ${primaryText}; background: ${mix(primary, 10, bg)}; border-color: ${mix(primary, 12)}; }
-.oc-sdk-btn[data-variant="default"]:hover { background: ${mix(primary, 16, bg)}; }
-.oc-sdk-btn[data-variant="default"]:active { background: ${mix(primary, 22, bg)}; }
-.oc-sdk-btn[data-variant="secondary"] { background: ${secondary}; color: var(--oc-fg); }
-.oc-sdk-btn[data-variant="secondary"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-btn[data-variant="secondary"]:active { background-image: linear-gradient(${active}, ${active}); }
-.oc-sdk-btn[data-variant="outline"] { background: ${elevated}; color: ${elevatedFg}; border-color: ${border}; }
-.oc-sdk-btn[data-variant="outline"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-btn[data-variant="outline"]:active { background-image: linear-gradient(${active}, ${active}); }
-.oc-sdk-btn[data-variant="ghost"] { background: transparent; }
-.oc-sdk-btn[data-variant="ghost"]:hover { background: ${hover}; }
-.oc-sdk-btn[data-variant="ghost"]:active { background: ${active}; }
-.oc-sdk-btn[data-variant="destructive"] { --oc-sdk-tone: ${v("status-error", "red")}; color: ${errorText}; background: ${mix("var(--oc-sdk-tone)", 7, bg)}; border-color: ${mix("var(--oc-sdk-tone)", 12)}; }
-.oc-sdk-btn[data-variant="destructive"]:hover { background: ${mix("var(--oc-sdk-tone)", 9, bg)}; }
-.oc-sdk-btn[data-variant="destructive"]:active { background: ${mix("var(--oc-sdk-tone)", 11, bg)}; }
-.oc-sdk-btn[data-loading="true"] { opacity: .5; pointer-events: none; }
-.oc-sdk-btn > .oc-sdk-spinner-ring { width: 14px; height: 14px; }
-
-.oc-sdk-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.oc-sdk-field-label { font-size: 0.8125rem; font-weight: 500; }
-.oc-sdk-field-note { font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-field[data-invalid="true"] .oc-sdk-field-note { color: ${errorText}; }
-.oc-sdk-input { display: block; width: 100%; min-width: 0; height: 36px; padding: 0 12px; border: 0; border-radius: ${radius}; background: ${elevated}; color: ${elevatedFg}; font-size: 0.875rem; line-height: 1.45; appearance: none; box-shadow: inset 0 0 0 1px ${mix(border, 60)}; transition: background 150ms ease-out, box-shadow 150ms ease-out; }
-textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
-.oc-sdk-input::placeholder { color: ${muted}; }
-.oc-sdk-input:hover:not(:focus) { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-input:focus, .oc-sdk-input:focus-visible { box-shadow: inset 0 0 0 2px ${focus}; }
-.oc-sdk-field[data-invalid="true"] .oc-sdk-input { box-shadow: inset 0 0 0 1px ${v("status-error", "red")}; }
-.oc-sdk-field[data-invalid="true"] .oc-sdk-input:focus { box-shadow: inset 0 0 0 2px ${v("status-error", "red")}; }
-.oc-sdk-input[data-mono="true"] { font-family: ${mono}; }
-
-.oc-sdk-search { position: relative; min-width: 0; }
-.oc-sdk-search .oc-sdk-input { padding-left: 34px; padding-right: 34px; }
-.oc-sdk-search-icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: ${muted}; pointer-events: none; }
-.oc-sdk-search[data-active="true"] .oc-sdk-search-icon { color: ${primary}; }
-.oc-sdk-search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: none; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 6px; color: ${muted}; }
-.oc-sdk-search[data-active="true"] .oc-sdk-search-clear { display: inline-flex; }
-.oc-sdk-search-clear:hover { background: ${hover}; color: ${fg}; }
-
-.oc-sdk-select { position: relative; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.oc-sdk-trigger { display: inline-flex; align-items: center; gap: 6px; width: 100%; min-width: 0; height: 32px; padding: 0 8px 0 10px; border: 1px solid ${border}; border-radius: 6px; background: ${elevated}; color: ${elevatedFg}; font-size: 0.8125rem; text-align: left; transition: background 150ms ease-out; }
-.oc-sdk-trigger:hover { background-image: linear-gradient(${hover}, ${hover}); }
-.oc-sdk-trigger[aria-expanded="true"] { background-image: linear-gradient(${active}, ${active}); }
-.oc-sdk-trigger-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-sdk-trigger-value[data-empty="true"] { color: ${muted}; }
-.oc-sdk-trigger-chevron { flex: 0 0 auto; color: ${muted}; }
-.oc-sdk-popup { --surface-foreground: ${elevatedFg}; position: fixed; z-index: 50; display: flex; flex-direction: column; gap: 2px; min-width: 160px; max-width: calc(100vw - 16px); max-height: min(320px, calc(100vh - 16px)); overflow: auto; padding: 4px; border: 1px solid ${mix(border, 60)}; border-radius: 12px; background: ${elevated}; color: ${elevatedFg}; box-shadow: 0 8px 24px ${mix(fg, 12)}; }
-.oc-sdk-popup-search { flex: 0 0 auto; padding: 2px 2px 4px; }
-.oc-sdk-popup-search .oc-sdk-input { height: 32px; font-size: 0.8125rem; }
-.oc-sdk-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 8px; font-size: 0.8125rem; text-align: left; }
-.oc-sdk-option[data-active="true"] { background: ${hover}; }
-.oc-sdk-option[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
-.oc-sdk-option[data-destructive="true"] { color: ${errorText}; }
-.oc-sdk-option[data-destructive="true"][data-active="true"] { background: ${mix(v("status-error", "red"), 10)}; }
-.oc-sdk-option-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-sdk-option-hint { flex: 0 0 auto; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-option-check { flex: 0 0 auto; width: 12px; }
-.oc-sdk-popup-empty { padding: 8px; font-size: 0.8125rem; color: ${muted}; }
-
-.oc-sdk-check { display: inline-flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; }
-.oc-sdk-check-box { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-top: 3px; border: 1px solid ${border}; border-radius: 4px; color: ${primary}; transition: border-color 150ms ease-out; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box { border-color: ${mix(primary, 65, border)}; }
-.oc-sdk-check-box > svg { display: none; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box > svg { display: block; }
-.oc-sdk-check-thumb { flex: 0 0 auto; position: relative; width: 36px; height: 20px; border-radius: 9999px; background: ${border}; transition: background 150ms ease-out; }
-.oc-sdk-check-thumb::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 9999px; background: ${bg}; transition: transform 150ms ease-out; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb { background: ${primary}; }
-.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb::after { transform: translateX(16px); }
-.oc-sdk-check:focus-visible { box-shadow: none; }
-.oc-sdk-check:focus-visible .oc-sdk-check-box, .oc-sdk-check:focus-visible .oc-sdk-check-thumb { ${focusRing} }
-.oc-sdk-check-text { display: flex; flex-direction: column; min-width: 0; }
-.oc-sdk-check-label { font-size: 0.875rem; }
-.oc-sdk-check-desc { font-size: 0.75rem; color: ${muted}; }
-
-.oc-sdk-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; max-width: 100%; overflow: auto; }
-.oc-sdk-tabs[data-track="true"] { background: ${mix(fg, 4)}; }
-.oc-sdk-tab { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; font-size: 0.8125rem; font-weight: 500; color: ${muted}; white-space: nowrap; transition: color 150ms ease-out, background 150ms ease-out; }
-.oc-sdk-tab:hover { color: ${fg}; }
-.oc-sdk-tab[aria-selected="true"] { color: ${selectionFg}; background: ${selection}; border-color: ${border}; }
-.oc-sdk-tab-count { font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
-
-.oc-sdk-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 9999px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; background: ${hover}; color: ${muted}; }
-.oc-sdk-badge[data-tone] { color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); background: ${mix("var(--oc-sdk-tone)", 15)}; }
-
-.oc-sdk-list { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.oc-sdk-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 6px; text-align: left; transition: background 120ms ease-out; }
-.oc-sdk-row:hover, .oc-sdk-row[data-active="true"] { background: ${hover}; }
-.oc-sdk-row[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
-.oc-sdk-row-lead { flex: 0 0 auto; width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ${mono}; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
-.oc-sdk-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-sdk-row-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-row-meta { flex: 0 0 auto; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
-.oc-sdk-row[aria-selected="true"] .oc-sdk-row-lead, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-sub, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-meta { color: inherit; opacity: .75; }
-.oc-sdk-list-empty { padding: 16px 8px; text-align: center; font-size: 0.8125rem; color: ${muted}; }
-
-.oc-sdk-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 40px 16px; text-align: center; }
-.oc-sdk-empty-title { margin: 0; font-size: 0.8125rem; font-weight: 600; }
-.oc-sdk-empty-body { margin: 0; max-width: 32rem; font-size: 0.8125rem; color: ${muted}; }
-.oc-sdk-empty-action { margin-top: 12px; }
-
-@keyframes oc-sdk-spin { to { transform: rotate(360deg); } }
-.oc-sdk-spinner { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8125rem; color: ${muted}; }
-.oc-sdk-spinner-ring { width: 16px; height: 16px; border: 2px solid ${border}; border-top-color: ${primary}; border-radius: 9999px; animation: oc-sdk-spin .8s linear infinite; }
-.oc-sdk-spinner[data-size="sm"] .oc-sdk-spinner-ring { width: 12px; height: 12px; }
-
-.oc-sdk-banner { display: flex; align-items: flex-start; gap: 12px; padding: 8px 12px; border: 1px solid ${mix("var(--oc-sdk-tone)", 40)}; border-radius: 8px; background: ${mix("var(--oc-sdk-tone)", 10)}; }
-.oc-sdk-banner-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.oc-sdk-banner-title { font-size: 0.8125rem; font-weight: 500; color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); }
-.oc-sdk-banner-body { font-size: 0.8125rem; color: ${muted}; }
-.oc-sdk-banner-action { flex: 0 0 auto; }
-
-.oc-sdk-separator { display: flex; align-items: center; gap: 8px; width: 100%; margin: 8px 0; font-size: 0.75rem; color: ${muted}; }
-.oc-sdk-separator::before, .oc-sdk-separator::after { content: ""; flex: 1 1 auto; height: 1px; background: ${mix(border, 40)}; }
-.oc-sdk-separator[data-labeled="false"]::after { display: none; }
-.oc-sdk-popup > .oc-sdk-separator { margin: 4px 0; }
-
-.oc-sdk-progress { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.oc-sdk-progress-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: ${muted}; font-variant-numeric: tabular-nums; }
-.oc-sdk-progress-track { height: 6px; border-radius: 9999px; background: ${border}; overflow: hidden; }
-.oc-sdk-progress-fill { height: 100%; border-radius: 9999px; background: var(--oc-sdk-tone, ${primary}); transform-origin: left; transition: transform 200ms ease-out; }
-
-.oc-sdk-menu { position: relative; display: inline-flex; }
-
-.oc-sdk-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.oc-sdk-text a { color: ${primaryText}; text-decoration: underline; text-underline-offset: 2px; }
-.oc-sdk-text img { display: block; max-width: 100%; margin: 8px 0; border-radius: 8px; border: 1px solid ${mix(border, 60)}; }
-`;
-
-  // node_modules/@openchamber/sdk/dist/api-version.js
-  var OPENCHAMBER_SDK_CHANNEL = "openchamber.sdk";
-  var OPENCHAMBER_SDK_API_VERSION = 1;
 
   // node_modules/@openchamber/sdk/dist/workspace.js
   var GUEST_STORAGE_KEY_MAX = 128;
@@ -476,6 +184,8 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   var GUEST_FILE_STAT_KINDS = ["file", "directory", "other", "missing"];
   var isStartSessionResult = (value) => Boolean(value && "sessionId" in value);
   var isPromptResult = (value) => Boolean(value && "sent" in value && !("sessionId" in value));
+  var isGuestMessageItem = (item) => item !== null && item.kind === "message";
+  var isGuestSessionItem = (item) => item !== null && item.kind === "session";
   var GUEST_COMMIT_SHA = /^[0-9a-f]{7,64}$/i;
   var isGuestCommitSha = (value) => GUEST_COMMIT_SHA.test(value);
   var GUEST_TOAST_MAX = 500;
@@ -1087,7 +797,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
         throw new HostRequestError("HOST_REJECTED", "Host did not return storage data.");
       return result;
     };
-    const closePopover = (id, reason) => lastReady?.features?.popovers !== true && !(lastReady?.surface === "popover" && lastReady.popover?.id === id) ? Promise.reject(new HostRequestError("UNSUPPORTED", "This host does not support popovers.")) : request({ ...envelope, type: "popover-close", id: nextId(ids), payload: reason ? { id, reason } : { id } });
+    const closePopover = (id, reason2) => lastReady?.features?.popovers !== true && !(lastReady?.surface === "popover" && lastReady.popover?.id === id) ? Promise.reject(new HostRequestError("UNSUPPORTED", "This host does not support popovers.")) : request({ ...envelope, type: "popover-close", id: nextId(ids), payload: reason2 ? { id, reason: reason2 } : { id } });
     const setPopoverAnchorActive = (id, active2) => lastReady?.features?.popovers !== true && !(lastReady?.surface === "popover" && lastReady.popover?.id === id) ? Promise.reject(new HostRequestError("UNSUPPORTED", "This host does not support popovers.")) : request({ ...envelope, type: "popover-anchor", id: nextId(ids), payload: { id, active: active2 } });
     target.addEventListener("keydown", onPopoverEscape, true);
     target.addEventListener("pointerover", onPopoverPointerOver);
@@ -1638,6 +1348,298 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
   var SURFACE_CONTROLLERS = ["none", "agent", "user"];
   var CONTROLLERS = new Set(SURFACE_CONTROLLERS);
 
+  // node_modules/@openchamber/sdk/dist/ui/theme.js
+  var TOKEN_VARS = [
+    ["--oc-bg", "background"],
+    ["--oc-elevated", "elevated"],
+    ["--oc-fg", "foreground"],
+    ["--oc-muted", "muted"],
+    ["--oc-subtle", "subtle"],
+    ["--oc-border", "border"],
+    ["--oc-hover", "hover"],
+    ["--oc-selection", "selection"],
+    ["--oc-focus", "focus"],
+    ["--oc-primary", "primary"],
+    ["--oc-muted-surface", "mutedSurface"],
+    ["--oc-elevated-fg", "elevatedForeground"],
+    ["--oc-active", "active"],
+    ["--oc-selection-fg", "selectionForeground"],
+    ["--oc-primary-fg", "primaryForeground"],
+    ["--oc-primary-text", "primaryText"],
+    ["--oc-success-text", "successText"],
+    ["--oc-warning-text", "warningText"],
+    ["--oc-error-text", "errorText"],
+    ["--oc-info-text", "infoText"],
+    ["--oc-success", "success"],
+    ["--oc-warning", "warning"],
+    ["--oc-error", "error"],
+    ["--oc-info", "info"],
+    ["--oc-font", "font"],
+    ["--oc-mono", "mono"],
+    ["--oc-radius", "radius"],
+    ["--surface-background", "background"],
+    ["--surface-elevated", "elevated"],
+    ["--surface-foreground", "foreground"],
+    ["--surface-muted-foreground", "muted"],
+    ["--surface-subtle", "subtle"],
+    ["--interactive-border", "border"],
+    ["--interactive-hover", "hover"],
+    ["--interactive-selection", "selection"],
+    ["--interactive-focus-ring", "focus"],
+    ["--primary", "primary"],
+    ["--surface-muted", "mutedSurface"],
+    ["--surface-elevated-foreground", "elevatedForeground"],
+    ["--interactive-active", "active"],
+    ["--interactive-selection-foreground", "selectionForeground"],
+    ["--primary-foreground", "primaryForeground"],
+    ["--primary-text", "primaryText"],
+    ["--success-text", "successText"],
+    ["--warning-text", "warningText"],
+    ["--error-text", "errorText"],
+    ["--info-text", "infoText"],
+    ["--status-success", "success"],
+    ["--status-warning", "warning"],
+    ["--status-error", "error"],
+    ["--status-info", "info"],
+    ["--font-sans", "font"],
+    ["--font-mono", "mono"],
+    ["--radius", "radius"]
+  ];
+  var SYNTAX_TOKEN_VARS = [
+    ["--oc-syntax-keyword", "--syntax-keyword", "syntaxKeyword"],
+    ["--oc-syntax-string", "--syntax-string", "syntaxString"],
+    ["--oc-syntax-number", "--syntax-number", "syntaxNumber"],
+    ["--oc-syntax-function", "--syntax-function", "syntaxFunction"],
+    ["--oc-syntax-type", "--syntax-type", "syntaxType"],
+    ["--oc-syntax-comment", "--syntax-comment", "syntaxComment"],
+    ["--oc-syntax-variable", "--syntax-variable", "syntaxVariable"],
+    ["--oc-syntax-operator", "--syntax-operator", "syntaxOperator"]
+  ];
+  var applyHostTheme = (theme, root) => {
+    root.style.colorScheme = theme.mode;
+    for (const [name, key] of TOKEN_VARS) {
+      root.style.setProperty(name, theme.tokens[key]);
+    }
+    for (const [alias, hostName, key] of SYNTAX_TOKEN_VARS) {
+      const value = theme.tokens[key] ?? "";
+      root.style.setProperty(alias, value);
+      root.style.setProperty(hostName, value);
+    }
+    root.style.setProperty("font-family", theme.tokens.font);
+    root.style.setProperty("font-size", "0.875rem");
+    root.style.setProperty("line-height", "1.45");
+    root.style.setProperty("color", theme.tokens.foreground);
+  };
+  var applyHostReady = (ctx, root) => {
+    applyHostTheme(ctx.theme, root);
+    if (root.dataset) {
+      root.dataset.ocSurface = ctx.surface;
+      root.dataset.ocTheme = ctx.theme.mode;
+    }
+  };
+
+  // node_modules/@openchamber/sdk/dist/ui/style.js
+  var OC_ALIAS = {
+    "surface-background": "bg",
+    "surface-elevated": "elevated",
+    "surface-elevated-foreground": "elevated-fg",
+    "surface-foreground": "fg",
+    "surface-muted-foreground": "muted",
+    "surface-muted": "muted-surface",
+    "surface-subtle": "subtle",
+    "interactive-border": "border",
+    "interactive-hover": "hover",
+    "interactive-active": "active",
+    "interactive-selection": "selection",
+    "interactive-selection-foreground": "selection-fg",
+    "interactive-focus-ring": "focus",
+    "primary": "primary",
+    "primary-foreground": "primary-fg",
+    "primary-text": "primary-text",
+    "success-text": "success-text",
+    "warning-text": "warning-text",
+    "error-text": "error-text",
+    "info-text": "info-text",
+    "status-success": "success",
+    "status-warning": "warning",
+    "status-error": "error",
+    "status-info": "info",
+    "font-sans": "font",
+    "font-mono": "mono",
+    "radius": "radius"
+  };
+  var v = (name, fallback) => `var(--${name}, var(--oc-${OC_ALIAS[name]}, ${fallback}))`;
+  var bg = v("surface-background", "transparent");
+  var elevated = v("surface-elevated", "transparent");
+  var elevatedFg = v("surface-elevated-foreground", "inherit");
+  var fg = v("surface-foreground", "inherit");
+  var muted = v("surface-muted-foreground", "gray");
+  var secondary = v("surface-muted", "transparent");
+  var border = v("interactive-border", "currentColor");
+  var hover = v("interactive-hover", "transparent");
+  var active = v("interactive-active", "transparent");
+  var selection = v("interactive-selection", "transparent");
+  var selectionFg = v("interactive-selection-foreground", "inherit");
+  var focus = v("interactive-focus-ring", "currentColor");
+  var primary = v("primary", "currentColor");
+  var primaryText = v("primary-text", "inherit");
+  var errorText = v("error-text", "inherit");
+  var font = v("font-sans", "inherit");
+  var mono = v("font-mono", "monospace");
+  var radius = v("radius", "9px");
+  var mix = (color, pct, base = "transparent") => `color-mix(in srgb, ${color} ${pct}%, ${base})`;
+  var focusRing = `box-shadow: 0 0 0 2px ${focus};`;
+  var tone = (name) => {
+    const color = v(`status-${name}`, "currentColor");
+    return `
+.oc-sdk[data-tone="${name}"], .oc-sdk [data-tone="${name}"] { --oc-sdk-tone: ${color}; --oc-sdk-tone-text: ${v(`${name}-text`, "inherit")}; }`;
+  };
+  var UI_CSS = `
+${GUEST_SCROLLBAR_CSS}
+.oc-sdk { box-sizing: border-box; color: ${fg}; font-family: ${font}; font-size: 0.875rem; line-height: 1.45; }
+.oc-sdk *, .oc-sdk *::before, .oc-sdk *::after { box-sizing: border-box; }
+/* :where() keeps the reset at zero specificity so every primitive class below overrides it. */
+:where(.oc-sdk) :where(button, input, textarea), :where(button.oc-sdk, input.oc-sdk, textarea.oc-sdk) { font: inherit; color: inherit; margin: 0; }
+:where(.oc-sdk) :where(button), :where(button.oc-sdk) { cursor: pointer; background: none; border: 0; padding: 0; }
+.oc-sdk button:disabled, button.oc-sdk:disabled, .oc-sdk[aria-disabled="true"], .oc-sdk [aria-disabled="true"] { opacity: .5; pointer-events: none; }
+.oc-sdk :focus-visible { outline: none; ${focusRing} }
+.oc-sdk-mono { font-family: ${mono}; }
+.oc-sdk-muted { color: ${muted}; }
+${tone("success")}${tone("warning")}${tone("error")}${tone("info")}
+.oc-sdk[data-tone="primary"], .oc-sdk [data-tone="primary"] { --oc-sdk-tone: ${primary}; --oc-sdk-tone-text: ${primaryText}; }
+
+.oc-sdk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px; border: 1px solid transparent; border-radius: ${radius}; font-size: 0.875rem; font-weight: 500; line-height: 1; white-space: nowrap; transition: background 150ms ease-out, color 150ms ease-out; }
+.oc-sdk-btn[data-size="sm"] { height: 32px; padding: 0 10px; font-size: 0.8125rem; }
+.oc-sdk-btn[data-size="xs"] { height: 24px; padding: 0 8px; font-size: 0.75rem; border-radius: 6px; }
+.oc-sdk-btn[data-variant="default"] { color: ${primaryText}; background: ${mix(primary, 10, bg)}; border-color: ${mix(primary, 12)}; }
+.oc-sdk-btn[data-variant="default"]:hover { background: ${mix(primary, 16, bg)}; }
+.oc-sdk-btn[data-variant="default"]:active { background: ${mix(primary, 22, bg)}; }
+.oc-sdk-btn[data-variant="secondary"] { background: ${secondary}; color: var(--oc-fg); }
+.oc-sdk-btn[data-variant="secondary"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-btn[data-variant="secondary"]:active { background-image: linear-gradient(${active}, ${active}); }
+.oc-sdk-btn[data-variant="outline"] { background: ${elevated}; color: ${elevatedFg}; border-color: ${border}; }
+.oc-sdk-btn[data-variant="outline"]:hover { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-btn[data-variant="outline"]:active { background-image: linear-gradient(${active}, ${active}); }
+.oc-sdk-btn[data-variant="ghost"] { background: transparent; }
+.oc-sdk-btn[data-variant="ghost"]:hover { background: ${hover}; }
+.oc-sdk-btn[data-variant="ghost"]:active { background: ${active}; }
+.oc-sdk-btn[data-variant="destructive"] { --oc-sdk-tone: ${v("status-error", "red")}; color: ${errorText}; background: ${mix("var(--oc-sdk-tone)", 7, bg)}; border-color: ${mix("var(--oc-sdk-tone)", 12)}; }
+.oc-sdk-btn[data-variant="destructive"]:hover { background: ${mix("var(--oc-sdk-tone)", 9, bg)}; }
+.oc-sdk-btn[data-variant="destructive"]:active { background: ${mix("var(--oc-sdk-tone)", 11, bg)}; }
+.oc-sdk-btn[data-loading="true"] { opacity: .5; pointer-events: none; }
+.oc-sdk-btn > .oc-sdk-spinner-ring { width: 14px; height: 14px; }
+
+.oc-sdk-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-sdk-field-label { font-size: 0.8125rem; font-weight: 500; }
+.oc-sdk-field-note { font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-field[data-invalid="true"] .oc-sdk-field-note { color: ${errorText}; }
+.oc-sdk-input { display: block; width: 100%; min-width: 0; height: 36px; padding: 0 12px; border: 0; border-radius: ${radius}; background: ${elevated}; color: ${elevatedFg}; font-size: 0.875rem; line-height: 1.45; appearance: none; box-shadow: inset 0 0 0 1px ${mix(border, 60)}; transition: background 150ms ease-out, box-shadow 150ms ease-out; }
+textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
+.oc-sdk-input::placeholder { color: ${muted}; }
+.oc-sdk-input:hover:not(:focus) { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-input:focus, .oc-sdk-input:focus-visible { box-shadow: inset 0 0 0 2px ${focus}; }
+.oc-sdk-field[data-invalid="true"] .oc-sdk-input { box-shadow: inset 0 0 0 1px ${v("status-error", "red")}; }
+.oc-sdk-field[data-invalid="true"] .oc-sdk-input:focus { box-shadow: inset 0 0 0 2px ${v("status-error", "red")}; }
+.oc-sdk-input[data-mono="true"] { font-family: ${mono}; }
+
+.oc-sdk-search { position: relative; min-width: 0; }
+.oc-sdk-search .oc-sdk-input { padding-left: 34px; padding-right: 34px; }
+.oc-sdk-search-icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: ${muted}; pointer-events: none; }
+.oc-sdk-search[data-active="true"] .oc-sdk-search-icon { color: ${primary}; }
+.oc-sdk-search-clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: none; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 6px; color: ${muted}; }
+.oc-sdk-search[data-active="true"] .oc-sdk-search-clear { display: inline-flex; }
+.oc-sdk-search-clear:hover { background: ${hover}; color: ${fg}; }
+
+.oc-sdk-select { position: relative; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-sdk-trigger { display: inline-flex; align-items: center; gap: 6px; width: 100%; min-width: 0; height: 32px; padding: 0 8px 0 10px; border: 1px solid ${border}; border-radius: 6px; background: ${elevated}; color: ${elevatedFg}; font-size: 0.8125rem; text-align: left; transition: background 150ms ease-out; }
+.oc-sdk-trigger:hover { background-image: linear-gradient(${hover}, ${hover}); }
+.oc-sdk-trigger[aria-expanded="true"] { background-image: linear-gradient(${active}, ${active}); }
+.oc-sdk-trigger-value { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-sdk-trigger-value[data-empty="true"] { color: ${muted}; }
+.oc-sdk-trigger-chevron { flex: 0 0 auto; color: ${muted}; }
+.oc-sdk-popup { --surface-foreground: ${elevatedFg}; position: fixed; z-index: 50; display: flex; flex-direction: column; gap: 2px; min-width: 160px; max-width: calc(100vw - 16px); max-height: min(320px, calc(100vh - 16px)); overflow: auto; padding: 4px; border: 1px solid ${mix(border, 60)}; border-radius: 12px; background: ${elevated}; color: ${elevatedFg}; box-shadow: 0 8px 24px ${mix(fg, 12)}; }
+.oc-sdk-popup-search { flex: 0 0 auto; padding: 2px 2px 4px; }
+.oc-sdk-popup-search .oc-sdk-input { height: 32px; font-size: 0.8125rem; }
+.oc-sdk-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 8px; font-size: 0.8125rem; text-align: left; }
+.oc-sdk-option[data-active="true"] { background: ${hover}; }
+.oc-sdk-option[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
+.oc-sdk-option[data-destructive="true"] { color: ${errorText}; }
+.oc-sdk-option[data-destructive="true"][data-active="true"] { background: ${mix(v("status-error", "red"), 10)}; }
+.oc-sdk-option-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-sdk-option-hint { flex: 0 0 auto; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-option-check { flex: 0 0 auto; width: 12px; }
+.oc-sdk-popup-empty { padding: 8px; font-size: 0.8125rem; color: ${muted}; }
+
+.oc-sdk-check { display: inline-flex; align-items: flex-start; gap: 8px; width: 100%; text-align: left; }
+.oc-sdk-check-box { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-top: 3px; border: 1px solid ${border}; border-radius: 4px; color: ${primary}; transition: border-color 150ms ease-out; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box { border-color: ${mix(primary, 65, border)}; }
+.oc-sdk-check-box > svg { display: none; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-box > svg { display: block; }
+.oc-sdk-check-thumb { flex: 0 0 auto; position: relative; width: 36px; height: 20px; border-radius: 9999px; background: ${border}; transition: background 150ms ease-out; }
+.oc-sdk-check-thumb::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 9999px; background: ${bg}; transition: transform 150ms ease-out; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb { background: ${primary}; }
+.oc-sdk-check[aria-checked="true"] .oc-sdk-check-thumb::after { transform: translateX(16px); }
+.oc-sdk-check:focus-visible { box-shadow: none; }
+.oc-sdk-check:focus-visible .oc-sdk-check-box, .oc-sdk-check:focus-visible .oc-sdk-check-thumb { ${focusRing} }
+.oc-sdk-check-text { display: flex; flex-direction: column; min-width: 0; }
+.oc-sdk-check-label { font-size: 0.875rem; }
+.oc-sdk-check-desc { font-size: 0.75rem; color: ${muted}; }
+
+.oc-sdk-tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; max-width: 100%; overflow: auto; }
+.oc-sdk-tabs[data-track="true"] { background: ${mix(fg, 4)}; }
+.oc-sdk-tab { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; font-size: 0.8125rem; font-weight: 500; color: ${muted}; white-space: nowrap; transition: color 150ms ease-out, background 150ms ease-out; }
+.oc-sdk-tab:hover { color: ${fg}; }
+.oc-sdk-tab[aria-selected="true"] { color: ${selectionFg}; background: ${selection}; border-color: ${border}; }
+.oc-sdk-tab-count { font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
+
+.oc-sdk-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 9999px; font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; background: ${hover}; color: ${muted}; }
+.oc-sdk-badge[data-tone] { color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); background: ${mix("var(--oc-sdk-tone)", 15)}; }
+
+.oc-sdk-list { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.oc-sdk-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: 6px; text-align: left; transition: background 120ms ease-out; }
+.oc-sdk-row:hover, .oc-sdk-row[data-active="true"] { background: ${hover}; }
+.oc-sdk-row[aria-selected="true"] { background: ${selection}; color: ${selectionFg}; }
+.oc-sdk-row-lead { flex: 0 0 auto; width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ${mono}; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-row-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.oc-sdk-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-sdk-row-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-row-meta { flex: 0 0 auto; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: ${muted}; }
+.oc-sdk-row[aria-selected="true"] .oc-sdk-row-lead, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-sub, .oc-sdk-row[aria-selected="true"] .oc-sdk-row-meta { color: inherit; opacity: .75; }
+.oc-sdk-list-empty { padding: 16px 8px; text-align: center; font-size: 0.8125rem; color: ${muted}; }
+
+.oc-sdk-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 40px 16px; text-align: center; }
+.oc-sdk-empty-title { margin: 0; font-size: 0.8125rem; font-weight: 600; }
+.oc-sdk-empty-body { margin: 0; max-width: 32rem; font-size: 0.8125rem; color: ${muted}; }
+.oc-sdk-empty-action { margin-top: 12px; }
+
+@keyframes oc-sdk-spin { to { transform: rotate(360deg); } }
+.oc-sdk-spinner { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8125rem; color: ${muted}; }
+.oc-sdk-spinner-ring { width: 16px; height: 16px; border: 2px solid ${border}; border-top-color: ${primary}; border-radius: 9999px; animation: oc-sdk-spin .8s linear infinite; }
+.oc-sdk-spinner[data-size="sm"] .oc-sdk-spinner-ring { width: 12px; height: 12px; }
+
+.oc-sdk-banner { display: flex; align-items: flex-start; gap: 12px; padding: 8px 12px; border: 1px solid ${mix("var(--oc-sdk-tone)", 40)}; border-radius: 8px; background: ${mix("var(--oc-sdk-tone)", 10)}; }
+.oc-sdk-banner-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.oc-sdk-banner-title { font-size: 0.8125rem; font-weight: 500; color: var(--oc-sdk-tone-text, var(--oc-sdk-tone)); }
+.oc-sdk-banner-body { font-size: 0.8125rem; color: ${muted}; }
+.oc-sdk-banner-action { flex: 0 0 auto; }
+
+.oc-sdk-separator { display: flex; align-items: center; gap: 8px; width: 100%; margin: 8px 0; font-size: 0.75rem; color: ${muted}; }
+.oc-sdk-separator::before, .oc-sdk-separator::after { content: ""; flex: 1 1 auto; height: 1px; background: ${mix(border, 40)}; }
+.oc-sdk-separator[data-labeled="false"]::after { display: none; }
+.oc-sdk-popup > .oc-sdk-separator { margin: 4px 0; }
+
+.oc-sdk-progress { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-sdk-progress-label { display: flex; justify-content: space-between; font-size: 0.75rem; color: ${muted}; font-variant-numeric: tabular-nums; }
+.oc-sdk-progress-track { height: 6px; border-radius: 9999px; background: ${border}; overflow: hidden; }
+.oc-sdk-progress-fill { height: 100%; border-radius: 9999px; background: var(--oc-sdk-tone, ${primary}); transform-origin: left; transition: transform 200ms ease-out; }
+
+.oc-sdk-menu { position: relative; display: inline-flex; }
+
+.oc-sdk-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.oc-sdk-text a { color: ${primaryText}; text-decoration: underline; text-underline-offset: 2px; }
+.oc-sdk-text img { display: block; max-width: 100%; margin: 8px 0; border-radius: 8px; border: 1px solid ${mix(border, 60)}; }
+`;
+
   // panel/api.ts
   var host = connectHost();
   var ServiceUnavailable = class extends Error {
@@ -1651,12 +1653,23 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     if (error instanceof Error) return error.message;
     return String(error);
   }
+  var serviceErrorSink = null;
+  function setServiceErrorSink(sink) {
+    serviceErrorSink = sink;
+  }
+  function failService(method, path, message) {
+    try {
+      serviceErrorSink?.(`${method} ${path}`, message);
+    } catch {
+    }
+    throw new ServiceUnavailable(message);
+  }
   async function callService(path, query, method = "GET", body) {
     let result;
     try {
       result = await host.serviceRequest({ method, path, query, body });
     } catch (error) {
-      throw new ServiceUnavailable(describe(error));
+      return failService(method, path, describe(error));
     }
     if (result.status !== 200) {
       let detail = `HTTP ${result.status}`;
@@ -1665,7 +1678,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
         if (parsed.error) detail = parsed.error;
       } catch {
       }
-      throw new ServiceUnavailable(detail);
+      return failService(method, path, detail);
     }
     return JSON.parse(result.body);
   }
@@ -1909,7 +1922,7 @@ textarea.oc-sdk-input { height: auto; padding: 8px 12px; resize: vertical; }
     return { toast: true, key: message };
   }
   function registryErrorToastMessage(registryError) {
-    return `The canvas screens registry is broken \u2014 ${registryError}`;
+    return `Screens registry is broken: ${registryError}. Fix screens.json in the workspace.`;
   }
   var NO_PROJECT_URL_MESSAGE = "No .design-studio.json url for this workspace \u2014 add one, or turn the dev server on first";
   var ATTACH_NEEDS_URL = "References need an http(s) url from .design-studio.json.";
@@ -2264,6 +2277,182 @@ ${CRAFT_RULES[id]}`).join("\n\n");
       ]
     }
   };
+
+  // panel/copy.ts
+  var TOAST_FIT = 480;
+  var TOAST_PATH_MAX = 56;
+  var TOAST_COPY_MAX = 32e3;
+  function shortPath(path, max = TOAST_PATH_MAX) {
+    if (path.length <= max) return path;
+    const head = Math.max(1, Math.floor((max - 1) * 0.4));
+    const tail = Math.max(1, max - 1 - head);
+    return `${path.slice(0, head)}\u2026${path.slice(path.length - tail)}`;
+  }
+  var LONG_PATH = /(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"'`)\]]{40,}/g;
+  var CARRIES_PATH_OR_ID = /(?:[A-Za-z]:[\\/]|\\\\|\/[\w.~-]+\/|\bses_\w+|\bjob[-_]\w+|\bnew-design:|\bworkspace:)/;
+  function shortenPaths(text) {
+    return text.replace(LONG_PATH, (match) => shortPath(match));
+  }
+  function fitToast(text) {
+    const shortened = shortenPaths(text.replace(/\s*\n\s*/g, " \xB7 ").trim());
+    return shortened.length > TOAST_FIT ? `${shortened.slice(0, TOAST_FIT - 1)}\u2026` : shortened;
+  }
+  function toastOf(kind, text, options) {
+    const message = fitToast(text);
+    const toast = { kind, message };
+    const wantCopy = options.copy ?? (kind === "error" && CARRIES_PATH_OR_ID.test(text));
+    if (wantCopy) toast.copy = message === text ? true : { text: text.slice(0, TOAST_COPY_MAX) };
+    if (options.persistent) toast.persistent = true;
+    return toast;
+  }
+  var infoToast = (text) => toastOf("info", text, {});
+  var successToast = (text, options = {}) => toastOf("success", text, options);
+  var errorToast = (text, options = {}) => toastOf("error", text, options);
+  function reason(error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  function sentence(text) {
+    const trimmed = text.trim();
+    return /[.!?…]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+  }
+  function withNext(outcome, next) {
+    return `${sentence(outcome)} ${next}`;
+  }
+  var PERMISSION_HEADS_UP = "The agent edits files outside this chat's folder. Approve its file-edit permission prompts so it can write the design.";
+  var DESIGN_MODE_OFF = "Design Mode is off. Run /canvas to turn it back on.";
+  var DESIGN_STARTED = "Design started. Controls are in Work Status.";
+  var NO_CANVAS_FOR_EXPORT = "No canvas workspace yet. Run /canvas <brief> to create one, then export again.";
+  var NO_CANVAS_FOR_CRITIQUE = "No canvas workspace yet. Run /canvas <brief> to create one, then critique again.";
+  var CANVAS_CREATE_FAILED = "Could not create the canvas workspace. See the message above, then press Start to retry.";
+  var WORKSPACE_REFERENCE_ADDED = "Workspace reference added to the composer.";
+  var FILE_REFERENCE_ADDED = "File reference added to the composer.";
+  var FOLDER_PATH_COPIED = "Folder path copied.";
+  var DROP_PATH_MESSAGE = "Dropped files cannot be attached by name. Paste a file path using + \u2192 File path.";
+  var EXPORT_STILL_RUNNING = "Export is still running. Files land in the workspace exports folder as each screen finishes.";
+  var DIAGNOSTICS_COPIED = "Diagnostics copied. Paste them into your bug report.";
+  var listWorkspacesFailed = (error) => withNext(`Could not list canvas workspaces: ${error}`, "Check that the Design Canvas service is running, then try again.");
+  var scaffoldFailed = (error) => withNext(`Could not create the canvas workspace: ${error}`, "Try again.");
+  var setupStatusUnreadable = (error) => withNext(`Canvas setup status could not be read (${error})`, "The workspace files exist; press Start to try opening it.");
+  var setupStatusUnavailable = (why) => withNext(`Canvas setup status is unavailable${why ? ` (${why})` : ""}`, "The workspace files exist; press Start to try opening it.");
+  var setupFailed = (progressText) => withNext(progressText, "Press Start to retry.");
+  var SETUP_TOO_LONG = "Canvas setup is taking unusually long. The workspace files exist; press Start to try opening it.";
+  var exportFailedToStart = (error) => withNext(`Export failed: ${error}`, "Try /canvas export again.");
+  var exportStatusUnreadable = (error) => withNext(`Could not read the export status: ${error}`, "The export may still be running; check the workspace exports folder.");
+  var exportFailedSummary = (summary) => withNext(summary, "Try /canvas export again.");
+  var critiqueFailed = (error) => withNext(`Critique failed: ${error}`, "Try /canvas critique again.");
+  var startSessionFailed = (error) => withNext(`Could not start the design: ${error}`, "Your draft is unchanged; try again.");
+  var openCanvasFailed = (error) => withNext(`Could not open the canvas: ${error}`, "Try again.");
+  var openedWorkspace = (name) => `Opened ${name}. Its canvas window is live.`;
+  var missingWorkspace = (message) => withNext(message, "Start creates a new canvas.");
+  var attachFailed = (what, error) => withNext(`Could not add the ${what} reference: ${error}`, "Try again.");
+  var openChatFailed = (error) => withNext(`Could not open the canvas chat: ${error}`, "Try again from Your design work.");
+  var startChatFailed = (error) => withNext(`Could not start the canvas chat: ${error}`, "Try again.");
+  var chatNotSent = (sent, failure) => withNext(`Could not start the canvas chat (${sent}${failure ? `: ${failure}` : ""})`, "Try again.");
+  var chatStartedNotOpened = (error) => withNext(`The canvas chat started but could not open: ${error}`, "Open it from Your design work.");
+  var copyFolderFailed = (error) => withNext(`Could not copy the folder path: ${error}`, "Try again.");
+  var focusFailed = (error) => withNext(`Could not raise the canvas window: ${error}`, "Try Open canvas.");
+  var switchModeFailed = (error) => withNext(`Could not switch the canvas mode: ${error}`, "Try again.");
+  var switchScreenFailed = (error) => withNext(`Could not switch screens: ${error}`, "Try again.");
+  var attachPickFailed = (error) => withNext(`Could not attach a canvas pick: ${error}`, "Click the element again.");
+  var stopPreviewFailed = (error) => withNext(`Could not stop the preview: ${error}`, "Try the Stop button again.");
+  var serviceNotReady = (error) => withNext(`Local service not ready: ${error}`, "It starts with the extension; reload if this persists.");
+  var configError = (error) => withNext(`Config error: ${error}`, "Check .design-studio.json in the workspace.");
+  var liveCanvasError = (error) => withNext(`Live canvas error: ${error}`, "Reopen the canvas if it does not recover.");
+  var CANVAS_VERBS = [
+    { verb: "on", does: "Turn Design Mode on for this chat and open the canvas." },
+    { verb: "off", does: "Turn Design Mode off and close the canvas window." },
+    { verb: "play", does: "Switch the canvas to play: click through the screens like a user." },
+    { verb: "edit", does: "Switch the canvas to edit: click any element to select it." },
+    { verb: "wireframe | hi-fi | prototype | deck | custom", does: 'Start with that kind of design, e.g. "/canvas wireframe pricing page".' },
+    { verb: "export", does: "Export every screen to PNG and PDF in the workspace exports folder." },
+    { verb: "critique", does: "Send the agent the quality-gate digest for a review." },
+    { verb: "help", does: "Show this list." }
+  ];
+  var CANVAS_HELP_TAIL = "Type a brief after /canvas to start a design in this chat.";
+  var CANVAS_HELP_TITLE = "Design Canvas \u2014 /canvas commands";
+  function canvasHelpText() {
+    return [
+      "Design Canvas commands",
+      "",
+      ...CANVAS_VERBS.map((entry) => `/canvas ${entry.verb} \u2014 ${entry.does}`),
+      "",
+      CANVAS_HELP_TAIL
+    ].join("\n");
+  }
+  function isHelpVerb(args) {
+    return /^(?:help|\?)$/i.test(args.trim());
+  }
+  var FIRST_RUN_STEPS = [
+    "Describe it",
+    "Answer a few questions (or say go)",
+    "Click any element, then Reference in chat"
+  ];
+  var FIRST_RUN_TEXT = FIRST_RUN_STEPS.map((step, index) => `${index + 1} ${step}`).join(" \xB7 ");
+  var FIRST_RUN_DISMISS = "Dismiss";
+  var DIAGNOSTICS_LABEL = "Diagnostics";
+  var DIAGNOSTICS_COPY = "Copy diagnostics";
+  var DIAGNOSTICS_CLOSE = "Close";
+  var diagnosticsCopyFailed = (error) => withNext(`Could not copy diagnostics: ${error}`, "Select the text and copy it by hand.");
+  var ACTION_OTHER_CHAT = "That message belongs to another chat. Open that chat, then run the action again.";
+  var ACTION_ALREADY_ON = "Design Mode is already on for this chat. Open canvas in the rail raises the window.";
+
+  // panel/diagnostics.ts
+  var DIAG_ERRORS_MAX = 20;
+  var DIAG_MESSAGE_MAX = 300;
+  function isDiagnosticError(value) {
+    if (!value || typeof value !== "object") return false;
+    const entry = value;
+    return typeof entry.at === "string" && typeof entry.source === "string" && typeof entry.message === "string" && (entry.count === void 0 || typeof entry.count === "number" && Number.isFinite(entry.count));
+  }
+  function sanitizeDiagnosticErrors(value) {
+    if (!Array.isArray(value)) return [];
+    return value.filter(isDiagnosticError).slice(0, DIAG_ERRORS_MAX);
+  }
+  function addDiagnosticError(list, source, message, at = /* @__PURE__ */ new Date()) {
+    const text = message.length > DIAG_MESSAGE_MAX ? `${message.slice(0, DIAG_MESSAGE_MAX - 1)}\u2026` : message;
+    const newest = list[0];
+    if (newest && newest.source === source && newest.message === text) {
+      return [{ ...newest, at: at.toISOString(), count: (newest.count ?? 1) + 1 }, ...list.slice(1)].slice(0, DIAG_ERRORS_MAX);
+    }
+    return [{ at: at.toISOString(), source, message: text }, ...list].slice(0, DIAG_ERRORS_MAX);
+  }
+  function mergeDiagnosticErrors(a, b) {
+    const byKey = /* @__PURE__ */ new Map();
+    for (const entry of [...a, ...b]) {
+      const key = `${entry.source}\0${entry.message}`;
+      const kept = byKey.get(key);
+      if (!kept) {
+        byKey.set(key, entry);
+        continue;
+      }
+      const count = Math.max(kept.count ?? 1, entry.count ?? 1);
+      const newest = kept.at >= entry.at ? kept : entry;
+      byKey.set(key, count > 1 ? { ...newest, count } : { ...newest });
+    }
+    return [...byKey.values()].sort((x, y) => x.at < y.at ? 1 : x.at > y.at ? -1 : 0).slice(0, DIAG_ERRORS_MAX);
+  }
+  function formatDevServer(server, workspace) {
+    if (!workspace) return "no workspace bound to this chat";
+    if (!server) return "unknown";
+    if (!server.recorded) return "not started by Design Canvas";
+    return `${server.up ? "up" : "down"}${server.port ? ` on port ${server.port}` : ""}`;
+  }
+  function formatDiagnostics(snapshot) {
+    const lines = [
+      `Design Canvas ${snapshot.version} (apiVersion ${snapshot.apiVersion})`,
+      `Service: ${snapshot.service}`,
+      snapshot.settings ? `Designs folder: ${snapshot.settings.workspaceRoot} (source: ${snapshot.settings.source}; previous folders: ${snapshot.settings.previousRoots})` : "Designs folder: unreadable",
+      `Workspace: ${snapshot.workspace ?? "none"}`,
+      `Dev server: ${formatDevServer(snapshot.devServer, snapshot.workspace)}`,
+      `Recent errors (${snapshot.errors.length}, newest first):`,
+      ...snapshot.errors.length === 0 ? ["  none"] : snapshot.errors.map((entry) => `  ${entry.at} [${entry.source}]${entry.count && entry.count > 1 ? ` \xD7${entry.count}` : ""} ${entry.message}`)
+    ];
+    return lines.join("\n");
+  }
+
+  // panel/version.ts
+  var EXTENSION_VERSION = "0.2.0";
+  var EXTENSION_API_VERSION = 1;
 
   // shared/design-systems.ts
   var DESIGN_SYSTEMS = [
@@ -4324,7 +4513,6 @@ ${TRUNCATED_MARKUP}` };
   var BRIEF_COUNTER_FROM = 2e3;
   var PAGE_PREFS_KEY = "prefs/page";
   var PERMISSION_TOAST_KEY = "ws-permission-notified";
-  var PERMISSION_HEADS_UP = "The agent edits the Design Canvas workspace, which lives outside the chat folder \u2014 approve its file-edit permission prompts so it can write the design files.";
   var state = {
     surface: "panel",
     /** The chat's own directory. The CANVAS session deliberately runs OUTSIDE the workspace (decision 4). */
@@ -4399,7 +4587,9 @@ ${TRUNCATED_MARKUP}` };
     /** "Your design work" shows every row instead of the first WORK_LIST_CAP. */
     workShowAll: false,
     /** The chosen design-system preset id (the Look chip's Presets tab), or null. */
-    pageDesignSystemId: null
+    pageDesignSystemId: null,
+    /** The first-run strip's dismissal (`prefs/first-run`); null until storage answered, so it never flashes. */
+    firstRunDismissed: null
   };
   var REAL_PANE_MIN_PX = 64;
   function isRealPane() {
@@ -4435,7 +4625,7 @@ ${TRUNCATED_MARKUP}` };
   var referenceRequest = 0;
   var referenceLiveEl = null;
   var referenceFocusId = null;
-  var DROP_PATH_MESSAGE = "Paste an accessible file path using + \u2192 File path. Dropped filenames do not include their filesystem path.";
+  var DROP_PATH_MESSAGE2 = DROP_PATH_MESSAGE;
   var wsSessionMap = /* @__PURE__ */ new Map();
   var allProjects = [];
   function announceReference(message) {
@@ -4468,7 +4658,7 @@ ${TRUNCATED_MARKUP}` };
     if (kind === "info") return;
     if (message === lastStatus) return;
     lastStatus = message;
-    void host.toast({ kind: kind === "error" ? "error" : "info", message });
+    void host.toast(kind === "error" ? errorToast(message) : infoToast(message));
   }
   function lastUrlKey(dir) {
     return dir ? `lastUrl/${dir}` : null;
@@ -4537,7 +4727,7 @@ ${TRUNCATED_MARKUP}` };
     } catch {
       return;
     }
-    await host.toast({ kind: "info", message: PERMISSION_HEADS_UP });
+    await host.toast(infoToast(PERMISSION_HEADS_UP));
   }
   function modeScaffoldChoice(type) {
     return {
@@ -4553,9 +4743,10 @@ ${TRUNCATED_MARKUP}` };
     try {
       result = await getWorkspaces();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (notify) await host.toast({ kind: "error", message: `Could not list canvas workspaces: ${message}` });
-      return { ok: false, error: `Could not list canvas workspaces: ${message}` };
+      const message = listWorkspacesFailed(reason(error));
+      await recordDiagnosticError("workspaces", message);
+      if (notify) await host.toast(errorToast(message));
+      return { ok: false, error: message };
     }
     const slug = uniqueCanvasSlug(brief || "canvas", seed, result.workspaces.map((row) => row.dir));
     const dir = joinWorkspaceDir(result.root, slug);
@@ -4577,7 +4768,8 @@ ${TRUNCATED_MARKUP}` };
       scaffold = { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
     if (!scaffold.ok) {
-      if (notify) await host.toast({ kind: "error", message: scaffold.error });
+      await recordDiagnosticError("scaffold", scaffold.error);
+      if (notify) await host.toast(errorToast(scaffoldFailed(scaffold.error)));
       return { ok: false, error: scaffold.error };
     }
     await maybeShowPermissionToast(dir);
@@ -4596,33 +4788,37 @@ ${TRUNCATED_MARKUP}` };
       try {
         job = await getScaffoldStatus(jobId, dir);
       } catch (error) {
-        const message = `Canvas setup failed: the job status could not be read (${error instanceof Error ? error.message : String(error)}).`;
-        await host.toast({ kind: "error", message });
+        const message = setupStatusUnreadable(reason(error));
+        await recordDiagnosticError("scaffold", message);
+        await host.toast(errorToast(message));
         return { error: message };
       }
       if (job?.state !== "installing" && job?.state !== "booting" && job?.state !== "done" && job?.state !== "failed") {
-        const reason = job?.error;
-        const message = `Canvas setup status is unavailable${typeof reason === "string" && reason ? ` (${reason})` : ""} \u2014 the workspace files exist; press Start to try opening it.`;
-        await host.toast({ kind: "error", message });
+        const reason2 = job?.error;
+        const message = setupStatusUnavailable(typeof reason2 === "string" ? reason2 : "");
+        await recordDiagnosticError("scaffold", message);
+        await host.toast(errorToast(message));
         return { error: message };
       }
       if (job.state === "done") {
-        await host.toast({ kind: "success", message: scaffoldProgressText(job) });
+        await host.toast(successToast(scaffoldProgressText(job)));
         return "done";
       }
       if (job.state === "failed") {
-        const message = scaffoldProgressText(job);
-        await host.toast({ kind: "error", message });
+        const message = setupFailed(scaffoldProgressText(job));
+        await recordDiagnosticError("scaffold", message);
+        await host.toast(errorToast(message));
         return { error: message };
       }
       const key = `${job.state}:${Math.floor((job.elapsedMs ?? 0) / SCAFFOLD_TOAST_STEP_MS)}`;
       if (key !== lastKey) {
         lastKey = key;
-        await host.toast({ kind: "info", message: scaffoldProgressText(job) });
+        await host.toast(infoToast(scaffoldProgressText(job)));
       }
       if (Date.now() - start >= maxMs) {
-        const message = "Canvas setup is taking unusually long \u2014 the workspace files exist; press Start to try opening it.";
-        await host.toast({ kind: "error", message });
+        const message = SETUP_TOO_LONG;
+        await recordDiagnosticError("scaffold", message);
+        await host.toast(errorToast(message));
         return { error: message };
       }
       await sleep(pollMs);
@@ -4747,7 +4943,7 @@ ${TRUNCATED_MARKUP}` };
           try {
             await focusLive();
           } catch (error) {
-            setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+            setStatus(focusFailed(reason(error)), "error");
           }
         } else {
           await openCanvasWindow(false);
@@ -4773,8 +4969,18 @@ ${TRUNCATED_MARKUP}` };
       file: screen.url.replace(/[?#].*$/, "").split("/").pop() || `${screen.id}.html`
     }));
   }
+  function canvasHelpChip() {
+    return {
+      providerId: "design-canvas",
+      id: "canvas-help",
+      title: CANVAS_HELP_TITLE,
+      url: attachUrl(void 0),
+      text: canvasHelpText()
+    };
+  }
   async function resolveCanvasCommand(args) {
     if (!state.resolveAllowed) return null;
+    if (isHelpVerb(args)) return canvasHelpChip();
     const [head = "", ...rest] = args.trim().split(/\s+/);
     if (/^export$/i.test(head)) {
       await canvasExportCommand(rest.join(" "));
@@ -4786,7 +4992,7 @@ ${TRUNCATED_MARKUP}` };
     const parsed = parseDesignArgs(args);
     if (!parsed.on) {
       await toggleMode(false);
-      await host.toast({ kind: "info", message: "Design Mode is off." });
+      await host.toast(infoToast(DESIGN_MODE_OFF));
       return null;
     }
     if (!state.sessionId) throw new Error(NO_SESSION_MESSAGE);
@@ -4796,7 +5002,7 @@ ${TRUNCATED_MARKUP}` };
         if (result.ok === false && result.error) setStatus(result.error, "error");
         else state.liveMode = parsed.mode;
       } catch (error) {
-        setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, "error");
+        setStatus(switchModeFailed(reason(error)), "error");
       }
       state.mode.canvMode = parsed.mode;
       await saveMode();
@@ -4903,7 +5109,7 @@ ${TRUNCATED_MARKUP}` };
           try {
             await focusLive();
           } catch (error) {
-            setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+            setStatus(focusFailed(reason(error)), "error");
           }
         } else {
           await openCanvasWindow(false);
@@ -4948,18 +5154,18 @@ ${TRUNCATED_MARKUP}` };
   }
   var EXPORT_POLL_MS = 700;
   var EXPORT_POLL_MAX_MS = 6e4;
-  var EXPORT_STILL_RUNNING_MESSAGE = "Export is still running \u2014 files land in the workspace exports folder as each screen finishes.";
+  var EXPORT_STILL_RUNNING_MESSAGE = EXPORT_STILL_RUNNING;
   var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   async function runCanvasExport(dir, formats, timing = { pollMs: EXPORT_POLL_MS, maxMs: EXPORT_POLL_MAX_MS }) {
     let start;
     try {
       start = await exportJob(dir, formats);
     } catch (error) {
-      await host.toast({ kind: "error", message: `Export failed: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(errorToast(exportFailedToStart(reason(error))));
       return;
     }
     if (!start.ok) {
-      await host.toast({ kind: "error", message: start.error || "Export failed." });
+      await host.toast(errorToast(exportFailedToStart(start.error || "the service gave no reason")));
       return;
     }
     const job = start.jobId;
@@ -4969,22 +5175,19 @@ ${TRUNCATED_MARKUP}` };
       try {
         status = await exportStatus(dir, job);
       } catch (error) {
-        await host.toast({ kind: "error", message: `Could not read the export status: ${error instanceof Error ? error.message : String(error)}` });
+        await host.toast(errorToast(exportStatusUnreadable(reason(error))));
         return;
       }
       if (status.state === "done") {
-        const lines = exportJobSummary(status);
-        const text = lines.join("\n");
-        await host.toast({ kind: "success", message: text.length > 480 ? `${text.slice(0, 480)}\u2026` : text });
+        await host.toast(successToast(exportJobSummary(status).join(" \xB7 "), { copy: true }));
         return;
       }
       if (status.state === "failed") {
-        const text = exportFailureSummary(status);
-        await host.toast({ kind: "error", message: text.length > 480 ? `${text.slice(0, 480)}\u2026` : text });
+        await host.toast(errorToast(exportFailedSummary(exportFailureSummary(status))));
         return;
       }
       if (Date.now() >= deadline) {
-        await host.toast({ kind: "info", message: EXPORT_STILL_RUNNING_MESSAGE });
+        await host.toast(infoToast(EXPORT_STILL_RUNNING_MESSAGE));
         return;
       }
       await sleep(timing.pollMs);
@@ -4993,12 +5196,12 @@ ${TRUNCATED_MARKUP}` };
   async function canvasExportCommand(raw) {
     const parsed = parseCanvasExportArgs(raw);
     if ("error" in parsed) {
-      await host.toast({ kind: "error", message: parsed.error });
+      await host.toast(errorToast(parsed.error));
       return;
     }
     const ws = state.workspace;
     if (!ws || ws.dir.trim() === "") {
-      await host.toast({ kind: "error", message: "No canvas workspace yet \u2014 /canvas <brief> creates one, then export again." });
+      await host.toast(errorToast(NO_CANVAS_FOR_EXPORT));
       return;
     }
     await runCanvasExport(ws.dir, "formats" in parsed ? parsed.formats : void 0);
@@ -5006,18 +5209,18 @@ ${TRUNCATED_MARKUP}` };
   async function canvasCritiqueCommand() {
     const ws = state.workspace;
     if (!ws || ws.dir.trim() === "") {
-      await host.toast({ kind: "error", message: "No canvas workspace yet \u2014 /canvas <brief> creates one, then critique again." });
+      await host.toast(errorToast(NO_CANVAS_FOR_CRITIQUE));
       return null;
     }
     let digest;
     try {
       digest = await critiqueWorkspace(ws.dir);
     } catch (error) {
-      await host.toast({ kind: "error", message: `Critique failed: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(errorToast(critiqueFailed(reason(error))));
       return null;
     }
     if (!digest.ok) {
-      await host.toast({ kind: "error", message: digest.error || "Critique failed." });
+      await host.toast(errorToast(critiqueFailed(digest.error || "the service gave no reason")));
       return null;
     }
     return critiqueReviewChip(state.sessionId, state.config?.url, digest);
@@ -5044,7 +5247,8 @@ ${TRUNCATED_MARKUP}` };
         const failure = "failure" in result ? result.failure : void 0;
         const message = result.sent === "no-model" ? "The design brief was not sent. Choose a model in OpenChamber, then try again. Your draft is unchanged." : `The design brief was not sent (${result.sent}${failure ? `: ${failure}` : ""}). Your draft is unchanged; try again.`;
         state.pageError = message;
-        await host.toast({ kind: "error", message });
+        await recordDiagnosticError("start-session", message);
+        await host.toast(errorToast(message));
         return false;
       }
       if (spec.references !== void 0) {
@@ -5064,7 +5268,7 @@ ${TRUNCATED_MARKUP}` };
       } catch {
       }
       try {
-        await host.toast({ kind: "success", message: "Design session started \u2014 its controls are in Work Status." });
+        await host.toast(successToast(DESIGN_STARTED));
       } catch {
       }
       if (canLoadDesignWork()) void loadDesignHome();
@@ -5077,7 +5281,8 @@ ${TRUNCATED_MARKUP}` };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       state.pageError = message;
-      await host.toast({ kind: "error", message: `Could not start session: ${message}` });
+      await recordDiagnosticError("start-session", message);
+      await host.toast(errorToast(startSessionFailed(message)));
       return false;
     } finally {
       state.pageBusy = false;
@@ -5106,7 +5311,8 @@ ${TRUNCATED_MARKUP}` };
       projectDir: spec.projectDir
     }, { notify: false });
     if (!outcome.ok) {
-      await host.toast({ kind: "error", message: outcome.error });
+      await recordDiagnosticError("scaffold", outcome.error);
+      await host.toast(errorToast(scaffoldFailed(outcome.error)));
       return { kind: "failed", error: outcome.error };
     }
     const job = await runScaffoldJob(outcome.jobId, outcome.record.dir);
@@ -5157,7 +5363,7 @@ ${TRUNCATED_MARKUP}` };
       if (tooLong) {
         state.pageError = tooLong;
         rerender();
-        await host.toast({ kind: "error", message: state.pageError });
+        await host.toast(errorToast(state.pageError));
         return;
       }
       const prep = await scaffoldCurrentProject(spec);
@@ -5191,8 +5397,9 @@ ${TRUNCATED_MARKUP}` };
         references
       });
     } catch (error) {
-      state.pageError = `Could not start session: ${error instanceof Error ? error.message : String(error)}`;
-      await host.toast({ kind: "error", message: state.pageError });
+      state.pageError = `Could not start session: ${reason(error)}`;
+      await recordDiagnosticError("start-session", state.pageError);
+      await host.toast(errorToast(startSessionFailed(reason(error))));
     } finally {
       state.pageBusy = false;
       rerender();
@@ -5203,7 +5410,7 @@ ${TRUNCATED_MARKUP}` };
       await host.attach(buildAttachPayload(entry, pickContext(entry)));
       return true;
     } catch (error) {
-      setStatus(`Could not attach a canvas pick: ${error instanceof Error ? error.message : String(error)}`, "error");
+      setStatus(attachPickFailed(reason(error)), "error");
       return false;
     }
   }
@@ -5347,7 +5554,7 @@ ${TRUNCATED_MARKUP}` };
       }
       const url = state.config?.url?.trim() ?? await loadLastUrl(ws.dir) ?? void 0;
       if (!url) {
-        if (notify) await host.toast({ kind: "error", message: NO_PROJECT_URL_MESSAGE });
+        if (notify) await host.toast(errorToast(NO_PROJECT_URL_MESSAGE));
         return;
       }
       openStatus(OPENING_STATUS);
@@ -5360,7 +5567,7 @@ ${TRUNCATED_MARKUP}` };
       if (result.ok && result.started) markServerStartedByUs(ws.dir);
       openStatus(formatOpenStatus(result), result.ok ? "info" : "error");
     } catch (error) {
-      openStatus(`Could not open the canvas: ${error instanceof Error ? error.message : String(error)}`, "error");
+      openStatus(openCanvasFailed(reason(error)), "error");
     } finally {
       state.pendingOpen = false;
     }
@@ -5381,25 +5588,22 @@ ${TRUNCATED_MARKUP}` };
     }
     renderRow();
     rerender();
-    await host.toast({
-      kind: "error",
-      message: `${message ?? `The canvas folder ${dir} no longer exists.`} Start creates a new canvas.`
-    });
+    await host.toast(errorToast(missingWorkspace(message ?? `The canvas folder ${dir} no longer exists.`), { persistent: true }));
   }
   async function previewWorkspace(row) {
     if (!row.url?.trim()) {
-      await host.toast({ kind: "error", message: NO_PROJECT_URL_MESSAGE });
+      await host.toast(errorToast(NO_PROJECT_URL_MESSAGE));
       return;
     }
     try {
       const result = await openWorkspace({ dir: row.dir, focus: true });
       if (!result.ok) {
-        await host.toast({ kind: "error", message: result.error ?? "Could not open the canvas" });
+        await host.toast(errorToast(openCanvasFailed(result.error ?? "the service gave no reason")));
         return;
       }
-      await host.toast({ kind: "success", message: `Opened ${row.name} \u2014 its canvas window is live.` });
+      await host.toast(successToast(openedWorkspace(row.name)));
     } catch (error) {
-      await host.toast({ kind: "error", message: `Could not open the canvas: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(errorToast(openCanvasFailed(reason(error))));
     }
   }
   var directoryGeneration = 0;
@@ -5478,7 +5682,7 @@ ${TRUNCATED_MARKUP}` };
         return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        setStatus(`Could not stop the preview: ${message}`, "error");
+        setStatus(stopPreviewFailed(message), "error");
         return { stopped: false, held: false, blocked: false, error: message };
       }
     }
@@ -5526,6 +5730,7 @@ ${TRUNCATED_MARKUP}` };
     const wasBusy = state.sessionBusy;
     state.sessionId = session?.id ?? null;
     state.sessionBusy = session?.busy ?? false;
+    if (session?.busy) turnsStarted.add(session.id);
     if (wasBusy !== state.sessionBusy && !isHiddenResolvePane()) await reportAgentStatus(state.sessionBusy);
     if (state.sessionBusy) {
       if (state.pendingStop) {
@@ -5546,6 +5751,8 @@ ${TRUNCATED_MARKUP}` };
     if (state.surface === "panel") renderRail();
   }
   async function handleSessionLifecycle(event) {
+    const lifecycleId = event.sessionId ?? state.sessionId;
+    if (event.phase === "started" && lifecycleId) turnsStarted.add(lifecycleId);
     if (event.phase === "completed") {
       if (!isHiddenResolvePane()) void syncRegistryBackstop();
       if (state.pendingStop && !state.sessionBusy) {
@@ -5553,7 +5760,237 @@ ${TRUNCATED_MARKUP}` };
         const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
         reportHonouredStop(result, request.dir);
       }
+      const sawTurn = lifecycleId ? turnsStarted.delete(lifecycleId) : false;
+      if (badgeTracking && sawTurn) await bumpRailBadge(lifecycleId);
     }
+  }
+  var BADGE_KEY = "badge/count";
+  var BADGE_MAX = 999;
+  var BADGE_DEDUPE_MS = 2e3;
+  var turnsStarted = /* @__PURE__ */ new Set();
+  var badgeTracking = false;
+  function readBadgeRecord(value) {
+    if (!value || typeof value !== "object") return { count: 0, at: 0, sessionId: null };
+    const record = value;
+    return {
+      count: typeof record.count === "number" && Number.isFinite(record.count) && record.count > 0 ? Math.min(Math.floor(record.count), BADGE_MAX) : 0,
+      at: typeof record.at === "number" && Number.isFinite(record.at) ? record.at : 0,
+      sessionId: typeof record.sessionId === "string" ? record.sessionId : null
+    };
+  }
+  async function loadBadgeRecord() {
+    try {
+      return readBadgeRecord(await host.storage.get(BADGE_KEY));
+    } catch {
+      return { count: 0, at: 0, sessionId: null };
+    }
+  }
+  async function sessionCarriesDesignMarker(sessionId) {
+    if (sessionId === state.sessionId && state.mode.on) return true;
+    const key = designMarkerKey(sessionId);
+    if (!key) return false;
+    try {
+      return isDesignMarker(await host.storage.get(key));
+    } catch {
+      return false;
+    }
+  }
+  function railIsBeingViewed() {
+    return state.surface === "panel" && isRealPane() && document.visibilityState === "visible";
+  }
+  async function bumpRailBadge(sessionId) {
+    if (!sessionId || railIsBeingViewed()) return;
+    if (!await sessionCarriesDesignMarker(sessionId)) return;
+    const previous = await loadBadgeRecord();
+    const now = Date.now();
+    if (previous.sessionId === sessionId && now - previous.at < BADGE_DEDUPE_MS) return;
+    const next = { count: Math.min(previous.count + 1, BADGE_MAX), at: now, sessionId };
+    try {
+      await host.storage.set(BADGE_KEY, next);
+    } catch {
+    }
+    try {
+      await host.setBadge(next.count);
+    } catch {
+    }
+  }
+  async function resetRailBadge() {
+    try {
+      await host.setBadge(null);
+    } catch {
+    }
+    const stored = await loadBadgeRecord();
+    if (stored.count === 0) return;
+    try {
+      await host.storage.set(BADGE_KEY, { count: 0, at: Date.now(), sessionId: null });
+    } catch {
+    }
+  }
+  var DIAG_ERRORS_KEY = "diag/errors";
+  var DIAG_PERSIST_MS = 1e3;
+  var diagnosticErrors = [];
+  var diagnosticsLoaded = false;
+  var diagnosticsTimer = null;
+  function recordDiagnosticError(source, message) {
+    diagnosticErrors = addDiagnosticError(diagnosticErrors, source, message);
+    if (diagnosticsLoaded && !diagnosticsTimer) {
+      diagnosticsTimer = setTimeout(() => void flushDiagnostics(), DIAG_PERSIST_MS);
+      diagnosticsTimer.unref?.();
+    }
+    return Promise.resolve();
+  }
+  async function flushDiagnostics() {
+    if (diagnosticsTimer) {
+      clearTimeout(diagnosticsTimer);
+      diagnosticsTimer = null;
+    }
+    if (!diagnosticsLoaded) return;
+    try {
+      const stored = sanitizeDiagnosticErrors(await host.storage.get(DIAG_ERRORS_KEY));
+      diagnosticErrors = mergeDiagnosticErrors(diagnosticErrors, stored);
+      await host.storage.set(DIAG_ERRORS_KEY, diagnosticErrors);
+    } catch {
+    }
+  }
+  async function loadDiagnostics() {
+    if (isHiddenResolvePane()) return;
+    try {
+      diagnosticErrors = mergeDiagnosticErrors(diagnosticErrors, sanitizeDiagnosticErrors(await host.storage.get(DIAG_ERRORS_KEY)));
+    } catch {
+    }
+    diagnosticsLoaded = true;
+  }
+  var diagnosticsView = null;
+  async function collectDiagnostics() {
+    let service;
+    try {
+      service = (await host.serviceStatus()).status;
+    } catch (error) {
+      service = `unreadable (${reason(error)})`;
+    }
+    let settings = null;
+    try {
+      const read = await getSettings();
+      if (isDesignsSettings(read)) settings = { workspaceRoot: read.workspaceRoot, source: read.source, previousRoots: read.previousRoots.length };
+    } catch {
+    }
+    const workspace = state.workspace?.dir ?? null;
+    let devServer = null;
+    if (workspace) {
+      try {
+        const rows = await getWorkspaces();
+        devServer = rows.workspaces.find((row) => sameDirPath(row.dir, workspace))?.server ?? null;
+      } catch {
+      }
+    }
+    if (diagnosticsLoaded) await flushDiagnostics();
+    return { version: EXTENSION_VERSION, apiVersion: EXTENSION_API_VERSION, service, settings, workspace, devServer, errors: [...diagnosticErrors] };
+  }
+  async function diagnosticsReport() {
+    return formatDiagnostics(await collectDiagnostics());
+  }
+  async function copyDiagnostics(text) {
+    try {
+      await host.writeClipboard(text);
+      await host.toast(successToast(DIAGNOSTICS_COPIED));
+    } catch (error) {
+      await host.toast(errorToast(diagnosticsCopyFailed(reason(error))));
+    }
+  }
+  function paintDiagnostics(container) {
+    container.dataset.diagState = diagnosticsView ? "open" : "closed";
+    if (!diagnosticsView) {
+      const open = q("button", "ds-link ds-diag-open", DIAGNOSTICS_LABEL);
+      open.type = "button";
+      open.setAttribute("aria-haspopup", "dialog");
+      open.setAttribute("aria-expanded", "false");
+      open.addEventListener("click", () => void openDiagnostics(container));
+      container.replaceChildren(open);
+      return;
+    }
+    const pop = q("div", "ds-diag-pop");
+    pop.setAttribute("role", "dialog");
+    pop.setAttribute("aria-label", DIAGNOSTICS_LABEL);
+    const text = diagnosticsView.text;
+    const body = q("pre", "ds-diag-text", text);
+    const actions = q("div", "ds-diag-actions");
+    const copyBtn = q("button", "primary ds-diag-copy", DIAGNOSTICS_COPY);
+    copyBtn.type = "button";
+    copyBtn.addEventListener("click", () => void copyDiagnostics(text));
+    const close = q("button", "ds-diag-close", DIAGNOSTICS_CLOSE);
+    close.type = "button";
+    const closePop = () => {
+      diagnosticsView = null;
+      paintDiagnostics(container);
+      container.querySelector(".ds-diag-open")?.focus();
+    };
+    close.addEventListener("click", closePop);
+    pop.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closePop();
+    });
+    actions.append(copyBtn, close);
+    pop.append(body, actions);
+    container.replaceChildren(pop);
+    queueMicrotask(() => copyBtn.focus());
+  }
+  async function openDiagnostics(container) {
+    container.replaceChildren(q("div", "ds-diag-note", "Reading diagnostics\u2026"));
+    diagnosticsView = { text: formatDiagnostics(await collectDiagnostics()) };
+    paintDiagnostics(container);
+  }
+  function renderDiagnosticsRow(container) {
+    container.classList.add("ds-diag");
+    if (isHiddenResolvePane() || state.surface === "panel" && !isRealPane()) {
+      container.replaceChildren();
+      container.hidden = true;
+      delete container.dataset.diagState;
+      return;
+    }
+    container.hidden = false;
+    const want = diagnosticsView ? "open" : "closed";
+    if (container.dataset.diagState === want) return;
+    paintDiagnostics(container);
+  }
+  async function runItemAction(item) {
+    if (isHiddenResolvePane()) return;
+    if (!state.sessionId) state.sessionId = item.sessionId;
+    if (item.sessionId !== state.sessionId) {
+      await host.toast(infoToast(ACTION_OTHER_CHAT));
+      return;
+    }
+    await loadWorkspace();
+    await syncModeFromStorage();
+    if (item.action === "turn-on-design-mode") {
+      if (state.mode.on && state.workspace) {
+        await host.toast(infoToast(ACTION_ALREADY_ON));
+        return;
+      }
+      await onRailPrimaryClick({ turnOn: true });
+      return;
+    }
+    await onRailPrimaryClick();
+  }
+  var pendingActionItem = null;
+  var lastActionKey = "";
+  var lastActionAt = 0;
+  function onHostItem(item) {
+    const candidate = item;
+    if (!isGuestMessageItem(candidate) && !isGuestSessionItem(candidate)) return;
+    const action = candidate;
+    const key = `${action.action}:${action.sessionId}:${action.kind === "message" ? action.messageId : ""}`;
+    const now = Date.now();
+    if (key === lastActionKey && now - lastActionAt < 1500) return;
+    lastActionKey = key;
+    lastActionAt = now;
+    if (state.surface === "panel" && !isRealPane()) {
+      pendingActionItem = action;
+      return;
+    }
+    if (state.surface !== "panel") return;
+    void runItemAction(action);
   }
   var serverAnnouncements = [];
   function announceServer(message) {
@@ -5666,7 +6103,7 @@ ${TRUNCATED_MARKUP}` };
     if (!state.workspace) {
       if (!state.sessionId) {
         announceServer(NO_SESSION_MESSAGE);
-        await host.toast({ kind: "error", message: NO_SESSION_MESSAGE });
+        await host.toast(errorToast(NO_SESSION_MESSAGE));
         return;
       }
       state.serverPending = true;
@@ -5675,7 +6112,7 @@ ${TRUNCATED_MARKUP}` };
         const ws = await ensureCanvasWorkspace("");
         if (!ws) {
           announceServer("Could not create the canvas workspace.");
-          await host.toast({ kind: "error", message: "Could not create the canvas workspace \u2014 see the message above, then press Start to retry." });
+          await host.toast(errorToast(CANVAS_CREATE_FAILED));
           return;
         }
         await toggleMode(true);
@@ -5778,7 +6215,7 @@ ${TRUNCATED_MARKUP}` };
       renderRow();
     } catch (error) {
       if (reportErrors) {
-        setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Config error: ${error instanceof Error ? error.message : String(error)}`, "error");
+        setStatus(error instanceof ServiceUnavailable ? serviceNotReady(error.message) : configError(reason(error)), "error");
       }
     } finally {
       configReadInFlight = false;
@@ -5969,7 +6406,8 @@ ${TRUNCATED_MARKUP}` };
       shell.classList.add("ds-enter");
       pageEnter = false;
     }
-    shell.append(renderHeader(), renderComposer(), renderContextRow(), renderStarters(), renderCanvasSection(), renderFooter());
+    const firstRun = renderFirstRun();
+    shell.append(renderHeader(), ...firstRun ? [firstRun] : [], renderComposer(), renderContextRow(), renderStarters(), renderCanvasSection(), renderFooter());
     pageBody.append(shell);
     updateComposerState();
     poppingOverlay = null;
@@ -5985,6 +6423,39 @@ ${TRUNCATED_MARKUP}` };
     if (!id) return;
     refocusOverlayTrigger = null;
     pageBody?.querySelector(`[data-overlay-trigger="${id}"]`)?.focus();
+  }
+  var FIRST_RUN_KEY = "prefs/first-run";
+  async function loadFirstRun() {
+    if (state.surface !== "page") return;
+    let dismissed = false;
+    try {
+      const stored = await host.storage.get(FIRST_RUN_KEY);
+      dismissed = Boolean(stored && typeof stored === "object" && stored.dismissed === true);
+    } catch {
+      dismissed = false;
+    }
+    state.firstRunDismissed = dismissed;
+    rerender();
+  }
+  async function dismissFirstRun() {
+    state.firstRunDismissed = true;
+    rerender();
+    try {
+      await host.storage.set(FIRST_RUN_KEY, { dismissed: true, at: (/* @__PURE__ */ new Date()).toISOString() });
+    } catch {
+    }
+  }
+  function renderFirstRun() {
+    if (state.firstRunDismissed !== false) return null;
+    const strip = q("div", "ds-first-run");
+    strip.setAttribute("role", "note");
+    strip.append(q("span", "ds-first-run-text", FIRST_RUN_TEXT));
+    const dismiss = q("button", "ds-link ds-first-run-dismiss", FIRST_RUN_DISMISS);
+    dismiss.type = "button";
+    dismiss.setAttribute("aria-label", "Dismiss the getting-started steps");
+    dismiss.addEventListener("click", () => void dismissFirstRun());
+    strip.append(dismiss);
+    return strip;
   }
   function renderHeader() {
     const header = q("header", "ds-header");
@@ -6296,15 +6767,15 @@ Source: ${reference.sourceDirectory}`;
     }
     const url = projectHttpUrl(project.config);
     if (!url) {
-      await host.toast({ kind: "error", message: ATTACH_NEEDS_URL });
+      await host.toast(errorToast(ATTACH_NEEDS_URL));
       return;
     }
     try {
       const chip = projectReferenceChip({ projectId: project.projectId, dir: project.dir, name: project.name, url });
       await host.attach(chip);
-      await host.toast({ kind: "success", message: "Workspace reference added to the composer." });
+      await host.toast(successToast(WORKSPACE_REFERENCE_ADDED));
     } catch (error) {
-      await host.toast({ kind: "error", message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(errorToast(attachFailed("workspace", reason(error))));
     }
   }
   function annotateReferenceFeedback() {
@@ -6361,15 +6832,15 @@ Source: ${reference.sourceDirectory}`;
     }
     const url = projectHttpUrl(project.config);
     if (!url) {
-      await host.toast({ kind: "error", message: ATTACH_NEEDS_URL });
+      await host.toast(errorToast(ATTACH_NEEDS_URL));
       return;
     }
     try {
       const chip = fileReferenceChip({ path, url });
       await host.attach(chip);
-      await host.toast({ kind: "success", message: "File reference added to the composer." });
+      await host.toast(successToast(FILE_REFERENCE_ADDED));
     } catch (error) {
-      await host.toast({ kind: "error", message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(errorToast(attachFailed("file", reason(error))));
     }
   }
   function dragHasFiles(event) {
@@ -6402,8 +6873,8 @@ Source: ${reference.sourceDirectory}`;
   async function attachDroppedFiles(event) {
     const files = Array.from(event.dataTransfer?.files ?? []);
     if (files.length === 0) return;
-    announceReference(DROP_PATH_MESSAGE);
-    await host.toast({ kind: "info", message: DROP_PATH_MESSAGE });
+    announceReference(DROP_PATH_MESSAGE2);
+    await host.toast(infoToast(DROP_PATH_MESSAGE2));
   }
   function stagePageReference(reference) {
     const duplicate = state.references.some((existing) => existing.kind === reference.kind && existing.path === reference.path);
@@ -6830,6 +7301,9 @@ Source: ${reference.sourceDirectory}`;
     hints.append(kbd("Shift"), document.createTextNode("+"), kbd("Enter"), document.createTextNode(" new line \xB7 "));
     hints.append(kbd("/canvas"), document.createTextNode(" in any chat opens the canvas there"));
     footer.append(hints);
+    const diagnostics = q("div", "ds-footer-diag");
+    renderDiagnosticsRow(diagnostics);
+    footer.append(diagnostics);
     return footer;
   }
   var WORKSPACE_ROW_ICON = '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/>';
@@ -6937,7 +7411,7 @@ Source: ${reference.sourceDirectory}`;
       try {
         await host.openSession(row.sessionId);
       } catch (error) {
-        await host.toast({ kind: "error", message: `Could not open the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
+        await host.toast(errorToast(openChatFailed(reason(error))));
       }
       return;
     }
@@ -6955,12 +7429,14 @@ Source: ${reference.sourceDirectory}`;
         data: seedSessionData("hi-fi", "", record)
       });
     } catch (error) {
-      await host.toast({ kind: "error", message: `Could not start the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
+      await recordDiagnosticError("start-session", reason(error));
+      await host.toast(errorToast(startChatFailed(reason(error))));
       return;
     }
     if (!result.sessionId || result.sent !== "sent") {
       const failure = "failure" in result ? result.failure : void 0;
-      await host.toast({ kind: "error", message: `The canvas chat could not be started (${result.sent}${failure ? `: ${failure}` : ""}).` });
+      await recordDiagnosticError("start-session", `not sent (${result.sent}${failure ? `: ${failure}` : ""})`);
+      await host.toast(errorToast(chatNotSent(result.sent, failure)));
       return;
     }
     try {
@@ -6970,7 +7446,7 @@ Source: ${reference.sourceDirectory}`;
     try {
       await host.openSession(result.sessionId);
     } catch (error) {
-      await host.toast({ kind: "error", message: `The canvas chat could not open. Open it from Your design work. ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(errorToast(chatStartedNotOpened(reason(error))));
     }
   }
   var STOP_CONFIRM_MS = 4e3;
@@ -7275,9 +7751,9 @@ Source: ${reference.sourceDirectory}`;
   async function copyRowPath(row) {
     try {
       await copyPath(row.dir);
-      await host.toast({ kind: "success", message: "Folder path copied." });
+      await host.toast(successToast(FOLDER_PATH_COPIED));
     } catch (error) {
-      await host.toast({ kind: "error", message: `Could not copy the folder path: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(errorToast(copyFolderFailed(reason(error))));
     }
   }
   var designsSettings = null;
@@ -7483,7 +7959,7 @@ Source: ${reference.sourceDirectory}`;
         await saveMode();
       }
     } catch (error) {
-      setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, "error");
+      setStatus(switchModeFailed(reason(error)), "error");
     }
     renderCanvasControls();
   }
@@ -7495,7 +7971,7 @@ Source: ${reference.sourceDirectory}`;
       await openWorkspace({ dir: ws.dir, screen: id, focus: false });
       state.activeScreen = id;
     } catch (error) {
-      setStatus(`Could not switch screens: ${error instanceof Error ? error.message : String(error)}`, "error");
+      setStatus(switchScreenFailed(reason(error)), "error");
     }
     renderCanvasControls();
   }
@@ -7522,7 +7998,7 @@ Source: ${reference.sourceDirectory}`;
     const registry = shouldToastRegistryError(state.registryErrorNotified, stateData.registryError ?? null);
     state.registryErrorNotified = registry.key;
     if (registry.toast) {
-      await host.toast({ kind: "error", message: registryErrorToastMessage(stateData.registryError) });
+      await host.toast(errorToast(registryErrorToastMessage(stateData.registryError)));
     }
     renderWindowStatus();
     if (!state.windowOpen && state.mode.on && !state.pendingOpen) {
@@ -7550,7 +8026,7 @@ Source: ${reference.sourceDirectory}`;
     try {
       await applyState(await getState());
     } catch (error) {
-      setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Live canvas error: ${error instanceof Error ? error.message : String(error)}`, "error");
+      setStatus(error instanceof ServiceUnavailable ? serviceNotReady(error.message) : liveCanvasError(reason(error)), "error");
     }
     void refreshServerStatus();
   }
@@ -7655,6 +8131,8 @@ Source: ${reference.sourceDirectory}`;
     window.addEventListener("drop", onPageWindowDrop);
     renderPage();
     void loadPagePrefs();
+    void loadFirstRun();
+    void loadDiagnostics();
     void loadDesignHome();
   }
   function onPageWindowDragOver(event) {
@@ -7684,6 +8162,7 @@ Source: ${reference.sourceDirectory}`;
   var RAIL_POLL_MS = 2e3;
   var RAIL_CLAIM_DELAY_MS = 4e3;
   var railClaimDelayMs = RAIL_CLAIM_DELAY_MS;
+  var railDiagEl = null;
   var RAIL_FOOTER_HINT = "Full home: Design Canvas in the sidebar.";
   var railStatusEl = null;
   var railPrimaryBtn = null;
@@ -7729,7 +8208,9 @@ Source: ${reference.sourceDirectory}`;
     railLocationEl = q("div", "ds-rail-location");
     railLocationEl.hidden = true;
     const footer = q("div", "ds-rail-footer", RAIL_FOOTER_HINT);
-    wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, railLocationEl, footer);
+    railDiagEl = q("div", "ds-rail-diag");
+    railDiagEl.hidden = true;
+    wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, railLocationEl, footer, railDiagEl);
     root.append(wrap);
     window.addEventListener("resize", onRailWake);
     window.addEventListener("focus", onRailWake);
@@ -7792,22 +8273,23 @@ Source: ${reference.sourceDirectory}`;
     renderRailControls();
     renderRailWork();
     renderRailLocation();
+    if (railDiagEl) renderDiagnosticsRow(railDiagEl);
   }
-  async function onRailPrimaryClick() {
+  async function onRailPrimaryClick(options = {}) {
     if (railBusy || state.serverPending || !isRealPane()) return;
     if (!state.sessionId) {
-      await host.toast({ kind: "error", message: NO_SESSION_MESSAGE });
+      await host.toast(errorToast(NO_SESSION_MESSAGE));
       return;
     }
     railBusy = true;
     renderRailControls();
     try {
       if (state.workspace) {
-        if (state.windowOpen) {
+        if (state.windowOpen && !options.turnOn) {
           try {
             await focusLive();
           } catch (error) {
-            setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+            setStatus(focusFailed(reason(error)), "error");
           }
           return;
         }
@@ -7816,7 +8298,7 @@ Source: ${reference.sourceDirectory}`;
       }
       const prepared = await prepareCanvasWorkspace("", state.sessionId, modeScaffoldChoice());
       if ("error" in prepared) {
-        if (prepared.noSession) await host.toast({ kind: "error", message: NO_SESSION_MESSAGE });
+        if (prepared.noSession) await host.toast(errorToast(NO_SESSION_MESSAGE));
         return;
       }
       await handRailOpenToRow(prepared);
@@ -7854,6 +8336,7 @@ Source: ${reference.sourceDirectory}`;
       state.windowOpen = (await getState()).windowOpen === true;
     } catch {
     }
+    if ((await loadBadgeRecord()).count > 0) await resetRailBadge();
     renderRailControls();
   }
   async function loadRailWork() {
@@ -7865,9 +8348,17 @@ Source: ${reference.sourceDirectory}`;
   function startRailLive() {
     if (railLive || state.surface !== "panel" || !isRealPane()) return;
     railLive = true;
+    badgeTracking = true;
+    void resetRailBadge();
+    void loadDiagnostics().then(() => {
+      if (railDiagEl) renderDiagnosticsRow(railDiagEl);
+    });
     void refreshRail();
     void loadRailWork();
     setInterval(() => void refreshRail(), RAIL_POLL_MS);
+    const waiting = pendingActionItem;
+    pendingActionItem = null;
+    if (waiting) void runItemAction(waiting);
   }
   function onRailWake() {
     if (!isRealPane()) return;
@@ -7887,6 +8378,8 @@ Source: ${reference.sourceDirectory}`;
     void loadStudioConfig();
     const kind = surfaceKind(state.surface);
     if (kind === "row") {
+      badgeTracking = true;
+      void loadDiagnostics();
       void poll();
       setInterval(() => void poll(), POLL_MS);
       startPickLoop();
@@ -7898,6 +8391,8 @@ Source: ${reference.sourceDirectory}`;
     const root = document.getElementById("root");
     if (!root) throw new Error("missing #root");
     host.onResolve((request) => resolveCanvasCommand(request.args));
+    host.onItem(onHostItem);
+    setServiceErrorSink((source, message) => void recordDiagnosticError(source, message));
     let started = false;
     host.onReady((context) => {
       applyHostReady(context, document.documentElement);
@@ -8030,6 +8525,25 @@ Source: ${reference.sourceDirectory}`;
     designsSettings = null;
     designsSettingsLoad = "idle";
     locationEditorOpen = false;
+  }
+  function getFirstRunDismissed() {
+    return state.firstRunDismissed;
+  }
+  function resetFirstRun() {
+    state.firstRunDismissed = null;
+  }
+  function getDiagnosticErrors() {
+    return [...diagnosticErrors];
+  }
+  function resetDiagnostics() {
+    diagnosticErrors = [];
+    diagnosticsLoaded = false;
+    diagnosticsView = null;
+    if (diagnosticsTimer) clearTimeout(diagnosticsTimer);
+    diagnosticsTimer = null;
+  }
+  function setBadgeTracking(on) {
+    badgeTracking = on;
   }
   function setRailClaimDelay(ms) {
     railClaimDelayMs = ms ?? RAIL_CLAIM_DELAY_MS;

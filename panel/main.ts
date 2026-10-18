@@ -24,7 +24,8 @@
 // (Start creates the workspace on first use). The canvas itself is a real
 // headful Chrome window the local service opens on the workspace dir; this page
 // only opens it, raises it and reads its state. English-only copy by requirement.
-import type { HostReadyContext } from '@openchamber/sdk';
+import { isGuestMessageItem, isGuestSessionItem } from '@openchamber/sdk';
+import type { GuestMessageItem, GuestSessionItem, HostReadyContext } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 
 import {
@@ -81,6 +82,7 @@ import {
   scaffoldProgressText,
   scaffoldProject,
   setMode,
+  setServiceErrorSink,
   shouldStopDevServer,
   shouldToastRegistryError,
   startDevServer,
@@ -108,6 +110,16 @@ import {
   type WorkspaceWorkRow,
 } from './api.ts';
 import { DIRECTIONS, type DirectionId } from './craft.ts';
+import * as copy from './copy.ts';
+import {
+  addDiagnosticError,
+  formatDiagnostics,
+  mergeDiagnosticErrors,
+  sanitizeDiagnosticErrors,
+  type DiagnosticError,
+  type DiagnosticsSnapshot,
+} from './diagnostics.ts';
+import { EXTENSION_API_VERSION, EXTENSION_VERSION } from './version.ts';
 import {
   BRIEF_MAX,
   DEFAULT_MODE,
@@ -219,8 +231,6 @@ export type PagePrefs = {
 
 /** The one-time heads-up about out-of-folder edit permissions (decision 4b). */
 const PERMISSION_TOAST_KEY = 'ws-permission-notified';
-const PERMISSION_HEADS_UP =
-  'The agent edits the Design Canvas workspace, which lives outside the chat folder — approve its file-edit permission prompts so it can write the design files.';
 
 const state = {
   surface: 'panel',
@@ -297,6 +307,8 @@ const state = {
   workShowAll: false,
   /** The chosen design-system preset id (the Look chip's Presets tab), or null. */
   pageDesignSystemId: null as string | null,
+  /** The first-run strip's dismissal (`prefs/first-run`); null until storage answered, so it never flashes. */
+  firstRunDismissed: null as boolean | null,
 };
 
 /**
@@ -368,7 +380,7 @@ let referenceSlow = false;
 let referenceRequest = 0;
 let referenceLiveEl: HTMLElement | null = null;
 let referenceFocusId: string | null = null;
-const DROP_PATH_MESSAGE = 'Paste an accessible file path using + → File path. Dropped filenames do not include their filesystem path.';
+const DROP_PATH_MESSAGE = copy.DROP_PATH_MESSAGE;
 
 /** The cached ws/ scan: normalized workspace dir → session id (audit #19). */
 let wsSessionMap = new Map<string, string>();
@@ -414,7 +426,7 @@ function setStatus(message: string, kind: 'info' | 'error' | 'warn' = 'info'): v
   if (kind === 'info') return;
   if (message === lastStatus) return;
   lastStatus = message;
-  void host.toast({ kind: kind === 'error' ? 'error' : 'info', message });
+  void host.toast(kind === 'error' ? copy.errorToast(message) : copy.infoToast(message));
 }
 
 // ---- last-known URL (per workspace dir) ----
@@ -507,7 +519,7 @@ async function maybeShowPermissionToast(dir: string): Promise<void> {
   } catch {
     return;
   }
-  await host.toast({ kind: 'info', message: PERMISSION_HEADS_UP });
+  await host.toast(copy.infoToast(copy.PERMISSION_HEADS_UP));
 }
 
 /** The outcome of the async scaffold POST for a NEW canvas workspace. */
@@ -566,9 +578,10 @@ async function scaffoldCanvasWorkspace(
   try {
     result = await getWorkspaces();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (notify) await host.toast({ kind: 'error', message: `Could not list canvas workspaces: ${message}` });
-    return { ok: false, error: `Could not list canvas workspaces: ${message}` };
+    const message = copy.listWorkspacesFailed(copy.reason(error));
+    await recordDiagnosticError('workspaces', message);
+    if (notify) await host.toast(copy.errorToast(message));
+    return { ok: false, error: message };
   }
   const slug = uniqueCanvasSlug(brief || 'canvas', seed, result.workspaces.map((row) => row.dir));
   const dir = joinWorkspaceDir(result.root, slug);
@@ -590,7 +603,8 @@ async function scaffoldCanvasWorkspace(
     scaffold = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   if (!scaffold.ok) {
-    if (notify) await host.toast({ kind: 'error', message: scaffold.error });
+    await recordDiagnosticError('scaffold', scaffold.error);
+    if (notify) await host.toast(copy.errorToast(copy.scaffoldFailed(scaffold.error)));
     return { ok: false, error: scaffold.error };
   }
   await maybeShowPermissionToast(dir);
@@ -631,8 +645,9 @@ export async function runScaffoldJob(
     try {
       job = await getScaffoldStatus(jobId, dir);
     } catch (error) {
-      const message = `Canvas setup failed: the job status could not be read (${error instanceof Error ? error.message : String(error)}).`;
-      await host.toast({ kind: 'error', message });
+      const message = copy.setupStatusUnreadable(copy.reason(error));
+      await recordDiagnosticError('scaffold', message);
+      await host.toast(copy.errorToast(message));
       return { error: message };
     }
     // An unknown job (the service restarted, or the single slot moved on)
@@ -641,27 +656,30 @@ export async function runScaffoldJob(
     // exist, so Start retries the open.
     if (job?.state !== 'installing' && job?.state !== 'booting' && job?.state !== 'done' && job?.state !== 'failed') {
       const reason = (job as { error?: unknown } | null)?.error;
-      const message = `Canvas setup status is unavailable${typeof reason === 'string' && reason ? ` (${reason})` : ''} — the workspace files exist; press Start to try opening it.`;
-      await host.toast({ kind: 'error', message });
+      const message = copy.setupStatusUnavailable(typeof reason === 'string' ? reason : '');
+      await recordDiagnosticError('scaffold', message);
+      await host.toast(copy.errorToast(message));
       return { error: message };
     }
     if (job.state === 'done') {
-      await host.toast({ kind: 'success', message: scaffoldProgressText(job) });
+      await host.toast(copy.successToast(scaffoldProgressText(job)));
       return 'done';
     }
     if (job.state === 'failed') {
-      const message = scaffoldProgressText(job);
-      await host.toast({ kind: 'error', message });
+      const message = copy.setupFailed(scaffoldProgressText(job));
+      await recordDiagnosticError('scaffold', message);
+      await host.toast(copy.errorToast(message));
       return { error: message };
     }
     const key = `${job.state}:${Math.floor((job.elapsedMs ?? 0) / SCAFFOLD_TOAST_STEP_MS)}`;
     if (key !== lastKey) {
       lastKey = key;
-      await host.toast({ kind: 'info', message: scaffoldProgressText(job) });
+      await host.toast(copy.infoToast(scaffoldProgressText(job)));
     }
     if (Date.now() - start >= maxMs) {
-      const message = 'Canvas setup is taking unusually long — the workspace files exist; press Start to try opening it.';
-      await host.toast({ kind: 'error', message });
+      const message = copy.SETUP_TOO_LONG;
+      await recordDiagnosticError('scaffold', message);
+      await host.toast(copy.errorToast(message));
       return { error: message };
     }
     await sleep(pollMs);
@@ -865,7 +883,7 @@ export async function toggleMode(next: boolean, type?: DesignType | null, brief?
         try {
           await focusLive();
         } catch (error) {
-          setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+          setStatus(copy.focusFailed(copy.reason(error)), 'error');
         }
       } else {
         await openCanvasWindow(false);
@@ -898,6 +916,17 @@ function currentScreens(): Array<{ id: string; file: string; title: string }> {
   }));
 }
 
+/** `/canvas help`: the verbs as one chip. Needs no session and no workspace. */
+function canvasHelpChip(): ReturnType<typeof buildModeChip> {
+  return {
+    providerId: 'design-canvas',
+    id: 'canvas-help',
+    title: copy.CANVAS_HELP_TITLE,
+    url: attachUrl(undefined),
+    text: copy.canvasHelpText(),
+  };
+}
+
 /** The `/canvas` resolver. Registered on panel and page surfaces only. */
 async function resolveCanvasCommand(args: string): Promise<null | Awaited<ReturnType<typeof buildModeChip>>> {
   if (!state.resolveAllowed) return null;
@@ -906,6 +935,7 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
   // — the canvas workspace is created when the chat does not have one yet.
   // `export` and `critique` are reserved verbs (SPEC-V3-P2-SCOPE.md D7-B/C):
   // they never fall through to the brief branch.
+  if (copy.isHelpVerb(args)) return canvasHelpChip();
   const [head = '', ...rest] = args.trim().split(/\s+/);
   if (/^export$/i.test(head!)) {
     await canvasExportCommand(rest.join(' '));
@@ -917,7 +947,7 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
   const parsed = parseDesignArgs(args);
   if (!parsed.on) {
     await toggleMode(false);
-    await host.toast({ kind: 'info', message: 'Design Mode is off.' });
+    await host.toast(copy.infoToast(copy.DESIGN_MODE_OFF));
     return null;
   }
   // F2: every ON path keys a workspace and a mode to the session. A new-chat
@@ -932,7 +962,7 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
       if (result.ok === false && result.error) setStatus(result.error, 'error');
       else state.liveMode = parsed.mode;
     } catch (error) {
-      setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      setStatus(copy.switchModeFailed(copy.reason(error)), 'error');
     }
     state.mode.canvMode = parsed.mode;
     await saveMode();
@@ -1114,7 +1144,7 @@ async function beginOpenHandoff(timing: { pollMs?: number; maxMs?: number } = {}
         try {
           await focusLive();
         } catch (error) {
-          setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+          setStatus(copy.focusFailed(copy.reason(error)), 'error');
         }
       } else {
         await openCanvasWindow(false);
@@ -1181,7 +1211,7 @@ export async function syncRowFromStorage(): Promise<void> {
 const EXPORT_POLL_MS = 700;
 const EXPORT_POLL_MAX_MS = 60_000;
 
-const EXPORT_STILL_RUNNING_MESSAGE = 'Export is still running — files land in the workspace exports folder as each screen finishes.';
+const EXPORT_STILL_RUNNING_MESSAGE = copy.EXPORT_STILL_RUNNING;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -1202,11 +1232,11 @@ export async function runCanvasExport(
   try {
     start = await exportJob(dir, formats);
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Export failed: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.exportFailedToStart(copy.reason(error))));
     return;
   }
   if (!start.ok) {
-    await host.toast({ kind: 'error', message: start.error || 'Export failed.' });
+    await host.toast(copy.errorToast(copy.exportFailedToStart(start.error || 'the service gave no reason')));
     return;
   }
   const job = start.jobId;
@@ -1216,24 +1246,21 @@ export async function runCanvasExport(
     try {
       status = await exportStatus(dir, job);
     } catch (error) {
-      await host.toast({ kind: 'error', message: `Could not read the export status: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(copy.errorToast(copy.exportStatusUnreadable(copy.reason(error))));
       return;
     }
     if (status.state === 'done') {
-      const lines = exportJobSummary(status);
-      const text = lines.join('\n');
-      // GUEST_TOAST_MAX (500) bounds every toast; truncate honestly rather
-      // than let the host silently cut a path mid-character.
-      await host.toast({ kind: 'success', message: text.length > 480 ? `${text.slice(0, 480)}…` : text });
+      // The summary names file paths: Copy carries them whole, the toast
+      // shortens them and stays under GUEST_TOAST_MAX.
+      await host.toast(copy.successToast(exportJobSummary(status).join(' · '), { copy: true }));
       return;
     }
     if (status.state === 'failed') {
-      const text = exportFailureSummary(status);
-      await host.toast({ kind: 'error', message: text.length > 480 ? `${text.slice(0, 480)}…` : text });
+      await host.toast(copy.errorToast(copy.exportFailedSummary(exportFailureSummary(status))));
       return;
     }
     if (Date.now() >= deadline) {
-      await host.toast({ kind: 'info', message: EXPORT_STILL_RUNNING_MESSAGE });
+      await host.toast(copy.infoToast(EXPORT_STILL_RUNNING_MESSAGE));
       return;
     }
     await sleep(timing.pollMs);
@@ -1244,12 +1271,12 @@ export async function runCanvasExport(
 export async function canvasExportCommand(raw: string): Promise<void> {
   const parsed = parseCanvasExportArgs(raw);
   if ('error' in parsed) {
-    await host.toast({ kind: 'error', message: parsed.error });
+    await host.toast(copy.errorToast(parsed.error));
     return;
   }
   const ws = state.workspace;
   if (!ws || ws.dir.trim() === '') {
-    await host.toast({ kind: 'error', message: 'No canvas workspace yet — /canvas <brief> creates one, then export again.' });
+    await host.toast(copy.errorToast(copy.NO_CANVAS_FOR_EXPORT));
     return;
   }
   await runCanvasExport(ws.dir, 'formats' in parsed ? parsed.formats : undefined);
@@ -1264,18 +1291,18 @@ export async function canvasExportCommand(raw: string): Promise<void> {
 export async function canvasCritiqueCommand(): Promise<null | Awaited<ReturnType<typeof buildModeChip>>> {
   const ws = state.workspace;
   if (!ws || ws.dir.trim() === '') {
-    await host.toast({ kind: 'error', message: 'No canvas workspace yet — /canvas <brief> creates one, then critique again.' });
+    await host.toast(copy.errorToast(copy.NO_CANVAS_FOR_CRITIQUE));
     return null;
   }
   let digest: Awaited<ReturnType<typeof critiqueWorkspace>>;
   try {
     digest = await critiqueWorkspace(ws.dir);
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Critique failed: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.critiqueFailed(copy.reason(error))));
     return null;
   }
   if (!digest.ok) {
-    await host.toast({ kind: 'error', message: digest.error || 'Critique failed.' });
+    await host.toast(copy.errorToast(copy.critiqueFailed(digest.error || 'the service gave no reason')));
     return null;
   }
   return critiqueReviewChip(state.sessionId, state.config?.url, digest);
@@ -1332,7 +1359,8 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
         ? 'The design brief was not sent. Choose a model in OpenChamber, then try again. Your draft is unchanged.'
         : `The design brief was not sent (${result.sent}${failure ? `: ${failure}` : ''}). Your draft is unchanged; try again.`;
       state.pageError = message;
-      await host.toast({ kind: 'error', message });
+      await recordDiagnosticError('start-session', message);
+      await host.toast(copy.errorToast(message));
       return false;
     }
     // Delivery consumes this draft before ancillary work can fail.
@@ -1363,7 +1391,7 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
       /* the session's own data chip still marks it; the widget shows defaults */
     }
     try {
-      await host.toast({ kind: 'success', message: 'Design session started — its controls are in Work Status.' });
+      await host.toast(copy.successToast(copy.DESIGN_STARTED));
     } catch {
       /* Notification transport is not session-delivery failure. */
     }
@@ -1377,7 +1405,8 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     state.pageError = message;
-    await host.toast({ kind: 'error', message: `Could not start session: ${message}` });
+    await recordDiagnosticError('start-session', message);
+    await host.toast(copy.errorToast(copy.startSessionFailed(message)));
     return false;
   } finally {
     state.pageBusy = false;
@@ -1432,7 +1461,8 @@ async function scaffoldCurrentProject(spec: DesignBriefSpec): Promise<CanvasPrep
     projectDir: spec.projectDir,
   }, { notify: false });
   if (!outcome.ok) {
-    await host.toast({ kind: 'error', message: outcome.error });
+    await recordDiagnosticError('scaffold', outcome.error);
+    await host.toast(copy.errorToast(copy.scaffoldFailed(outcome.error)));
     return { kind: 'failed', error: outcome.error };
   }
   // The session starts once the workspace is REAL (installed and booted), not
@@ -1508,7 +1538,7 @@ async function startNewDesign(): Promise<void> {
     if (tooLong) {
       state.pageError = tooLong;
       rerender();
-      await host.toast({ kind: 'error', message: state.pageError });
+      await host.toast(copy.errorToast(state.pageError));
       return;
     }
     const prep = await scaffoldCurrentProject(spec);
@@ -1546,8 +1576,9 @@ async function startNewDesign(): Promise<void> {
       references,
     });
   } catch (error) {
-    state.pageError = `Could not start session: ${error instanceof Error ? error.message : String(error)}`;
-    await host.toast({ kind: 'error', message: state.pageError });
+    state.pageError = `Could not start session: ${copy.reason(error)}`;
+    await recordDiagnosticError('start-session', state.pageError);
+    await host.toast(copy.errorToast(copy.startSessionFailed(copy.reason(error))));
   } finally {
     state.pageBusy = false;
     rerender();
@@ -1569,7 +1600,7 @@ async function addToChat(entry: QueuedPick): Promise<boolean> {
     await host.attach(buildAttachPayload(entry, pickContext(entry)));
     return true;
   } catch (error) {
-    setStatus(`Could not attach a canvas pick: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    setStatus(copy.attachPickFailed(copy.reason(error)), 'error');
     return false;
   }
 }
@@ -1843,7 +1874,7 @@ async function openCanvasWindow(notify: boolean): Promise<void> {
     }
     const url = state.config?.url?.trim() ?? (await loadLastUrl(ws.dir)) ?? undefined;
     if (!url) {
-      if (notify) await host.toast({ kind: 'error', message: NO_PROJECT_URL_MESSAGE });
+      if (notify) await host.toast(copy.errorToast(NO_PROJECT_URL_MESSAGE));
       return;
     }
     openStatus(OPENING_STATUS);
@@ -1863,7 +1894,7 @@ async function openCanvasWindow(notify: boolean): Promise<void> {
     if (result.ok && result.started) markServerStartedByUs(ws.dir);
     openStatus(formatOpenStatus(result), result.ok ? 'info' : 'error');
   } catch (error) {
-    openStatus(`Could not open the canvas: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    openStatus(copy.openCanvasFailed(copy.reason(error)), 'error');
   } finally {
     state.pendingOpen = false;
   }
@@ -1893,10 +1924,8 @@ async function handleMissingWorkspace(dir: string, message?: string): Promise<vo
   }
   renderRow();
   rerender();
-  await host.toast({
-    kind: 'error',
-    message: `${message ?? `The canvas folder ${dir} no longer exists.`} Start creates a new canvas.`,
-  });
+  // Blocking: the canvas cannot open until the user creates a new one.
+  await host.toast(copy.errorToast(copy.missingWorkspace(message ?? `The canvas folder ${dir} no longer exists.`), { persistent: true }));
 }
 
 /**
@@ -1906,18 +1935,18 @@ async function handleMissingWorkspace(dir: string, message?: string): Promise<vo
  */
 async function previewWorkspace(row: WorkspaceRow): Promise<void> {
   if (!row.url?.trim()) {
-    await host.toast({ kind: 'error', message: NO_PROJECT_URL_MESSAGE });
+    await host.toast(copy.errorToast(NO_PROJECT_URL_MESSAGE));
     return;
   }
   try {
     const result = await openWorkspace({ dir: row.dir, focus: true });
     if (!result.ok) {
-      await host.toast({ kind: 'error', message: result.error ?? 'Could not open the canvas' });
+      await host.toast(copy.errorToast(copy.openCanvasFailed(result.error ?? 'the service gave no reason')));
       return;
     }
-    await host.toast({ kind: 'success', message: `Opened ${row.name} — its canvas window is live.` });
+    await host.toast(copy.successToast(copy.openedWorkspace(row.name)));
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not open the canvas: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.openCanvasFailed(copy.reason(error))));
   }
 }
 
@@ -2040,7 +2069,7 @@ export async function requestDevServerStop(
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setStatus(`Could not stop the preview: ${message}`, 'error');
+      setStatus(copy.stopPreviewFailed(message), 'error');
       return { stopped: false, held: false, blocked: false, error: message };
     }
   }
@@ -2121,6 +2150,7 @@ export async function applySessionSnapshot(session: { id: string; busy: boolean 
   const wasBusy = state.sessionBusy;
   state.sessionId = session?.id ?? null;
   state.sessionBusy = session?.busy ?? false;
+  if (session?.busy) turnsStarted.add(session.id);
   // The hidden resolve pane mirrors nothing to the canvas: the row owns it.
   if (wasBusy !== state.sessionBusy && !isHiddenResolvePane()) await reportAgentStatus(state.sessionBusy);
   if (state.sessionBusy) {
@@ -2151,7 +2181,9 @@ export async function applySessionSnapshot(session: { id: string; busy: boolean 
  * is honoured, if the session is now idle — and the moment the registry
  * backstop runs, because the agent's writes are all on disk (V4-4/V4-12).
  */
-export async function handleSessionLifecycle(event: { phase: 'started' | 'completed' | 'failure' }): Promise<void> {
+export async function handleSessionLifecycle(event: { sessionId?: string; phase: 'started' | 'completed' | 'failure' }): Promise<void> {
+  const lifecycleId = event.sessionId ?? state.sessionId;
+  if (event.phase === 'started' && lifecycleId) turnsStarted.add(lifecycleId);
   if (event.phase === 'completed') {
     if (!isHiddenResolvePane()) void syncRegistryBackstop();
     if (state.pendingStop && !state.sessionBusy) {
@@ -2159,7 +2191,316 @@ export async function handleSessionLifecycle(event: { phase: 'started' | 'comple
       const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
       reportHonouredStop(result, request.dir);
     }
+    // The host replays a synthetic `completed` for an idle chat on every ready: only a turn WE saw start counts.
+    const sawTurn = lifecycleId ? turnsStarted.delete(lifecycleId) : false;
+    if (badgeTracking && sawTurn) await bumpRailBadge(lifecycleId);
   }
+}
+
+// ---- P5: the rail badge ----
+//
+// A design chat finishing a turn while the rail is closed puts a count on the
+// rail icon. The count lives in storage (`badge/count`), so every frame of this
+// extension agrees; the host clears the icon itself when the panel opens
+// (`setBadge` docs: "Opening the panel clears it too"), and a real rail pane
+// zeroes the stored count on mount so the two never drift apart.
+
+const BADGE_KEY = 'badge/count';
+/** The SDK's `GUEST_BADGE_MAX`. */
+const BADGE_MAX = 999;
+/** Two frames hearing the same turn count it once: a repeat within this window is dropped. */
+const BADGE_DEDUPE_MS = 2000;
+
+type BadgeRecord = { count: number; at: number; sessionId: string | null };
+
+/** Sessions whose turn this frame saw start (lifecycle `started` or a busy snapshot). */
+const turnsStarted = new Set<string>();
+
+/** Only frames that live while the rail is closed (the row, a real rail pane) count turns. */
+let badgeTracking = false;
+
+function readBadgeRecord(value: unknown): BadgeRecord {
+  if (!value || typeof value !== 'object') return { count: 0, at: 0, sessionId: null };
+  const record = value as Partial<BadgeRecord>;
+  return {
+    count: typeof record.count === 'number' && Number.isFinite(record.count) && record.count > 0 ? Math.min(Math.floor(record.count), BADGE_MAX) : 0,
+    at: typeof record.at === 'number' && Number.isFinite(record.at) ? record.at : 0,
+    sessionId: typeof record.sessionId === 'string' ? record.sessionId : null,
+  };
+}
+
+async function loadBadgeRecord(): Promise<BadgeRecord> {
+  try {
+    return readBadgeRecord(await host.storage.get(BADGE_KEY));
+  } catch {
+    return { count: 0, at: 0, sessionId: null };
+  }
+}
+
+/** Whether this session is a design chat: the permanent marker, or Design Mode ON right now. */
+async function sessionCarriesDesignMarker(sessionId: string): Promise<boolean> {
+  if (sessionId === state.sessionId && state.mode.on) return true;
+  const key = designMarkerKey(sessionId);
+  if (!key) return false;
+  try {
+    return isDesignMarker(await host.storage.get(key));
+  } catch {
+    return false;
+  }
+}
+
+/** A real rail pane the user is looking at needs no badge: they are already here. */
+function railIsBeingViewed(): boolean {
+  return state.surface === 'panel' && isRealPane() && document.visibilityState === 'visible';
+}
+
+/** One completed turn of `sessionId`: count it when it is a design chat and the rail is not on screen. */
+export async function bumpRailBadge(sessionId: string | null): Promise<void> {
+  if (!sessionId || railIsBeingViewed()) return;
+  if (!(await sessionCarriesDesignMarker(sessionId))) return;
+  const previous = await loadBadgeRecord();
+  const now = Date.now();
+  if (previous.sessionId === sessionId && now - previous.at < BADGE_DEDUPE_MS) return;
+  const next: BadgeRecord = { count: Math.min(previous.count + 1, BADGE_MAX), at: now, sessionId };
+  try {
+    await host.storage.set(BADGE_KEY, next);
+  } catch {
+    /* the badge still shows this frame's count */
+  }
+  try {
+    await host.setBadge(next.count);
+  } catch {
+    /* a frame that cannot paint the badge leaves it to the next one */
+  }
+}
+
+/** The rail was opened: clear the icon first, then zero the stored count. */
+export async function resetRailBadge(): Promise<void> {
+  try {
+    await host.setBadge(null);
+  } catch {
+    /* the host clears it on open anyway */
+  }
+  const stored = await loadBadgeRecord();
+  if (stored.count === 0) return;
+  try {
+    await host.storage.set(BADGE_KEY, { count: 0, at: Date.now(), sessionId: null } satisfies BadgeRecord);
+  } catch {
+    /* a stale count only brings the badge back at the next completed turn */
+  }
+}
+
+// ---- P5: the diagnostics ring buffer ----
+//
+// The newest 20 failures (service requests, scaffolds, start-session), newest
+// first, in `diag/errors` — what "Copy diagnostics" hands a bug report. Memory
+// is always current; storage is merged and written only by frames that loaded
+// it (a real pane), debounced so a poll against a dead service cannot hammer it.
+
+const DIAG_ERRORS_KEY = 'diag/errors';
+const DIAG_PERSIST_MS = 1000;
+let diagnosticErrors: DiagnosticError[] = [];
+let diagnosticsLoaded = false;
+let diagnosticsTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Record one failure. Memory only until `loadDiagnostics` ran in this frame. */
+function recordDiagnosticError(source: string, message: string): Promise<void> {
+  diagnosticErrors = addDiagnosticError(diagnosticErrors, source, message);
+  if (diagnosticsLoaded && !diagnosticsTimer) {
+    diagnosticsTimer = setTimeout(() => void flushDiagnostics(), DIAG_PERSIST_MS);
+    (diagnosticsTimer as { unref?: () => void }).unref?.();
+  }
+  return Promise.resolve();
+}
+
+/** Merge storage into memory and write the result back. Test seam and the debounce target. */
+export async function flushDiagnostics(): Promise<void> {
+  if (diagnosticsTimer) {
+    clearTimeout(diagnosticsTimer);
+    diagnosticsTimer = null;
+  }
+  if (!diagnosticsLoaded) return;
+  try {
+    const stored = sanitizeDiagnosticErrors(await host.storage.get(DIAG_ERRORS_KEY));
+    diagnosticErrors = mergeDiagnosticErrors(diagnosticErrors, stored);
+    await host.storage.set(DIAG_ERRORS_KEY, diagnosticErrors);
+  } catch {
+    /* diagnostics are best effort */
+  }
+}
+
+/** Adopt what other frames stored. A frame that never loads (the hidden pane) stays memory-only. */
+async function loadDiagnostics(): Promise<void> {
+  if (isHiddenResolvePane()) return;
+  try {
+    diagnosticErrors = mergeDiagnosticErrors(diagnosticErrors, sanitizeDiagnosticErrors(await host.storage.get(DIAG_ERRORS_KEY)));
+  } catch {
+    /* start from memory */
+  }
+  diagnosticsLoaded = true;
+}
+
+// ---- P5: the diagnostics popover (rail footer + page footer) ----
+
+/** The open popover's report, or null while closed. Module state, so a page redraw keeps it open. */
+let diagnosticsView: { text: string } | null = null;
+
+async function collectDiagnostics(): Promise<DiagnosticsSnapshot> {
+  let service: string;
+  try {
+    service = (await host.serviceStatus()).status;
+  } catch (error) {
+    service = `unreadable (${copy.reason(error)})`;
+  }
+  let settings: DiagnosticsSnapshot['settings'] = null;
+  try {
+    const read = await getSettings();
+    if (isDesignsSettings(read)) settings = { workspaceRoot: read.workspaceRoot, source: read.source, previousRoots: read.previousRoots.length };
+  } catch {
+    /* the report says "unreadable" */
+  }
+  const workspace = state.workspace?.dir ?? null;
+  let devServer: DiagnosticsSnapshot['devServer'] = null;
+  if (workspace) {
+    try {
+      const rows = await getWorkspaces();
+      devServer = rows.workspaces.find((row) => sameDirPath(row.dir, workspace))?.server ?? null;
+    } catch {
+      /* the report says "unknown" */
+    }
+  }
+  if (diagnosticsLoaded) await flushDiagnostics();
+  return { version: EXTENSION_VERSION, apiVersion: EXTENSION_API_VERSION, service, settings, workspace, devServer, errors: [...diagnosticErrors] };
+}
+
+/** Test seam: the report the popover would show right now. */
+export async function diagnosticsReport(): Promise<string> {
+  return formatDiagnostics(await collectDiagnostics());
+}
+
+async function copyDiagnostics(text: string): Promise<void> {
+  try {
+    await host.writeClipboard(text);
+    await host.toast(copy.successToast(copy.DIAGNOSTICS_COPIED));
+  } catch (error) {
+    await host.toast(copy.errorToast(copy.diagnosticsCopyFailed(copy.reason(error))));
+  }
+}
+
+/** Paint the Diagnostics control — closed (a text button) or open (the report) — into `container`. */
+function paintDiagnostics(container: HTMLElement): void {
+  container.dataset.diagState = diagnosticsView ? 'open' : 'closed';
+  if (!diagnosticsView) {
+    const open = q<HTMLButtonElement>('button', 'ds-link ds-diag-open', copy.DIAGNOSTICS_LABEL);
+    open.type = 'button';
+    open.setAttribute('aria-haspopup', 'dialog');
+    open.setAttribute('aria-expanded', 'false');
+    open.addEventListener('click', () => void openDiagnostics(container));
+    container.replaceChildren(open);
+    return;
+  }
+  const pop = q('div', 'ds-diag-pop');
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-label', copy.DIAGNOSTICS_LABEL);
+  const text = diagnosticsView.text;
+  const body = q('pre', 'ds-diag-text', text);
+  const actions = q('div', 'ds-diag-actions');
+  const copyBtn = q<HTMLButtonElement>('button', 'primary ds-diag-copy', copy.DIAGNOSTICS_COPY);
+  copyBtn.type = 'button';
+  copyBtn.addEventListener('click', () => void copyDiagnostics(text));
+  const close = q<HTMLButtonElement>('button', 'ds-diag-close', copy.DIAGNOSTICS_CLOSE);
+  close.type = 'button';
+  const closePop = (): void => {
+    diagnosticsView = null;
+    paintDiagnostics(container);
+    container.querySelector<HTMLElement>('.ds-diag-open')?.focus();
+  };
+  close.addEventListener('click', closePop);
+  pop.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    closePop();
+  });
+  actions.append(copyBtn, close);
+  pop.append(body, actions);
+  container.replaceChildren(pop);
+  queueMicrotask(() => copyBtn.focus());
+}
+
+async function openDiagnostics(container: HTMLElement): Promise<void> {
+  container.replaceChildren(q('div', 'ds-diag-note', 'Reading diagnostics…'));
+  diagnosticsView = { text: formatDiagnostics(await collectDiagnostics()) };
+  paintDiagnostics(container);
+}
+
+/**
+ * The footer's "Diagnostics" control. Real panes only: the hidden 1×1 resolve
+ * pane renders nothing here, and an unchanged container is left alone so an
+ * open report survives the redraws around it.
+ */
+export function renderDiagnosticsRow(container: HTMLElement): void {
+  container.classList.add('ds-diag');
+  if (isHiddenResolvePane() || (state.surface === 'panel' && !isRealPane())) {
+    container.replaceChildren();
+    container.hidden = true;
+    delete container.dataset.diagState;
+    return;
+  }
+  container.hidden = false;
+  const want = diagnosticsView ? 'open' : 'closed';
+  if (container.dataset.diagState === want) return;
+  paintDiagnostics(container);
+}
+
+// ---- P5: message and session actions ----
+//
+// `contributes.actions` opens this panel with `ready.item`: the message
+// ("Open in Design Canvas") or the session ("Turn on Design Mode") the user
+// acted on. Both act on THIS chat's canvas through the rail's own flows.
+
+/** Run one action's effect. Test seam; production reaches it through `host.onItem`. */
+export async function runItemAction(item: GuestMessageItem | GuestSessionItem): Promise<void> {
+  if (isHiddenResolvePane()) return;
+  if (!state.sessionId) state.sessionId = item.sessionId;
+  if (item.sessionId !== state.sessionId) {
+    await host.toast(copy.infoToast(copy.ACTION_OTHER_CHAT));
+    return;
+  }
+  await loadWorkspace();
+  await syncModeFromStorage();
+  if (item.action === 'turn-on-design-mode') {
+    if (state.mode.on && state.workspace) {
+      await host.toast(copy.infoToast(copy.ACTION_ALREADY_ON));
+      return;
+    }
+    await onRailPrimaryClick({ turnOn: true });
+    return;
+  }
+  await onRailPrimaryClick();
+}
+
+/** An action that arrived before the frame became a real rail pane waits here. */
+let pendingActionItem: GuestMessageItem | GuestSessionItem | null = null;
+let lastActionKey = '';
+let lastActionAt = 0;
+
+function onHostItem(item: unknown): void {
+  const candidate = item as Parameters<typeof isGuestMessageItem>[0];
+  if (!isGuestMessageItem(candidate) && !isGuestSessionItem(candidate)) return;
+  const action = candidate as GuestMessageItem | GuestSessionItem;
+  // The host may replay the same item on a re-ready; a real second click is seconds away.
+  const key = `${action.action}:${action.sessionId}:${action.kind === 'message' ? action.messageId : ''}`;
+  const now = Date.now();
+  if (key === lastActionKey && now - lastActionAt < 1500) return;
+  lastActionKey = key;
+  lastActionAt = now;
+  if (state.surface === 'panel' && !isRealPane()) {
+    pendingActionItem = action;
+    return;
+  }
+  if (state.surface !== 'panel') return;
+  void runItemAction(action);
 }
 
 // ---- preview-dev-server Start/Stop control ----
@@ -2323,7 +2664,7 @@ async function onServerControlClick(): Promise<void> {
     // where the user is looking (the live region alone is screen-reader-only).
     if (!state.sessionId) {
       announceServer(NO_SESSION_MESSAGE);
-      await host.toast({ kind: 'error', message: NO_SESSION_MESSAGE });
+      await host.toast(copy.errorToast(NO_SESSION_MESSAGE));
       return;
     }
     // First use: Start creates the canvas workspace (spec §F), then turns
@@ -2337,7 +2678,7 @@ async function onServerControlClick(): Promise<void> {
       if (!ws) {
         // The scaffold / job paths toast their own cause; this names the outcome.
         announceServer('Could not create the canvas workspace.');
-        await host.toast({ kind: 'error', message: 'Could not create the canvas workspace — see the message above, then press Start to retry.' });
+        await host.toast(copy.errorToast(copy.CANVAS_CREATE_FAILED));
         return;
       }
       await toggleMode(true);
@@ -2454,7 +2795,7 @@ async function readStudioConfig(reportErrors: boolean): Promise<void> {
     renderRow();
   } catch (error) {
     if (reportErrors) {
-      setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Config error: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      setStatus(error instanceof ServiceUnavailable ? copy.serviceNotReady(error.message) : copy.configError(copy.reason(error)), 'error');
     }
   } finally {
     configReadInFlight = false;
@@ -2719,7 +3060,8 @@ function renderPage(): void {
     shell.classList.add('ds-enter');
     pageEnter = false;
   }
-  shell.append(renderHeader(), renderComposer(), renderContextRow(), renderStarters(), renderCanvasSection(), renderFooter());
+  const firstRun = renderFirstRun();
+  shell.append(renderHeader(), ...(firstRun ? [firstRun] : []), renderComposer(), renderContextRow(), renderStarters(), renderCanvasSection(), renderFooter());
   pageBody.append(shell);
   updateComposerState();
   poppingOverlay = null;
@@ -2738,6 +3080,48 @@ function focusPendingTrigger(): void {
   if (!id) return;
   refocusOverlayTrigger = null;
   pageBody?.querySelector<HTMLElement>(`[data-overlay-trigger="${id}"]`)?.focus();
+}
+
+// ---- the first-run strip (`prefs/first-run`) ----
+
+const FIRST_RUN_KEY = 'prefs/first-run';
+
+/** Restore the dismissal. A storage error shows the strip: a missed hint costs more than a repeated one. */
+async function loadFirstRun(): Promise<void> {
+  if (state.surface !== 'page') return;
+  let dismissed = false;
+  try {
+    const stored = await host.storage.get(FIRST_RUN_KEY);
+    dismissed = Boolean(stored && typeof stored === 'object' && (stored as { dismissed?: unknown }).dismissed === true);
+  } catch {
+    dismissed = false;
+  }
+  state.firstRunDismissed = dismissed;
+  rerender();
+}
+
+async function dismissFirstRun(): Promise<void> {
+  state.firstRunDismissed = true;
+  rerender();
+  try {
+    await host.storage.set(FIRST_RUN_KEY, { dismissed: true, at: new Date().toISOString() });
+  } catch {
+    /* it stays dismissed for this page view */
+  }
+}
+
+/** The three-step strip above the composer; null once dismissed (and until storage answered). */
+function renderFirstRun(): HTMLElement | null {
+  if (state.firstRunDismissed !== false) return null;
+  const strip = q('div', 'ds-first-run');
+  strip.setAttribute('role', 'note');
+  strip.append(q('span', 'ds-first-run-text', copy.FIRST_RUN_TEXT));
+  const dismiss = q<HTMLButtonElement>('button', 'ds-link ds-first-run-dismiss', copy.FIRST_RUN_DISMISS);
+  dismiss.type = 'button';
+  dismiss.setAttribute('aria-label', 'Dismiss the getting-started steps');
+  dismiss.addEventListener('click', () => void dismissFirstRun());
+  strip.append(dismiss);
+  return strip;
 }
 
 /** The left-aligned header: eyebrow, title, one plain line on how it works. */
@@ -3116,15 +3500,15 @@ export async function attachProjectReference(): Promise<void> {
   }
   const url = projectHttpUrl(project.config);
   if (!url) {
-    await host.toast({ kind: 'error', message: ATTACH_NEEDS_URL });
+    await host.toast(copy.errorToast(ATTACH_NEEDS_URL));
     return;
   }
   try {
     const chip = projectReferenceChip({ projectId: project.projectId, dir: project.dir, name: project.name, url });
     await host.attach(chip);
-    await host.toast({ kind: 'success', message: 'Workspace reference added to the composer.' });
+    await host.toast(copy.successToast(copy.WORKSPACE_REFERENCE_ADDED));
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.attachFailed('workspace', copy.reason(error))));
   }
 }
 
@@ -3188,15 +3572,15 @@ export async function attachProjectPath(path: string): Promise<void> {
   }
   const url = projectHttpUrl(project.config);
   if (!url) {
-    await host.toast({ kind: 'error', message: ATTACH_NEEDS_URL });
+    await host.toast(copy.errorToast(ATTACH_NEEDS_URL));
     return;
   }
   try {
     const chip = fileReferenceChip({ path, url });
     await host.attach(chip);
-    await host.toast({ kind: 'success', message: 'File reference added to the composer.' });
+    await host.toast(copy.successToast(copy.FILE_REFERENCE_ADDED));
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.attachFailed('file', copy.reason(error))));
   }
 }
 
@@ -3242,7 +3626,7 @@ export async function attachDroppedFiles(event: DragEvent): Promise<void> {
   const files = Array.from(event.dataTransfer?.files ?? []);
   if (files.length === 0) return;
   announceReference(DROP_PATH_MESSAGE);
-  await host.toast({ kind: 'info', message: DROP_PATH_MESSAGE });
+  await host.toast(copy.infoToast(DROP_PATH_MESSAGE));
 }
 
 // ---- references ----
@@ -3733,6 +4117,9 @@ function renderFooter(): HTMLElement {
   hints.append(kbd('Shift'), document.createTextNode('+'), kbd('Enter'), document.createTextNode(' new line · '));
   hints.append(kbd('/canvas'), document.createTextNode(' in any chat opens the canvas there'));
   footer.append(hints);
+  const diagnostics = q('div', 'ds-footer-diag');
+  renderDiagnosticsRow(diagnostics);
+  footer.append(diagnostics);
   return footer;
 }
 
@@ -3873,7 +4260,7 @@ async function openWorkspaceListRow(row: WorkspaceWorkRow): Promise<void> {
     try {
       await host.openSession(row.sessionId);
     } catch (error) {
-      await host.toast({ kind: 'error', message: `Could not open the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(copy.errorToast(copy.openChatFailed(copy.reason(error))));
     }
     return;
   }
@@ -3891,12 +4278,14 @@ async function openWorkspaceListRow(row: WorkspaceWorkRow): Promise<void> {
       data: seedSessionData('hi-fi', '', record),
     });
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not start the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
+    await recordDiagnosticError('start-session', copy.reason(error));
+    await host.toast(copy.errorToast(copy.startChatFailed(copy.reason(error))));
     return;
   }
   if (!result.sessionId || result.sent !== 'sent') {
     const failure = 'failure' in result ? result.failure : undefined;
-    await host.toast({ kind: 'error', message: `The canvas chat could not be started (${result.sent}${failure ? `: ${failure}` : ''}).` });
+    await recordDiagnosticError('start-session', `not sent (${result.sent}${failure ? `: ${failure}` : ''})`);
+    await host.toast(copy.errorToast(copy.chatNotSent(result.sent, failure)));
     return;
   }
   try {
@@ -3907,7 +4296,7 @@ async function openWorkspaceListRow(row: WorkspaceWorkRow): Promise<void> {
   try {
     await host.openSession(result.sessionId);
   } catch (error) {
-    await host.toast({ kind: 'error', message: `The canvas chat could not open. Open it from Your design work. ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.chatStartedNotOpened(copy.reason(error))));
   }
 }
 
@@ -4271,9 +4660,9 @@ async function stopRowServer(row: WorkspaceWorkRow): Promise<void> {
 async function copyRowPath(row: WorkspaceWorkRow): Promise<void> {
   try {
     await copyPath(row.dir);
-    await host.toast({ kind: 'success', message: 'Folder path copied.' });
+    await host.toast(copy.successToast(copy.FOLDER_PATH_COPIED));
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not copy the folder path: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.copyFolderFailed(copy.reason(error))));
   }
 }
 
@@ -4522,7 +4911,7 @@ async function onPlayToggleClick(): Promise<void> {
       await saveMode();
     }
   } catch (error) {
-    setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    setStatus(copy.switchModeFailed(copy.reason(error)), 'error');
   }
   renderCanvasControls();
 }
@@ -4540,7 +4929,7 @@ async function onScreenSelectChange(): Promise<void> {
     await openWorkspace({ dir: ws.dir, screen: id, focus: false });
     state.activeScreen = id;
   } catch (error) {
-    setStatus(`Could not switch screens: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    setStatus(copy.switchScreenFailed(copy.reason(error)), 'error');
   }
   renderCanvasControls();
 }
@@ -4583,7 +4972,7 @@ export async function applyState(stateData: LiveState): Promise<void> {
   const registry = shouldToastRegistryError(state.registryErrorNotified, stateData.registryError ?? null);
   state.registryErrorNotified = registry.key;
   if (registry.toast) {
-    await host.toast({ kind: 'error', message: registryErrorToastMessage(stateData.registryError as string) });
+    await host.toast(copy.errorToast(registryErrorToastMessage(stateData.registryError as string)));
   }
   // Picks are NOT read here anymore (V4-5): they arrive through `GET /picks`
   // in `runPickLoop`; `/state` keeps serving window/mode/screens/registryError.
@@ -4627,7 +5016,7 @@ async function poll(): Promise<void> {
   try {
     await applyState(await getState());
   } catch (error) {
-    setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Live canvas error: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    setStatus(error instanceof ServiceUnavailable ? copy.serviceNotReady(error.message) : copy.liveCanvasError(copy.reason(error)), 'error');
   }
   // Keep the server Start/Stop icon honest without blocking the next poll tick.
   void refreshServerStatus();
@@ -4766,6 +5155,8 @@ function buildPage(root: HTMLElement): void {
   window.addEventListener('drop', onPageWindowDrop);
   renderPage();
   void loadPagePrefs();
+  void loadFirstRun();
+  void loadDiagnostics();
   void loadDesignHome();
 }
 
@@ -4821,6 +5212,8 @@ const RAIL_POLL_MS = 2000;
  */
 const RAIL_CLAIM_DELAY_MS = 4000;
 let railClaimDelayMs = RAIL_CLAIM_DELAY_MS;
+/** The rail's Diagnostics control, under the footer hint. */
+let railDiagEl: HTMLElement | null = null;
 const RAIL_FOOTER_HINT = 'Full home: Design Canvas in the sidebar.';
 
 let railStatusEl: HTMLElement | null = null;
@@ -4873,7 +5266,9 @@ export function buildRail(root: HTMLElement): void {
   railLocationEl = q('div', 'ds-rail-location');
   railLocationEl.hidden = true;
   const footer = q('div', 'ds-rail-footer', RAIL_FOOTER_HINT);
-  wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, railLocationEl, footer);
+  railDiagEl = q('div', 'ds-rail-diag');
+  railDiagEl.hidden = true;
+  wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, railLocationEl, footer, railDiagEl);
   root.append(wrap);
   // A tab mounted while collapsed (or behind another tab) grows into a real
   // pane later; these wake it then. The hidden resolve pane never resizes.
@@ -4952,6 +5347,7 @@ function renderRail(): void {
   renderRailControls();
   renderRailWork();
   renderRailLocation();
+  if (railDiagEl) renderDiagnosticsRow(railDiagEl);
 }
 
 /**
@@ -4959,21 +5355,21 @@ function renderRail(): void {
  * and hand install/boot/open to the row. A workspace with its window open:
  * raise it. A workspace without one: hand the open to the row.
  */
-async function onRailPrimaryClick(): Promise<void> {
+async function onRailPrimaryClick(options: { turnOn?: boolean } = {}): Promise<void> {
   if (railBusy || state.serverPending || !isRealPane()) return;
   if (!state.sessionId) {
-    await host.toast({ kind: 'error', message: NO_SESSION_MESSAGE });
+    await host.toast(copy.errorToast(NO_SESSION_MESSAGE));
     return;
   }
   railBusy = true;
   renderRailControls();
   try {
     if (state.workspace) {
-      if (state.windowOpen) {
+      if (state.windowOpen && !options.turnOn) {
         try {
           await focusLive();
         } catch (error) {
-          setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+          setStatus(copy.focusFailed(copy.reason(error)), 'error');
         }
         return;
       }
@@ -4983,7 +5379,7 @@ async function onRailPrimaryClick(): Promise<void> {
     const prepared = await prepareCanvasWorkspace('', state.sessionId, modeScaffoldChoice());
     if ('error' in prepared) {
       // The scaffold paths toast their own cause; F2 is the one they do not.
-      if (prepared.noSession) await host.toast({ kind: 'error', message: NO_SESSION_MESSAGE });
+      if (prepared.noSession) await host.toast(copy.errorToast(NO_SESSION_MESSAGE));
       return;
     }
     await handRailOpenToRow(prepared);
@@ -5038,6 +5434,8 @@ async function refreshRail(): Promise<void> {
   } catch {
     /* the service is not up yet; keep the last answer */
   }
+  // A row that counted a turn while this rail was open leaves a stale badge: clear it.
+  if ((await loadBadgeRecord()).count > 0) await resetRailBadge();
   renderRailControls();
 }
 
@@ -5053,9 +5451,18 @@ async function loadRailWork(): Promise<void> {
 function startRailLive(): void {
   if (railLive || state.surface !== 'panel' || !isRealPane()) return;
   railLive = true;
+  // The panel is open: clear the icon, zero the count, and count turns again only once it closes.
+  badgeTracking = true;
+  void resetRailBadge();
+  void loadDiagnostics().then(() => {
+    if (railDiagEl) renderDiagnosticsRow(railDiagEl);
+  });
   void refreshRail();
   void loadRailWork();
   setInterval(() => void refreshRail(), RAIL_POLL_MS);
+  const waiting = pendingActionItem;
+  pendingActionItem = null;
+  if (waiting) void runItemAction(waiting);
 }
 
 /** Focus / visibility / resize: start the rail if it just became real, else refresh it. */
@@ -5083,6 +5490,8 @@ function mountSurface(root: HTMLElement): void {
   void loadStudioConfig();
   const kind = surfaceKind(state.surface);
   if (kind === 'row') {
+    badgeTracking = true;
+    void loadDiagnostics();
     void poll();
     setInterval(() => void poll(), POLL_MS);
     // V4-5: the pick-queue long-poll runs on the row surface only. It has no
@@ -5100,6 +5509,10 @@ async function main(): Promise<void> {
   // The `/canvas` resolver: valid on the panel and page surfaces (the ones that
   // carry `commands`). Registered once, before the host asks.
   host.onResolve((request) => resolveCanvasCommand(request.args));
+  // `contributes.actions` (open mode): the message/session the user acted on.
+  host.onItem(onHostItem);
+  // Every failed service call lands in the diagnostics ring buffer.
+  setServiceErrorSink((source, message) => void recordDiagnosticError(source, message));
 
   let started = false;
   host.onReady((context: HostReadyContext) => {
@@ -5311,6 +5724,28 @@ export function resetDesignsSettings(): void {
   designsSettingsLoad = 'idle';
   locationEditorOpen = false;
 }
+
+/** Test seams for the P5 surfaces. */
+export function getFirstRunDismissed(): boolean | null {
+  return state.firstRunDismissed;
+}
+export function resetFirstRun(): void {
+  state.firstRunDismissed = null;
+}
+export function getDiagnosticErrors(): DiagnosticError[] {
+  return [...diagnosticErrors];
+}
+export function resetDiagnostics(): void {
+  diagnosticErrors = [];
+  diagnosticsLoaded = false;
+  diagnosticsView = null;
+  if (diagnosticsTimer) clearTimeout(diagnosticsTimer);
+  diagnosticsTimer = null;
+}
+export function setBadgeTracking(on: boolean): void {
+  badgeTracking = on;
+}
+export { loadDiagnostics, loadFirstRun, dismissFirstRun, renderFirstRun, canvasHelpChip };
 
 /** Test seam: shorten how long a rail handoff waits for a row before claiming it. */
 export function setRailClaimDelay(ms: number | null): void {

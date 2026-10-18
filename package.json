@@ -44,6 +44,23 @@
           "description": "Start or toggle the design canvas and attach design context"
         }
       ],
+      "actions": [
+        {
+          "id": "open-in-design-canvas",
+          "label": "Open in Design Canvas",
+          "where": "message",
+          "roles": [
+            "assistant"
+          ],
+          "mode": "open"
+        },
+        {
+          "id": "turn-on-design-mode",
+          "label": "Turn on Design Mode",
+          "where": "session",
+          "mode": "open"
+        }
+      ],
       "capabilities": [
         "prompt",
         "sessions"

@@ -626,7 +626,7 @@ test('the page builds the creation home: no registered-project gate anywhere', a
   assert.match(text, /function renderStarters\(/, 'the starter cards are built');
   assert.match(
     text,
-    /renderHeader\(\), renderComposer\(\), renderContextRow\(\), renderStarters\(\), renderCanvasSection\(\), renderFooter\(\)/,
+    /renderHeader\(\), \.\.\.\(firstRun \? \[firstRun\] : \[\]\), renderComposer\(\), renderContextRow\(\), renderStarters\(\), renderCanvasSection\(\), renderFooter\(\)/,
     'the one list mounts below the starters, closed by the footer',
   );
   assert.doesNotMatch(text, /function renderDirRow\(/, 'the registered working-directory selector is gone');
@@ -720,7 +720,8 @@ test('the first scaffold toasts the one-time permission heads-up (decision 4b)',
   const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
   assert.match(text, /const PERMISSION_TOAST_KEY = 'ws-permission-notified'/, 'the one-time flag key');
   assert.match(text, /async function maybeShowPermissionToast\(dir: string\)/, 'the heads-up lives once');
-  assert.match(text, /approve its file-edit permission prompts/, 'the copy says to approve the prompts');
+  const copySource = await readFile(new URL('../panel/copy.ts', import.meta.url), 'utf8');
+  assert.match(copySource, /approve its file-edit permission prompts/i, 'the copy says to approve the prompts');
   assert.match(text, /await maybeShowPermissionToast\(dir\)/, 'it fires from the scaffold');
 });
 
@@ -739,7 +740,9 @@ test('config and dev-server reads resolve against the workspace dir', async () =
   const missing = source.slice(source.indexOf('async function handleMissingWorkspace('), source.indexOf('/**\n * Raise the workspace of a workspaces-list row'));
   assert.match(missing, /host\.storage\.delete\(key\)/, 'the ws/ record is deleted, not shadowed');
   assert.match(missing, /state\.workspace = null/, 'the session unbinds so Start re-offers "Create canvas"');
-  assert.match(missing, /Start creates a new canvas\./, 'the toast offers the next action');
+  const copySource = await readFile(new URL('../panel/copy.ts', import.meta.url), 'utf8');
+  assert.match(missing, /copy\.missingWorkspace\(/, 'the toast goes through the shared wording');
+  assert.match(copySource, /Start creates a new canvas\./, 'the toast offers the next action');
   assert.match(source, /await openWorkspace\(\{ dir: row\.dir, focus: true \}\)/, 'the page Preview row is user-initiated too');
   assert.match(source, /await openWorkspace\(\{ dir: ws\.dir, screen: id, focus: false \}\)/, 'the screen dropdown never raises the window (V4-8)');
   assert.doesNotMatch(source, /FORK-MERGE:?\s*panel\/styles\.css/, 'no unfilled style notes left for the row');

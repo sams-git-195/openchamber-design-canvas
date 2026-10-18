@@ -1223,3 +1223,50 @@ button.on { background: var(--oc-selection); color: var(--oc-selection-fg); bord
   color: var(--oc-muted);
   overflow-wrap: anywhere;
 }
+
+/* P5: the first-run strip above the composer. */
+.ds-first-run {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ds-space-3);
+  padding: var(--ds-space-2) var(--ds-space-3);
+  border: 1px solid var(--oc-border);
+  border-radius: var(--oc-radius);
+  background: var(--oc-muted-surface);
+  color: var(--oc-muted);
+  font-size: var(--ds-font-small);
+  line-height: 20px;
+}
+.ds-first-run-text { min-width: 0; overflow-wrap: anywhere; }
+.ds-first-run-dismiss { flex: none; color: var(--oc-muted); }
+.ds-first-run-dismiss:hover { color: var(--oc-fg); }
+
+/* P5: the Diagnostics control (rail footer + page footer) and its report. */
+.ds-diag { color: var(--oc-muted); font-size: var(--ds-font-small); }
+.ds-rail-diag { padding-top: var(--ds-space-2); }
+.ds-footer-diag { margin-top: 6px; }
+.ds-diag-open { color: var(--oc-muted); }
+.ds-diag-open:hover { color: var(--oc-fg); }
+.ds-diag-pop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ds-space-2);
+  padding: var(--ds-space-3);
+  border: 1px solid var(--oc-border);
+  border-radius: var(--oc-radius);
+  background: var(--oc-elevated);
+  color: var(--oc-fg);
+}
+.ds-diag-text {
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  font-family: var(--oc-mono);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ds-diag-actions { display: flex; flex-wrap: wrap; gap: var(--ds-space-2); }
+.ds-diag-note { color: var(--oc-muted); }

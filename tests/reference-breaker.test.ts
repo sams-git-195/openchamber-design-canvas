@@ -39,7 +39,7 @@ const approvedTemp = '/private/var/folders/hx/6ykzfqb5519dsfc25bzxxrzc0000gn/T/o
 const tempRoot = await access(approvedTemp).then(() => approvedTemp, () => tmpdir());
 const scratch = await mkdtemp(join(tempRoot, 'reference-breaker-'));
 await mkdir(join(scratch, 'panel'));
-for (const name of ['api', 'attach-dialog', 'craft', 'main', 'mode', 'reference-draft']) {
+for (const name of ['api', 'attach-dialog', 'copy', 'craft', 'diagnostics', 'main', 'mode', 'reference-draft', 'version']) {
   await cp(join(root, 'panel', `${name}.ts`), join(scratch, 'panel', `${name}.ts`));
 }
 await cp(join(root, 'shared'), join(scratch, 'shared'), { recursive: true });
@@ -73,7 +73,7 @@ if (mutant === 'stale-result') {
 } else if (mutant === 'unconsumed-delivery') {
   replaceExactlyOnce("    if (spec.references !== undefined) {\n      cancelReferenceValidation();\n      state.references = [];\n      state.prompt = '';\n      attachPathDraft = '';\n      referenceError = '';\n    }", '    // Scratch fault: confirmed delivery does not consume its draft.');
 } else if (mutant === 'unhandled-success-toast') {
-  replaceExactlyOnce("    try {\n      await host.toast({ kind: 'success', message: 'Design session started — its controls are in Work Status.' });\n    } catch {\n      /* Notification transport is not session-delivery failure. */\n    }", "    await host.toast({ kind: 'success', message: 'Design session started — its controls are in Work Status.' });");
+  replaceExactlyOnce("    try {\n      await host.toast(copy.successToast(copy.DESIGN_STARTED));\n    } catch {\n      /* Notification transport is not session-delivery failure. */\n    }", "    await host.toast(copy.successToast(copy.DESIGN_STARTED));");
 } else if (mutant === 'empty-reference-preflight') {
   // The oversized-brief rejection has two layers (the page guard + the
   // submission cap). The mutant empties BOTH: B1 must still catch the now
@@ -221,7 +221,7 @@ test('A4 toast rejection after delivery must not make the same references resend
   // The canvas flow gained a scaffold success toast BEFORE delivery; the seam
   // this test pins is the DELIVERY notification (the failure of which must
   // never un-deliver), so only the session-started toast rejects.
-  host.toast = async (toast) => { if (toast.kind === 'success' && /Design session started/.test(toast.message)) throw new Error('toast transport unavailable'); };
+  host.toast = async (toast) => { if (toast.kind === 'success' && /Design started/.test(toast.message)) throw new Error('toast transport unavailable'); };
   await main.startNewDesign();
   const firstDraft = main.getPageDraft();
   host.toast = async () => undefined;

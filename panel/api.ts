@@ -35,6 +35,25 @@ function describe(error: unknown): string {
   return String(error);
 }
 
+/**
+ * Where service failures are reported (P5 diagnostics ring buffer). The panel
+ * installs one sink; a failing call reports `METHOD /path` and the message
+ * once, then throws as before. Never throws itself.
+ */
+let serviceErrorSink: ((source: string, message: string) => void) | null = null;
+export function setServiceErrorSink(sink: ((source: string, message: string) => void) | null): void {
+  serviceErrorSink = sink;
+}
+
+function failService(method: string, path: string, message: string): never {
+  try {
+    serviceErrorSink?.(`${method} ${path}`, message);
+  } catch {
+    /* diagnostics never break a call */
+  }
+  throw new ServiceUnavailable(message);
+}
+
 async function callService<T>(
   path: string,
   query?: Record<string, string>,
@@ -45,7 +64,7 @@ async function callService<T>(
   try {
     result = await host.serviceRequest({ method, path, query, body });
   } catch (error) {
-    throw new ServiceUnavailable(describe(error));
+    return failService(method, path, describe(error));
   }
   if (result.status !== 200) {
     let detail = `HTTP ${result.status}`;
@@ -55,7 +74,7 @@ async function callService<T>(
     } catch {
       /* body was not JSON */
     }
-    throw new ServiceUnavailable(detail);
+    return failService(method, path, detail);
   }
   return JSON.parse(result.body) as T;
 }
@@ -911,7 +930,7 @@ export function shouldToastRegistryError(
  * a test share one wording.
  */
 export function registryErrorToastMessage(registryError: string): string {
-  return `The canvas screens registry is broken — ${registryError}`;
+  return `Screens registry is broken: ${registryError}. Fix screens.json in the workspace.`;
 }
 
 /** Actionable message when a workspace has no url to open or serve. */
