@@ -8,11 +8,11 @@
 // session join (prefix / case / separator normalization), input purity, the
 // clash-avoiding slug, and the renderer's join derivation at source level.
 //
-// Run: node --test --test-concurrency=1 tests/adversarial/design-work-omit-2026-10-14/adversarial-designwork.test.ts
+// Run: node --test tests/adversarial-designwork.test.ts (also part of npm test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import type { WorkspaceRow, WorkspaceWorkRow } from '../../../panel/api.ts';
+import type { WorkspaceRow, WorkspaceWorkRow } from '../panel/api.ts';
 
 // Same shim contract as tests/panel-open.test.ts: the SDK's connectHost()
 // needs a `window` before panel/api.ts is imported.
@@ -27,7 +27,7 @@ const shim = {
   documentElement: {},
 };
 
-const { joinWorkspaceSessions, uniqueCanvasSlug, normalizeDirPath, wsSessionIdFromKey, workspaceMeta } = await import('../../../panel/api.ts');
+const { joinWorkspaceSessions, uniqueCanvasSlug, normalizeDirPath, wsSessionIdFromKey, workspaceMeta } = await import('../panel/api.ts');
 
 function row(dir: string, name: string, url?: string): WorkspaceRow {
   return url ? { dir, name, url } : { dir, name };
@@ -87,7 +87,7 @@ test('joinWorkspaceSessions never mutates its inputs and returns fresh rows', ()
 
 test('a workspace row with neither a url nor a name still renders (meta and label fall back, the row is never filtered)', async () => {
   assert.equal(workspaceMeta({ dir: '/root/c', name: '' }), '/root/c', 'meta falls back to the dir');
-  const text = await readFile(new URL('../../../panel/main.ts', import.meta.url), 'utf8');
+  const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
   const listStart = text.indexOf('function renderWorkspaceListRow(');
   const list = text.slice(listStart, text.indexOf('async function openWorkspaceListRow('));
   assert.match(list, /row\.name \|\| fileBaseName\(row\.dir\)/, 'the label falls back to the dir basename');
@@ -95,7 +95,7 @@ test('a workspace row with neither a url nor a name still renders (meta and labe
 });
 
 test('a /workspaces failure surfaces the error state — it never masquerades as "empty"', async () => {
-  const text = await readFile(new URL('../../../panel/main.ts', import.meta.url), 'utf8');
+  const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
   const start = text.indexOf('async function loadCanvasWorkspaces(');
   const body = text.slice(start, text.indexOf('async function loadDesignHome('));
   assert.match(body, /state\.workspaces = \{ kind: 'error', message: error instanceof Error \? error\.message : String\(error\) \}/, 'a failed read is an error, not a list');
@@ -105,7 +105,7 @@ test('a /workspaces failure surfaces the error state — it never masquerades as
 });
 
 test('the ws/ scan is one storage.keys() pass whose values are read per key — and the permission flag never parses as a session', async () => {
-  const text = await readFile(new URL('../../../panel/main.ts', import.meta.url), 'utf8');
+  const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
   const start = text.indexOf('async function readWorkspaceSessionMap(');
   const body = text.slice(start, text.indexOf('async function loadCanvasWorkspaces('));
   assert.equal((body.match(/storage\.keys\(\)/g) ?? []).length, 1, 'a SINGLE keys() pass per refresh (audit #19)');
@@ -126,7 +126,7 @@ test('the unique slug always avoids the exact basenames already on disk, suffixi
 });
 
 test('the workspace-target resolution has no refusal state at all (decision 2)', async () => {
-  const text = await readFile(new URL('../../../panel/api.ts', import.meta.url), 'utf8');
+  const text = await readFile(new URL('../panel/api.ts', import.meta.url), 'utf8');
   const start = text.indexOf('export function resolveCanvasTarget(');
   const end = text.indexOf('// ---- slug creation');
   const body = text.slice(start, end);
