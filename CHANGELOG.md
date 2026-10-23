@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Booting a canvas that restores **play mode** no longer lets the last artboard
+  to finish loading steal the active-outline from the restored screen: the
+  play-mode follow now reacts only to user-driven navigation, never to a
+  board's own initial page loads (F13 boot-grace; shipped in the 0.3.0 code,
+  documented here after the fact).
+
 ### Planned
 
 These are **not implemented yet** — they are noted here so the roadmap is

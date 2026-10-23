@@ -803,3 +803,131 @@ test('STRESS: 100 real CDP edit-mode click+reference rounds across 2 artboards d
     assert.equal(tail.picks.length, 0, 'nothing lingers un-drained after the final ack');
   });
 });
+
+// ---- F13 boot-grace (gate finding #2): a boot IN play mode keeps the restored active ----
+//
+// ARTIFACT_BRIDGE emits 'changed' on BOTH DOMContentLoaded and window load, and
+// the original F13 follow (mode+ready guards only) let the LAST board to settle
+// steal the active slot from the /open-restored activeScreen. The fix tags each
+// 'changed' with a reason ('dom'/'load' = the document's own boot, 'nav' =
+// same-document user navigation) and a tagged event only follows after the
+// board's first 'load' armed it (ScreenRecord.bootSettled). This route-level
+// pin boots a REAL service twice: edit → POST /mode play (persists to
+// view.json) → /close → re-/open {screen:'phone'} (play + active restored) —
+// with home.html holding a slow subresource so the NON-active board's window
+// load lands ~1.2 s AFTER /open returned and the restore setActive ran: the
+// exact event that used to flip active to home. After the full boot settle
+// (all ready + >2 s), /state.activeScreen must still be phone.
+test('F13 boot-grace live: re-/open into play mode with staggered board loads keeps the restored activeScreen', { timeout: 240_000 }, async (t) => {
+  if (!(await liveTest(t))) return;
+  const SLOW_MS = 1200;
+  const PNG_1PX = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const fixture = createServer((req, res) => {
+    const reqUrl = req.url ?? '/';
+    if (reqUrl.includes('slow.png')) {
+      // home's window 'load' waits for this: the staggered-settle ingredient.
+      setTimeout(() => {
+        res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+        res.end(PNG_1PX);
+      }, SLOW_MS);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/html', 'cache-control': 'no-store' });
+    res.end(reqUrl.includes('home')
+      ? page('Home', '#eef', '<img src="/slow.png" width="1" height="1">')
+      : page('Phone', '#fce'));
+  });
+  await new Promise<void>((resolve) => fixture.listen(0, '127.0.0.1', resolve));
+  const base = `http://localhost:${(fixture.address() as { port: number }).port}/`;
+  const ws = await mkdtemp(path.join(tmpdir(), 'v4-f13-boot-'));
+  await writeFile(path.join(ws, '.design-studio.json'), JSON.stringify({ version: 1, name: 'f13', type: 'hi-fi', url: base, command: 'npm run dev', entry: 'index.html', pagesRoot: '.' }), 'utf8');
+  await writeFile(path.join(ws, 'screens.json'), JSON.stringify({ version: 1, screens: [
+    { id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 },
+    { id: 'phone', file: 'phone.html', title: 'Phone', width: 390, height: 844 },
+  ] }), 'utf8');
+  const port = await pickFreePort(45000, 1200);
+  const child: ChildProcess = spawn(process.execPath, [path.join(rootDir, 'service', 'main.ts')], {
+    env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', DS_WORKSPACE_ROOT: ws, OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN, DS_WINDOW: '-2400,-2400,1400,900' },
+    stdio: 'ignore',
+  });
+  const api = async (p: string, init?: RequestInit) => fetch(`http://127.0.0.1:${port}${p}`, { ...init, headers: { authorization: `Bearer ${TOKEN}`, ...(init?.body ? { 'content-type': 'application/json' } : {}) } });
+  const state = async () => (await (await api('/state')).json()) as {
+    windowOpen: boolean;
+    mode: string;
+    screens: Array<{ id: string; state: string }>;
+    activeScreen: string | null;
+    registryError: string | null;
+    shellBridge: { authority: boolean; lastCommandAt: number | null };
+  };
+  const poll = async (predicate: (s: Awaited<ReturnType<typeof state>>) => boolean, timeoutMs: number, label: string) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const s = await state();
+      if (predicate(s)) return s;
+      if (Date.now() >= deadline) assert.fail(`${label} — last state: ${JSON.stringify({ mode: s.mode, screens: s.screens, active: s.activeScreen, registryError: s.registryError, bridge: s.shellBridge })}`);
+      await pause(100);
+    }
+  };
+  const settledBoot = () => poll((s) => s.windowOpen && s.shellBridge.lastCommandAt !== null && s.screens.length === 2 && s.screens.every((x) => x.state === 'ready'), 60_000, 'boot settles (window + heartbeat + both boards ready)');
+  try {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      try {
+        if ((await api('/health')).status === 200) break;
+      } catch { /* booting */ }
+      if (Date.now() >= deadline) assert.fail('service never became healthy');
+      await pause(100);
+    }
+
+    // 1) First open (edit): both boards settle; phone is the chosen active.
+    const open1 = await (await api('/open', { method: 'POST', body: JSON.stringify({ dir: ws, screen: 'phone', focus: false }) })).json() as { ok: boolean; error?: string };
+    assert.equal(open1.ok, true, `first /open succeeded (${open1.error ?? ''})`);
+    const s0 = await settledBoot();
+    assert.equal(s0.mode, 'edit');
+    assert.equal(s0.activeScreen, 'phone');
+
+    // 2) POST /mode play — D5: persisted to view.json (what the re-open restores).
+    const modeRes = await (await api('/mode', { method: 'POST', body: JSON.stringify({ mode: 'play' }) })).json() as { ok: boolean; mode?: string };
+    assert.equal(modeRes.ok, true);
+    const viewFile = path.join(ws, '.design-studio', 'view.json');
+    const viewDeadline = Date.now() + 5000;
+    for (;;) {
+      try {
+        if ((JSON.parse(await readFile(viewFile, 'utf8')) as { mode?: string }).mode === 'play') break;
+      } catch { /* not written yet */ }
+      if (Date.now() >= viewDeadline) assert.fail('POST /mode never persisted mode:play to view.json');
+      await pause(60);
+    }
+
+    // 3) CLOSE, then re-/open: play + active=phone restored, boards re-boot
+    //    staggered UNDER PLAY MODE — home's window load lands last, ~1.2 s
+    //    after the restore setActive(phone) already ran.
+    const closeRes = await (await api('/close', { method: 'POST' })).json() as { ok: boolean };
+    assert.equal(closeRes.ok, true);
+    await pause(500);
+    const open2 = await (await api('/open', { method: 'POST', body: JSON.stringify({ dir: ws, screen: 'phone', focus: false }) })).json() as { ok: boolean; error?: string };
+    assert.equal(open2.ok, true, `re-/open succeeded (${open2.error ?? ''})`);
+
+    // 4) Full boot settle: all ready, then a >2 s grace that comfortably
+    //    outlives home's delayed window load (the event that used to flip).
+    const s1 = await settledBoot();
+    assert.equal(s1.mode, 'play', 'the re-open restored play from view.json');
+    assert.equal(s1.activeScreen, 'phone', 'active is the restored screen at ready-settle');
+    await pause(2500);
+    const s2 = await state();
+    assert.equal(s2.activeScreen, 'phone', 'F13 boot-grace: the staggered play boot never moved the restored activeScreen');
+    assert.equal(s2.mode, 'play');
+    // Belt: a late flip class would land on home only after its slow load.
+    await pause(1500);
+    const s3 = await state();
+    assert.equal(s3.activeScreen, 'phone', 'and none landed later either');
+    assert.equal(s3.registryError, null);
+  } finally {
+    await api('/close', { method: 'POST' }).catch(() => undefined);
+    child.kill('SIGKILL');
+    fixture.closeAllConnections();
+    fixture.close();
+    await pause(300);
+    await import('node:fs/promises').then(({ rm }) => rm(ws, { recursive: true, force: true }).catch(() => undefined));
+  }
+});

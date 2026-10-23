@@ -602,6 +602,10 @@ matter are untouched: 100 real compositor clicks, drain+ack, exactly one
   `bringToFront` anywhere on the path (V4-8 compliant). Edit mode never
   follows. Pin: +1 hermetic, both directions + the loading-board guard +
   bringToFront spy at 0.
+  **Amendment (F13 boot-grace, gate finding #2):** the parenthetical above was
+  FALSE — `ready` is reached at `interactive`, so a boot IN play mode flipped
+  active ≤1×/board and clobbered the /open-restored screen; see the
+  "F13 boot-grace" section at the end of this log for the fix.
 - **F15 — reset-position deletes the key (view-state.ts).** `applyMerge` now
   DELETES `positions[id]` on a null patch (no more `"id": null` residue after
   Reset position); `sanitizeView` still reads legacy null entries as auto-grid
@@ -712,3 +716,75 @@ across two full `npm run build && npm run build:viewer` rounds.
 - Smoke (docs/smoke/run-smoke.mjs) was NOT re-run here (it rewrites tracked
   PNGs); REVERIFY's 20/20 stands on the unchanged smoke surface — the menu
   gained one item, which the smoke's menu step selects by label, not count.
+
+## F13 boot-grace — final-gate finding #2 (fix landed 2026-10-18 in `2257db4`, inside 0.3.0; live pin + docs completed 2026-10-23, qwen3.8-max#xhigh)
+
+**Gate finding (#2, F13).** The FIX-3 claim that "the ready guard keeps a
+boot-time load storm from flapping the active board" was FALSE (amended inline
+above). ARTIFACT_BRIDGE emits `changed` on BOTH DOMContentLoaded and window
+`load`, and `refreshScreen` marks a board `ready` at `interactive` — so on a
+session BOOTING in play mode the dom-`changed` passes the ready gate and the
+later load-`changed` passes all three old guards (mode=play, screen≠active,
+state=ready) and calls `setActive(board)`. Net: active ended on the LAST board
+to finish loading, clobbering the `/open`-restored activeScreen
+(`screenParam ?? viewScreens[0]`). Bounded (≤1 flip/board, no window raise —
+setActive never bringToFronts), but the invariant was load-bearing for `/open`
+restore and had to be fixed before in-host acceptance.
+
+**Chosen mechanism — reason tagging + per-board boot grace (hybrid of the two
+shapes the gate suggested; reason alone would regress verified behavior, timing
+alone can't classify).**
+- The bridge tags every `changed` emission with a `reason`: `'nav'`
+  (pushState/replaceState/hashchange/popstate — user-driven same-document
+  navigation), `'dom'` (DOMContentLoaded), `'load'` (window load). §3
+  additive-only: a `{type:'changed'}` payload WITHOUT the field stays valid and
+  is tolerated.
+- Service side: `ScreenRecord.bootSettled` — the per-board grace. A TAGGED
+  event only follows once the board's FIRST `'load'` settled its boot; that
+  settling `'load'` arms the follow but never follows itself. A reason-less
+  event (legacy bridge shape) keeps the original ready-gated behavior verbatim,
+  which is why the existing F13 pin stays green untouched.
+- Why not reason-only ("follow just `'nav'`"): RECHECK2 pinned F13 on a REAL
+  link click — a FULL-document navigation whose signals are `'dom'`/`'load'`.
+  Dropping those would regress the verified click-through. Why not timing-only:
+  a click-driven document load is indistinguishable from a boot document load
+  without the reason tag. Hybrid: the boot storm (dom→load, pre-arm) is inert;
+  AFTER the grace, user-driven navigation follows whether same-document
+  (`'nav'`) or full-document (`'dom'`/`'load'` of the new document).
+- Reset points (arming is document-lifetime scoped): `applyScreenRegistry`
+  clears on a url move / new board; both `navigate` paths clear (a new document
+  re-boots under grace); `doQuit` clears every board — folded into R1's
+  `resetLiveScreenState` (B1), so a /close → re-/open on the SAME Browser
+  singleton cannot inherit armed records (without it the second boot's stale
+  `ready` + armed grace would flip exactly like the original finding).
+
+**Tests (both binding pins new; the existing F13 pin untouched).**
+- +1 hermetic (`tests/v4-service.test.ts`): interleaved staggered boot-in-play
+  (dom→ready→load per board; the restored active settles FIRST, the other board
+  settles LAST — the flip recipe). Asserts activeScreen never moves, zero
+  SETACTIVE pushes, zero window raises, both boards armed at the end; then
+  post-grace `'nav'` AND `'dom'` follow (F13 kept both ways), and an unarmed
+  board ignores `'nav'` (an SPA router's pre-load replaceState is boot noise).
+- +1 live route-level (`tests/v4-live.test.ts`): real spawned service + Chrome;
+  2-screen workspace opened at `screen:'phone'` → POST `/mode play` (persist
+  verified in view.json on disk) → `/close` → re-`/open {screen:'phone'}`
+  restores play + active. `home.html` carries a slow subresource so the
+  NON-active board's window load lands ~1.2 s AFTER the restore setActive ran —
+  the exact event that used to steal it. Full boot settle (all ready) + 2.5 s
+  + a 1.5 s belt: `/state.activeScreen` stays `phone`, mode stays `play`.
+
+**Numbers (honest).** Full suite `DS_REQUIRE_CHROME=1 npm run test` ×2 on the
+final tree: run 1 = 729 tests, ONE fail — the V4-15/E17 20× integrator loop,
+round 5 of 20 (camera-persistence 5 s budget; the documented contention class
+from FIX-3's "Left honestly open"; that pin is unchanged since `a33850f` and
+runs BEFORE the new pins in file order — F13 was green in that run); run 2 =
+**729 tests, 725 pass, 0 FAIL, 4 documented win32 skips** (544 s). Dedicated
+file runs: `v4-service` ×3 → 48/48 every run; `v4-live` ×4 → the F13 live pin
+4/4 green (10.9–11.2 s), while the V4-15 E17 15× pin flaked in 2 of the 4
+(aborted at 7.4 s; green isolated at 9.1 s and in full-suite run 2 — same
+pre-existing contention class, never an F13 failure). `npm run build`:
+`service/main.js` byte-identical to the committed bundle (sha256
+`21018da7…57842a`), spot-grep carries the fix (reason-tagged emits ×3 lines,
+`bootSettled` ×7, the `armingBoot` guard). `npm run typecheck` clean. Fix +
+hermetic pin shipped in `2257db4`; this entry, the live pin and the inline
+amendment complete the gate item.
