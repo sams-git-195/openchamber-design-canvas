@@ -235,7 +235,7 @@ export const CANVAS_PROTOCOL = [
   'Add or change a screen: write its HTML file, then update its screens.json entry (ids ^[a-z0-9][a-z0-9-]{0,30}$, sizes 200–8192, file relative *.html inside the workspace). Rewriting one screen never rewrites siblings.',
   'Positions are not design content: never write x/y into screens.json; the canvas stores them in .design-studio/view.json and the user arranges artboards by hand.',
   'Variants = side-by-side artboards. "Two directions", "options", "alternatives" mean 2–3 complete sibling screens (ids like home-a, home-b), each its own file + entry, each at the same size unless the brief says otherwise. Never stack variants inside one file, never hide alternates behind toggles.',
-  'Responsive = one artboard per real size. Presets: 390×844 phone · 768×1024 tablet · 1280×800 desktop (default) · 1440×900 large desktop · 1080×1080 social post · 794×1123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop). Other sizes are allowed within 200–8192.',
+  'Responsive = one artboard per real size. Presets: 390×844 phone · 768×1024 tablet · 1440×900 desktop (default) · 1280×800 laptop · 1080×1080 social post · 794×1123 A4 print at 96 dpi. "Make it responsive" means three artboards of the same screen (phone, tablet, desktop), ids like home-phone, home-tablet, home. Artboards are viewports: content taller than the artboard scrolls inside it — never grow the artboard height to fit the page. Other sizes are allowed within 200–8192.',
 ].join('\n');
 ```
 

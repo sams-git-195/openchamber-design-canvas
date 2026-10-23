@@ -5,110 +5,7 @@ import { runInNewContext } from 'node:vm';
 import { stripTypeScriptTypes } from 'node:module';
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, request } from 'node:http';
-
-const source = readFileSync(process.env.DS_CONTROLLER_SOURCE || new URL('../viewer-client/src/canvas-controller.js', import.meta.url), 'utf8');
-const toolbarSource = readFileSync(new URL('../viewer-client/src/Toolbar.tsx', import.meta.url), 'utf8');
-const home = { id: 'home', url: 'http://127.0.0.1:5173/', width: 1280, height: 800, title: 'Home' };
-const other = { id: 'other', url: 'http://127.0.0.1:5173/checkout.html', width: 768, height: 1024, title: 'Checkout' };
-const phone = { id: 'phone', url: 'http://127.0.0.1:5173/phone.html', width: 390, height: 844, title: 'Phone' };
-const config = { screens: [home, other], viewport: { width: 1280, height: 800 }, mode: 'edit' as const };
-const single = { screens: [home], viewport: { width: 1280, height: 800 }, mode: 'edit' as const };
-// Pre-canvas single-artboard config kept so the original camera fixture still boots.
-const legacy = { url: 'http://127.0.0.1:5173/', pages: [{ id: 'home', label: 'Home', url: 'http://127.0.0.1:5173/' }, { id: 'other', label: 'Other', url: 'http://127.0.0.1:5173/other' }], viewport: { width: 1280, height: 800 } };
-
-const matchesNode = (node: any, selector: string): boolean => String(selector).split(',').some((partRaw) => {
-  const part = partRaw.trim();
-  if (part.startsWith('.')) return String(node.className ?? '').split(/\s+/).includes(part.slice(1));
-  return part.toLowerCase() === String(node.tagName ?? '').toLowerCase();
-});
-
-function environment(script = source.replace('export function ', 'function ') + ';initCanvas(initialConfig);', connected = true, cfg: any = config, opts: { timers?: boolean, frames?: 'sync' | 'manual', clipboard?: (text: string) => Promise<void> } = {}) {
-  const nodes = new Map<string, any>(), events: Array<{ owner: string, type: string, fn: Function }> = [], commands: any[] = [];
-  const clock = { t: 1700000000000 };
-  let active: any;
-  let elSeq = 0;
-  let timerSeq = 0;
-  const timers = new Map<number, { at: number, fn: Function }>();
-  const frames: Function[] = [];
-  const detach = (node: any) => { const parent = node.parent; if (!parent) return; const at = parent.children.indexOf(node); if (at >= 0) parent.children.splice(at, 1); node.parent = undefined; };
-  const make = (id: string, tag = 'div') => {
-    const style: any = { setProperty(name: string, value: unknown) { style[name] = String(value); }, getPropertyValue(name: string) { return name in style ? String(style[name]) : ''; } };
-    // Real cssText REPLACES every inline declaration. Mirror that: begin/end
-    // capture snapshots round-trip through it exactly like production Chrome.
-    Object.defineProperty(style, 'cssText', {
-      configurable: true, enumerable: false,
-      get() { return Object.keys(style).filter((k) => typeof style[k] !== 'function').map((k) => `${k}:${style[k]}`).join(';'); },
-      set(value: string) { for (const k of Object.keys(style)) if (typeof style[k] !== 'function') delete style[k]; for (const part of String(value).split(';')) { const at = part.indexOf(':'); if (at > 0) style[part.slice(0, at).trim()] = part.slice(at + 1).trim(); } },
-    });
-    const node: any = { id, tagName: String(tag).toUpperCase(), hidden: false, dataset: {}, attributes: {}, style,
-      children: [], parent: undefined, srcWrites: [] as string[],
-      clientWidth: 1000, clientHeight: 720, classList: { _s: new Set<string>(), add(...names: string[]) { names.forEach(n => this._s.add(n)); }, remove(...names: string[]) { names.forEach(n => this._s.delete(n)); }, contains(n: string) { return this._s.has(n); } },
-      getBoundingClientRect: () => node.rect ?? { x: 0, y: 0, left: 0, top: 0, width: id === 'canvas' ? 1000 : 768, height: id === 'canvas' ? 720 : 720 },
-      addEventListener: (type: string, fn: Function) => events.push({ owner: node.id, type, fn }),
-      setAttribute(a: string, v: unknown) { node.attributes[a] = String(v); if (a === 'class') node.className = String(v); },
-      getAttribute: (a: string) => (a === 'src' ? (node.attributes.src ?? node._src ?? '') : a in node.attributes ? node.attributes[a] : (a === 'class' ? (node.className ?? '') : null)),
-      removeAttribute(a: string) { delete node.attributes[a]; },
-      focus: () => { active = node; },
-      appendChild(child: any) { detach(child); node.children.push(child); child.parent = node; return child; },
-      append(...kids: any[]) { kids.forEach((k: any) => node.appendChild(k)); },
-      remove() { detach(node); },
-      contains(other: any) { let cursor = other; while (cursor) { if (cursor === node) return true; cursor = cursor.parent; } return false; },
-      querySelector: (sel: string) => { const out = query(node, sel); return out.length ? out[0] : null; },
-      querySelectorAll: (sel: string) => query(node, sel),
-      closest: (sel: string) => { let cursor = node; while (cursor) { if (matchesNode(cursor, sel)) return cursor; cursor = cursor.parent; } return null; },
-      replaceChildren(...kids: any[]) { node.children.forEach((c: any) => { c.parent = undefined; }); node.children = kids; kids.forEach((k: any) => { k.parent = node; }); },
-      setPointerCapture() {}, hasPointerCapture: () => false, releasePointerCapture() {} };
-    Object.defineProperty(node, 'className', { configurable: true, get() { return node._class ?? ''; }, set(v: unknown) { node._class = String(v); } });
-    // The src property reflects the attribute until the frame navigates (the
-    // load event then flips it to the current URL, as real Chrome does).
-    Object.defineProperty(node, 'src', { configurable: true, get() { return node._src || String(node.attributes.src ?? ''); }, set(v: unknown) { node._src = String(v); node.attributes.src = String(v); node.srcWrites.push(String(v)); } });
-    let textValue = '';
-    Object.defineProperty(node, 'textContent', { configurable: true, get() { return textValue; }, set(v: unknown) { textValue = String(v); } });
-    return node;
-  };
-  const query = (root: any, sel: string): any[] => { const out: any[] = []; const walk = (n: any) => { for (const child of n.children ?? []) { if (matchesNode(child, sel)) out.push(child); walk(child); } }; walk(root); return out; };
-  const $ = (id: string) => { if (!nodes.has(id)) nodes.set(id, make(id)); return nodes.get(id)!; };
-  const body = make('body', 'body');
-  const document: any = { title: '', getElementById: $, createElement: (tag: string) => make('el-' + String(tag).toLowerCase() + '-' + (++elSeq), tag), body, documentElement: {}, querySelectorAll: () => [],
-    addEventListener: (type: string, fn: Function) => events.push({ owner: 'document', type, fn }), get activeElement() { return active; } };
-  const window: any = { addEventListener: (type: string, fn: Function) => events.push({ owner: 'window', type, fn }) };
-  if (opts.clipboard) window.navigator = { clipboard: { writeText: (text: string) => opts.clipboard!(text) } };
-  if (connected) window.__dsCanvasSend = (value: string) => commands.push(JSON.parse(value));
-  // Mirror production: the renderer bakes the initial artboards into the markup
-  // (header chrome + iframe + per-board overlay + the ⋯ menu button), then the
-  // serialized controller adopts them.
-  const camera = $('camera');
-  if (Array.isArray(cfg.screens)) {
-    for (const screen of cfg.screens) {
-      const section = document.createElement('section'); section.className = 'ds-artboard'; section.dataset.screen = screen.id; section.dataset.active = 'false';
-      const title = document.createElement('button'); title.className = 'ds-ab-title';
-      const size = document.createElement('span'); size.className = 'ds-ab-size';
-      const frame = document.createElement('iframe'); frame.id = `ds-frame-${screen.id}`; frame.setAttribute('src', screen.url);
-      const overlay = document.createElement('div'); overlay.className = 'ds-ab-state'; overlay.dataset.state = 'loading';
-      const copy = document.createElement('p'); copy.className = 'ds-ab-card-copy';
-      const detail = document.createElement('p'); detail.className = 'ds-ab-card-detail'; detail.hidden = true;
-      const action = document.createElement('button'); action.className = 'ds-ab-retry';
-      const menu = document.createElement('button'); menu.className = 'ds-ab-menu';
-      overlay.appendChild(copy); overlay.appendChild(detail); overlay.appendChild(action);
-      section.appendChild(title); section.appendChild(size); section.appendChild(frame); section.appendChild(overlay); section.appendChild(menu);
-      camera.appendChild(section);
-    }
-  }
-  const context: any = { initialConfig: JSON.parse(JSON.stringify(cfg)), window, document, URL, Error, Number, Math, JSON, Object, Set, Map, Array, RegExp, Promise,
-    Date: { now: () => clock.t },
-    getComputedStyle: () => ({ getPropertyValue: (name: string) => name === '--s7' ? '48px' : '32px' }),
-    clearTimeout: (id: number) => { timers.delete(id); },
-    setTimeout: (fn: Function, delay: number) => { if (!opts.timers) return 1; const id = ++timerSeq; timers.set(id, { at: clock.t + delay, fn }); return id; },
-    requestAnimationFrame: (fn: Function) => { if (opts.frames === 'manual') { frames.push(fn); return ++timerSeq; } fn(); return 1; }, ResizeObserver: class { observe() {} } };
-  runInNewContext(script, context);
-  const frameOf = (id: string) => camera.children.map((s: any) => s.querySelector('iframe')).find((f: any) => f && f.id === `ds-frame-${id}`);
-  const sectionOf = (id: string) => camera.children.find((s: any) => s.dataset?.screen === id);
-  const elementOf = (id: string, selector: string) => { const section = sectionOf(id); return section ? section.querySelector(selector) : null; };
-  const fire = (owner: string, type: string, event: Record<string, unknown>) => { for (const entry of events) if (entry.owner === owner && entry.type === type) entry.fn(event); };
-  const fireTimers = (ms: number) => { clock.t += ms; const due = [...timers.entries()].filter(([, t]) => t.at <= clock.t).sort((a, b) => a[1].at - b[1].at); for (const [id, t] of due) { timers.delete(id); t.fn(); } };
-  const flushFrames = (rounds = 4) => { for (let i = 0; i < rounds; i++) { const due = frames.splice(0, frames.length); for (const fn of due) fn(); if (!frames.length) break; } };
-  return { window, document, body, nodes, $, commands, events, api: window.__dsCanvas, bridge: window.__dsToolbarBridge, camera, frameOf, sectionOf, elementOf, fire, fireTimers, flushFrames, tick: (ms: number) => { clock.t += ms; } };
-}
+import { source, toolbarSource, home, other, phone, config, single, legacy, environment } from './helpers/controller-env.ts';
 
 test('canvas is exposed before React, readiness waits for mounted hooks, absent binding stays pending', () => {
   const e = environment(undefined, false);
@@ -288,7 +185,7 @@ test('V4-1 E1 shell-side: activation NEVER resizes an artboard and no shell path
   assert.equal(typeof e.api.setLayout, 'function'); assert.equal(typeof e.api.getFitBounds, 'function');
 });
 
-test('edit mode picks unscaled frame coordinates; play mode forwards the real click', () => {
+test('edit mode selects at unscaled frame coordinates (clickAt stamped, nothing queued); play mode forwards the real click', () => {
   const e = environment(); e.api.setStatus({ state: 'ready' });
   e.api.restoreCamera({ mode: 'manual', scale: 1, panX: 0, panY: 0 });
   const section = e.sectionOf('other');
@@ -298,8 +195,13 @@ test('edit mode picks unscaled frame coordinates; play mode forwards the real cl
   };
   const down = (x: number, y: number) => fire('pointerdown', { button: 0, clientX: x, clientY: y, pointerId: 1, target: section, preventDefault() {} });
   const up = (x: number, y: number, shiftKey = false) => fire('pointerup', { pointerId: 1, clientX: x, clientY: y, shiftKey });
+  // R2 (B4): the pick message keeps its unscaled coordinates and gains the
+  // shell clock stamp (clickAt) for the click→selected timing log.
+  const picks = () => e.commands.filter(c => c.type === 'screen-pick').map(({ clickAt, ...rest }) => { assert.equal(typeof clickAt, 'number', 'every screen-pick carries clickAt'); return rest; });
   down(20 + 200, 30 + 250); up(20 + 200, 30 + 250);
-  assert.deepEqual(e.commands.at(-1), { type: 'screen-pick', screen: 'other', x: 200, y: 250 });
+  assert.deepEqual(picks().at(-1), { type: 'screen-pick', screen: 'other', x: 200, y: 250 });
+  assert.equal(e.commands.at(-1).clickAt, 1700000000000, 'clickAt is the shell Date.now() at the click');
+  assert.equal(e.commands.filter(c => c.type === 'selection-send').length, 0, 'a click alone never references (nothing reaches the queue)');
   assert.equal(e.api.getActive(), 'other', 'a pick selects its artboard quietly');
   assert.equal(e.commands.filter(c => c.type === 'screen-activate').length, 0, 'plain picks never spam activations');
   e.tick(400);
@@ -320,12 +222,12 @@ test('edit mode picks unscaled frame coordinates; play mode forwards the real cl
   // Shift-click in EDIT mode marks the pick additive (V4-5); plain picks omit it.
   e.api.setMode('edit'); e.tick(400);
   down(20 + 120, 30 + 120); up(20 + 120, 30 + 120, true);
-  assert.deepEqual(e.commands.filter(c => c.type === 'screen-pick').at(-1), { type: 'screen-pick', screen: 'other', x: 120, y: 120, additive: true });
+  assert.deepEqual(picks().at(-1), { type: 'screen-pick', screen: 'other', x: 120, y: 120, additive: true });
   // Title buttons activate explicitly; scale is divided out of the pick coordinates.
   e.api.setMode('edit'); e.api.restoreCamera({ mode: 'manual', scale: 2, panX: 0, panY: 0 }); e.tick(400);
   section.rect = { x: 0, y: 0, left: 0, top: 0, width: 1536, height: 2048 };
   down(400, 300); up(400, 300);
-  assert.deepEqual(e.commands.filter(c => c.type === 'screen-pick').at(-1), { type: 'screen-pick', screen: 'other', x: 200, y: 150 });
+  assert.deepEqual(picks().at(-1), { type: 'screen-pick', screen: 'other', x: 200, y: 150 });
   e.sectionOf('home').querySelector('.ds-ab-title').onclick();
   assert.deepEqual(e.commands.at(-1), { type: 'screen-activate', screen: 'home' });
   assert.equal(e.api.getActive(), 'home');
@@ -389,21 +291,22 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   assert.equal(menus().length, 1, 'right-click on an artboard opens exactly one menu');
   const menu = menus()[0];
   assert.equal(menu.getAttribute('role'), 'menu');
-  // F10 + FIX-3 (F17): 9 items in 5 groups, joined by 4 role=separator
+  // F10 + FIX-3 (F17): 10 items in 5 groups, joined by 4 role=separator
   // dividers — the separators are never menuitems, so the keyboard ring skips
-  // them. Stop dev server (F17) is alone in its group before Rename.
-  assert.equal(menu.children.length, 13, '9 items + 4 group separators');
+  // them. Stop dev server (F17) is alone in its group before Rename. R3 adds
+  // Fit to device viewport at the end of the file group.
+  assert.equal(menu.children.length, 14, '10 items + 4 group separators');
   assert.deepEqual(menu.children.map((c: any) => c.getAttribute('role')),
-    ['menuitem', 'separator', 'menuitem', 'menuitem', 'separator', 'menuitem', 'menuitem', 'menuitem', 'menuitem', 'separator', 'menuitem', 'separator', 'menuitem']);
+    ['menuitem', 'separator', 'menuitem', 'menuitem', 'separator', 'menuitem', 'menuitem', 'menuitem', 'menuitem', 'menuitem', 'separator', 'menuitem', 'separator', 'menuitem']);
   const itemsOf = () => menus()[0].children.filter((c: any) => c.getAttribute('role') === 'menuitem');
   // Every frozen §3 action maps to exactly {type:'screen-menu',screen,action}.
   const fired = (index: number) => itemsOf()[index].onclick();
   const labels = itemsOf().map((c: any) => c.textContent);
-  assert.deepEqual(labels, ['Send to chat', 'Zoom to screen', 'Reload screen', 'Reset position', 'Export PNG', 'Export PDF', 'Copy file path', 'Stop dev server', 'Rename…']);
+  assert.deepEqual(labels, ['Send to chat', 'Zoom to screen', 'Reload screen', 'Reset position', 'Export PNG', 'Export PDF', 'Copy file path', 'Fit to device viewport', 'Stop dev server', 'Rename…']);
   assert.deepEqual(itemsOf().map((c: any) => c.dataset.action),
-    ['send-to-chat', 'zoom', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path', 'stop-server', 'rename'],
+    ['send-to-chat', 'zoom', 'reload', 'reset-position', 'export-png', 'export-pdf', 'copy-path', 'fit-viewport', 'stop-server', 'rename'],
     'data-action drives the subtle CSS icons; Rename… stays last, in its own group');
-  for (const [index, action] of [[0, 'send-to-chat'], [2, 'reload'], [3, 'reset-position'], [4, 'export-png'], [5, 'export-pdf'], [6, 'copy-path'], [7, 'stop-server']] as const) {
+  for (const [index, action] of [[0, 'send-to-chat'], [2, 'reload'], [3, 'reset-position'], [4, 'export-png'], [5, 'export-pdf'], [6, 'copy-path'], [7, 'fit-viewport'], [8, 'stop-server']] as const) {
     openVia(section);
     assert.equal(menus().length, 1);
     fired(index);
@@ -416,7 +319,7 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   assert.equal(e.commands.length, before, "'zoom' is local focus, no message");
   assert.equal(e.api.getCamera().mode, 'manual');
   // Rename (V4-17): inline input over the header; Enter commits <=120 chars.
-  openVia(section); fired(8);
+  openVia(section); fired(9);
   const input = e.elementOf('home', '.ds-ab-rename');
   assert.ok(input, 'the menu Rename… opens the inline header input');
   assert.equal(input.value, 'Home');
@@ -424,13 +327,13 @@ test('the artboard context menu opens, maps actions, dismisses, and renames (V4-
   e.fire(input.id, 'keydown', { key: 'Enter', preventDefault() {} });
   assert.deepEqual(e.commands.at(-1), { type: 'screen-rename', screen: 'home', title: 'Landing' });
   assert.equal(e.elementOf('home', '.ds-ab-rename'), null, 'committing removes the input');
-  openVia(section); fired(8);
+  openVia(section); fired(9);
   const input2 = e.elementOf('home', '.ds-ab-rename');
   input2.value = 'x'.repeat(160);
   e.fire(input2.id, 'keydown', { key: 'Enter', preventDefault() {} });
   assert.equal(e.commands.at(-1).title.length, 120, 'titles clamp to 120');
   const count = e.commands.length;
-  openVia(section); fired(8);
+  openVia(section); fired(9);
   const input3 = e.elementOf('home', '.ds-ab-rename');
   e.fire(input3.id, 'keydown', { key: 'Escape', preventDefault() {} });
   assert.equal(e.commands.length, count, 'Escape cancels without emitting');
@@ -971,6 +874,23 @@ test('camera-changed emits once, debounced 400ms after the last paint, never ech
   assert.equal(changed().length, 2);
   const panned = changed()[1].camera;
   assert.ok(Math.abs(panned.panY + 63.2) < 1e-12);
+});
+
+test('R3 wheel routing: edit wheel over an artboard is a screen-scroll (no pan); background pans; ctrl+wheel zooms', () => {
+  const e = environment();
+  e.api.setStatus({ state: 'ready' });
+  const cam = () => JSON.stringify(e.api.getCamera());
+  const before = cam();
+  e.fire('canvas', 'wheel', { ctrlKey: false, deltaX: 0, deltaY: 60, clientX: 50, clientY: 50, defaultPrevented: false, target: e.sectionOf('home'), preventDefault() {} });
+  assert.equal(cam(), before, 'the camera does not pan over an artboard');
+  assert.equal(e.commands.at(-1).type, 'screen-scroll');
+  assert.equal(e.commands.at(-1).deltaY, 60);
+  e.fire('canvas', 'wheel', { ctrlKey: false, deltaX: 0, deltaY: 60, clientX: 50, clientY: 50, defaultPrevented: false, target: e.$('canvas'), preventDefault() {} });
+  assert.notEqual(cam(), before, 'the background still pans');
+  const panned = e.api.getCamera();
+  e.fire('canvas', 'wheel', { ctrlKey: true, deltaX: 0, deltaY: -60, clientX: 50, clientY: 50, defaultPrevented: false, target: e.sectionOf('home'), preventDefault() {}, stopPropagation() {} });
+  assert.ok(e.api.getCamera().scale > panned.scale, 'ctrl+wheel over an artboard zooms');
+  assert.equal(e.commands.filter((c: any) => c.type === 'screen-scroll').length, 1);
 });
 
 test('an in-frame navigation synced on load never triggers a duplicate same-URL load (seam 3)', () => {

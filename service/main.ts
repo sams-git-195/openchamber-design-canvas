@@ -1,28 +1,25 @@
-// Design Studio local service.
+// Design Canvas local service.
 //
 // The panel iframe cannot touch the filesystem or the network, so this process
 // owns the real Chrome window the live view is: the panel asks it to open or
-// navigate a window (`/open`), raise it without reloading (`/focus`), read its
-// state (`/state`) and reports change stats (`/stat`) so the panel can reload
-// when the agent edits a file. Picking is a Cmd/Ctrl-click gesture in the live
+// navigate a window (`/open`), raise it without reloading (`/focus`) and read
+// its state (`/state`). Picking is a Cmd/Ctrl-click gesture in the live
 // window (browser.ts's PICK_SCRIPT), not a route.
 //
 // Contract (GUEST_SERVICES.md): bind 127.0.0.1 on OPENCHAMBER_SERVICE_PORT,
 // require `Authorization: Bearer OPENCHAMBER_SERVICE_TOKEN` on every request
 // including /health, and answer GET /health with 200 once ready.
 import http from 'node:http';
-import { promises as fs } from 'node:fs';
+import { promises as fs, type Dirent } from 'node:fs';
 import path from 'node:path';
 
-import { readStudioConfig, resolveConfigPath, writeStudioConfig } from './studio-config.ts';
-import { ensureDevServer, getDevServerStatus, isLoopbackUrl, stopDevServer } from './project-server.ts';
+import { readStudioConfig, renameWorkspaceConfig, resolveConfigPath, writeStudioConfig } from './studio-config.ts';
+import { ensureDevServer, getDevServerStatus, isDevServerStarting, isLoopbackUrl, peekDevServer, stopDevServer } from './project-server.ts';
+import type { EnsureDevServerOptions, EnsureDevServerResult } from './project-server.ts';
 import { ensureBrowser, getBrowser, stopBrowser } from './surface.ts';
-import { BridgeClaims } from './bridge-claim.ts';
 import { dockPlacement, reapOrphanChrome } from './browser.ts';
 import { handleBrowserControl } from './browser-control.ts';
-import { handleVerifyRequest } from './verify-routes.ts';
-import { writeHarnessPlugin } from './harness-plugin.ts';
-import { listProjectFiles, resolveReferencePath } from './project-files.ts';
+import { resolveReferencePath } from './project-files.ts';
 import { scaffoldProject } from './scaffold.ts';
 import * as scaffoldModule from './scaffold.ts';
 import {
@@ -36,7 +33,7 @@ import {
   type CanvasMode,
 } from './screens.ts';
 import { watchRegistry, type RegistryChange } from './screens-watch.ts';
-import { resolveWorkspaceRoot } from './workspace-root.ts';
+import { resolveWorkspaceRootInfo, sameAbsoluteDir, setWorkspaceRoot } from './workspace-root.ts';
 import {
   getLastWorkspace,
   setLastWorkspace,
@@ -58,6 +55,41 @@ const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
 if (!PORT || !TOKEN) {
   console.error('[design-canvas] missing OPENCHAMBER_SERVICE_PORT or OPENCHAMBER_SERVICE_TOKEN');
   process.exit(1);
+}
+
+/**
+ * #9: the longest a request waits on a dev-server boot before it answers. The
+ * host caps a guest's service request at 20 s, while a cold npm/vite boot may
+ * take up to ensureDevServer's 60 s — so past this the route answers
+ * "starting" and the boot carries on in the background (the panel's status
+ * poll settles it). DS_DEV_SERVER_ANSWER_MS is a test seam only.
+ */
+const DEV_SERVER_ANSWER_MS = (() => {
+  const raw = Number(process.env.DS_DEV_SERVER_ANSWER_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 15_000;
+})();
+
+/**
+ * ensureDevServer, waited on for at most DEV_SERVER_ANSWER_MS. Null means the
+ * boot is still running (it continues in the background); `joined` says a
+ * start for this dir was already in flight, i.e. this call spawned nothing.
+ */
+async function ensureDevServerWithin(
+  url: string,
+  options: EnsureDevServerOptions,
+): Promise<{ result: EnsureDevServerResult | null; joined: boolean }> {
+  const joined = options.dir ? isDevServerStarting(options.dir) : false;
+  const boot = ensureDevServer(url, options);
+  boot.catch(() => undefined);
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), DEV_SERVER_ANSWER_MS);
+  });
+  try {
+    return { result: await Promise.race([boot, late]), joined };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---- Design Canvas browser contract (spec §B) ----
@@ -99,46 +131,6 @@ async function readBody(req: http.IncomingMessage): Promise<string> {
   for await (const chunk of req) chunks.push(chunk as Buffer);
   return Buffer.concat(chunks).toString('utf8');
 }
-
-async function requireFile(root: string, rel: string): Promise<string | null> {
-  const abs = path.resolve(root, rel);
-  const rootAbs = path.resolve(root);
-  if (abs !== rootAbs && !abs.startsWith(rootAbs + path.sep)) return null;
-  try {
-    const stat = await fs.stat(abs);
-    return stat.isFile() ? abs : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Newest mtime among the entry and the files beside it, so a sibling edit reloads. */
-async function newestMtime(dir: string, entryAbs: string): Promise<number> {
-  let newest = 0;
-  try {
-    newest = (await fs.stat(entryAbs)).mtimeMs;
-  } catch {
-    /* entry unreadable; still report siblings */
-  }
-  try {
-    const names = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of names) {
-      if (!entry.isFile()) continue;
-      try {
-        const stat = await fs.stat(path.join(dir, entry.name));
-        if (stat.mtimeMs > newest) newest = stat.mtimeMs;
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    /* directory gone */
-  }
-  return newest;
-}
-
-// Exclusive pick-bridge ownership: one chat window at a time attaches picks.
-const bridge = new BridgeClaims();
 
 // ---- V4-14 (A): workspace-marker guard — defense in depth -------------------
 // PUT /screens, PATCH /view, POST /export, POST /critique and POST
@@ -492,6 +484,10 @@ function scaffoldSplit(): ScaffoldSplit | null {
   return null;
 }
 
+/** R4: artboard device presets the scaffold may seed (seeding lands in P3). */
+const SCAFFOLD_DEVICES = ['phone', 'tablet', 'desktop'] as const;
+type ScaffoldDevice = (typeof SCAFFOLD_DEVICES)[number];
+
 export type ScaffoldAsyncOutcome =
   | { ok: true; jobId: string; dir: string; url: string }
   | { ok: false; error: string };
@@ -511,6 +507,8 @@ async function startAsyncScaffold(options: {
   designSystemId?: string;
   install?: boolean;
   boot?: boolean;
+  devices?: ScaffoldDevice[];
+  projectDir?: string;
 }): Promise<ScaffoldAsyncOutcome> {
   const split = scaffoldSplit();
   if (split) {
@@ -580,14 +578,6 @@ async function startAsyncScaffold(options: {
   return { ok: true, jobId: job.id, dir: job.dir, url: job.url };
 }
 
-/** Cross-platform absolute-dir equality for the F10 job/dir match (win32 is
- *  case-insensitive; separators normalize through path.resolve). */
-function sameAbsoluteDir(a: string, b: string): boolean {
-  const left = path.resolve(a);
-  const right = path.resolve(b);
-  return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
-}
-
 /** GET /scaffold/status body (unknown job = 200 business failure, house rule).
  *  F10 (V4 QA): the poll must name the job's OWN dir — an id/dir pair that
  *  does not match the single-slot job answers like an unknown job, so a stale
@@ -627,40 +617,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // The verify routes (run the matrix, return the last report).
-    if (url.pathname === '/verify' || url.pathname.startsWith('/verify/')) {
-      if (await handleVerifyRequest(req, res)) return;
-    }
-
-    // Write the project-local OpenCode plugin that runs the harness in-session.
-    // Called by the panel when Design Mode turns ON for a ready project. Writing
-    // into the project is a deliberate side effect; harness-plugin.ts never
-    // clobbers a file it did not generate and is idempotent.
-    if (url.pathname === '/harness') {
-      if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'POST required' });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await readBody(req));
-      } catch {
-        sendJson(res, 400, { error: 'body must be JSON' });
-        return;
-      }
-      const dir = (parsed as { dir?: unknown } | null)?.dir;
-      if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
-        sendJson(res, 400, { error: 'dir must be an absolute project path' });
-        return;
-      }
-      try {
-        sendJson(res, 200, (await writeHarnessPlugin(dir)) as unknown as Json);
-      } catch (error) {
-        sendJson(res, 400, { error: error instanceof Error ? error.message : 'could not write harness plugin' });
-      }
-      return;
-    }
-
     // Validate an explicitly pasted reference; no file contents are returned.
     if (url.pathname === '/reference') {
       if (req.method !== 'POST') {
@@ -687,42 +643,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // List a project's files so the panel can attach a FILE reference to a
-    // message. Bearer-authed; `dir` must be an absolute path and `limit`, when
-    // present, a positive integer. A listing the service cannot produce (a
-    // missing or unreadable directory) is a 200 with `ok:false`, never a
-    // transport error.
-    if (url.pathname === '/files') {
-      if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'POST required' });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await readBody(req));
-      } catch {
-        sendJson(res, 400, { error: 'body must be JSON' });
-        return;
-      }
-      const body = parsed as { dir?: unknown; limit?: unknown } | null;
-      const dir = body?.dir;
-      if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
-        sendJson(res, 400, { error: 'dir must be an absolute project path' });
-        return;
-      }
-      const limit = body?.limit;
-      if (limit !== undefined && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1)) {
-        sendJson(res, 400, { error: 'limit must be a positive integer' });
-        return;
-      }
-      try {
-        sendJson(res, 200, { ok: true, files: await listProjectFiles(dir, limit) });
-      } catch (error) {
-        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'could not list files' });
-      }
-      return;
-    }
-
     // Scaffold a design project server-side, before the agent session starts, so
     // the panel has a live URL the moment Design Mode opens. The dir must be an
     // absolute path and type a non-empty string; questions of validity are a
@@ -741,7 +661,7 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const body = parsed as
-        | { dir?: unknown; type?: unknown; direction?: unknown; fidelity?: unknown; brief?: unknown; designSystemId?: unknown; async?: unknown; install?: unknown; boot?: unknown }
+        | { dir?: unknown; type?: unknown; direction?: unknown; fidelity?: unknown; brief?: unknown; designSystemId?: unknown; async?: unknown; install?: unknown; boot?: unknown; devices?: unknown; projectDir?: unknown }
         | null;
       const dir = body?.dir;
       const type = body?.type;
@@ -774,6 +694,20 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'boot must be a boolean' });
         return;
       }
+      // R4: devices/projectDir are forwarded to scaffold.ts as-is (its P3
+      // seeding consumes them); only their SHAPE is validated here.
+      if (
+        body?.devices !== undefined &&
+        (!Array.isArray(body.devices) ||
+          !body.devices.every((d) => typeof d === 'string' && (SCAFFOLD_DEVICES as readonly string[]).includes(d)))
+      ) {
+        sendJson(res, 400, { error: 'devices must be an array of "phone", "tablet" or "desktop"' });
+        return;
+      }
+      if (body?.projectDir !== undefined && (typeof body.projectDir !== 'string' || !path.isAbsolute(body.projectDir))) {
+        sendJson(res, 400, { error: 'projectDir must be an absolute path' });
+        return;
+      }
       const str = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
       const options = {
         dir,
@@ -784,6 +718,8 @@ const server = http.createServer(async (req, res) => {
         designSystemId: str(body?.designSystemId),
         ...(typeof body?.install === 'boolean' ? { install: body.install } : {}),
         ...(typeof body?.boot === 'boolean' ? { boot: body.boot } : {}),
+        ...(Array.isArray(body?.devices) ? { devices: body.devices as ScaffoldDevice[] } : {}),
+        ...(typeof body?.projectDir === 'string' ? { projectDir: body.projectDir } : {}),
       };
       if (body?.async === true) {
         // V4-11 (E15): npm install + dev boot continue in a single-slot job;
@@ -858,7 +794,13 @@ const server = http.createServer(async (req, res) => {
         // announcing a foreign process on the configured port as our running
         // server: without a verified record it refuses with the port-in-use
         // error instead. (/open stays permissive for externally served previews.)
-        const result = await ensureDevServer(configuredUrl, { dir, ownedOnly: true });
+        // #9: a quick boot answers synchronously as before; a slow one answers
+        // `starting` and keeps booting — GET /server/status settles it.
+        const { result, joined } = await ensureDevServerWithin(configuredUrl, { dir, ownedOnly: true });
+        if (!result) {
+          sendJson(res, 200, { ok: true, started: !joined, up: false, starting: true });
+          return;
+        }
         sendJson(res, 200, { ok: result.up, started: result.started, up: result.up, error: result.error });
       } catch (error) {
         sendJson(res, 200, { ok: false, started: false, up: false, error: error instanceof Error ? error.message : 'could not start the dev server' });
@@ -1034,7 +976,9 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // V4-5: the panel confirms consumption (`{seq:int≤latest, label≤80}`); the
+    // V4-5: the panel confirms consumption (`{seq:int≤latest, label≤80, dir?}`;
+    // `dir` is the row's bound workspace — absolute, or '' when unbound — and
+    // keys the queue's per-dir watermark); the
     // service answers the shell with the "Added to chat" toast and clears the
     // unacked watchdog when the seq covers the newest push.
     if (url.pathname === '/picks/ack') {
@@ -1049,7 +993,7 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'body must be JSON' });
         return;
       }
-      const body = parsed as { seq?: unknown; label?: unknown } | null;
+      const body = parsed as { seq?: unknown; label?: unknown; dir?: unknown } | null;
       if (typeof body?.seq !== 'number' || !Number.isInteger(body.seq) || body.seq < 0) {
         sendJson(res, 400, { error: 'seq must be a non-negative integer' });
         return;
@@ -1058,7 +1002,11 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 400, { error: 'label must be a string of 1–80 characters' });
         return;
       }
-      getBrowser()?.ackPicks(body.seq, body.label);
+      if (body.dir !== undefined && (typeof body.dir !== 'string' || (body.dir !== '' && !path.isAbsolute(body.dir)))) {
+        sendJson(res, 400, { error: 'dir must be an absolute path or empty' });
+        return;
+      }
+      getBrowser()?.ackPicks(body.seq, body.label, body.dir);
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -1099,31 +1047,139 @@ const server = http.createServer(async (req, res) => {
     // service-side, NEVER by the panel) and every child containing a
     // .design-studio.json — with the config's name/url, and screens when
     // screens.json exists. A missing workspace root answers an empty list,
-    // never an error.
+    // never an error. R4: earlier roots from settings (previousRoots) are
+    // scanned too — their items carry legacyRoot:true — and every item carries
+    // its `root` plus a cheap dev-server peek. `root` stays the CURRENT root
+    // (the panel builds new workspace dirs from it); `roots` lists all scanned.
     if (url.pathname === '/workspaces') {
-      const rootDir = await resolveWorkspaceRoot();
+      const info = await resolveWorkspaceRootInfo();
+      const rootDir = info.root;
+      const roots = [rootDir, ...info.previousRoots];
       const workspaces: Json[] = [];
-      try {
-        for (const entry of await fs.readdir(rootDir, { withFileTypes: true })) {
-          if (!entry.isDirectory()) continue;
-          const dir = path.join(rootDir, entry.name);
-          if ((await resolveConfigPath(dir)) === null) continue;
-          const { config } = await readStudioConfig(dir);
-          const name =
-            typeof config?.name === 'string' && config.name.trim() !== '' ? config.name.trim() : entry.name;
-          const item: Json = { dir, name };
-          if (typeof config?.url === 'string' && config.url.trim() !== '') item.url = config.url.trim();
-          if (await hasScreensFile(dir)) {
-            const registry = await readScreens(dir);
-            item.screens = registry.screens as unknown as Json;
+      const rootError: Record<string, string> = {};
+      for (const scanRoot of roots) {
+        const legacyRoot = scanRoot !== rootDir;
+        let entries: Dirent[];
+        try {
+          entries = await fs.readdir(scanRoot, { withFileTypes: true });
+        } catch (error) {
+          // A root that does not exist yet is simply empty; anything else is
+          // reported so the panel can say why a folder's designs are missing.
+          const code = (error as NodeJS.ErrnoException | null)?.code;
+          if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+            rootError[scanRoot] = error instanceof Error ? error.message : String(error);
           }
-          workspaces.push(item);
+          continue;
         }
-      } catch {
-        /* no workspace root yet: answer the root with an empty list */
+        const found = await Promise.all(
+          entries
+            .filter((entry) => entry.isDirectory())
+            .map(async (entry): Promise<Json | null> => {
+              const dir = path.join(scanRoot, entry.name);
+              try {
+                if ((await resolveConfigPath(dir)) === null) return null;
+                const { config } = await readStudioConfig(dir);
+                const name =
+                  typeof config?.name === 'string' && config.name.trim() !== '' ? config.name.trim() : entry.name;
+                const item: Json = { dir, name };
+                if (typeof config?.url === 'string' && config.url.trim() !== '') item.url = config.url.trim();
+                if (await hasScreensFile(dir)) {
+                  const registry = await readScreens(dir);
+                  item.screens = registry.screens as unknown as Json;
+                }
+                item.root = scanRoot;
+                item.legacyRoot = legacyRoot;
+                item.server = (await peekDevServer(dir).catch(() => ({ recorded: false, up: false, port: null }))) as unknown as Json;
+                return item;
+              } catch {
+                return null;
+              }
+            }),
+        );
+        for (const item of found) {
+          if (item && !workspaces.some((seen) => sameAbsoluteDir(String(seen.dir), String(item.dir)))) workspaces.push(item);
+        }
       }
       workspaces.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-      sendJson(res, 200, { root: rootDir, workspaces });
+      sendJson(res, 200, {
+        root: rootDir,
+        roots,
+        workspaces,
+        ...(Object.keys(rootError).length > 0 ? { rootError } : {}),
+      });
+      return;
+    }
+
+    // R4 (F1): rename a workspace — sets ONLY the config's `name`. Malformed
+    // input and a non-workspace dir are 400s; an invalid name, an unparseable
+    // config or a failed write are 200 {ok:false,error} (house rule).
+    if (url.pathname === '/workspaces/rename') {
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { error: 'POST required' });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await readBody(req));
+      } catch {
+        sendJson(res, 400, { error: 'body must be JSON' });
+        return;
+      }
+      const body = parsed as { dir?: unknown; name?: unknown } | null;
+      if (typeof body?.dir !== 'string' || !path.isAbsolute(body.dir)) {
+        sendJson(res, 400, { error: 'dir must be an absolute workspace path' });
+        return;
+      }
+      if (typeof body.name !== 'string') {
+        sendJson(res, 400, { error: 'name must be a string' });
+        return;
+      }
+      if (!(await isDesignWorkspace(body.dir))) {
+        sendNotAWorkspace(res);
+        return;
+      }
+      try {
+        const renamed = await renameWorkspaceConfig(body.dir, body.name);
+        sendJson(res, 200, { ok: true, name: renamed.name });
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'rename failed' });
+      }
+      return;
+    }
+
+    // R4 (F4): the designs location. GET answers the resolved root and where
+    // it came from; PUT {workspaceRoot:string|null} chooses (or, with null,
+    // resets) it. A malformed body is a 400; every refusal is 200
+    // {ok:false,code,error} (codes in workspace-root.ts setWorkspaceRoot).
+    if (url.pathname === '/settings') {
+      if (req.method === 'PUT') {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(await readBody(req));
+        } catch {
+          sendJson(res, 400, { error: 'body must be JSON' });
+          return;
+        }
+        const value = (parsed as { workspaceRoot?: unknown } | null)?.workspaceRoot;
+        if (value !== null && typeof value !== 'string') {
+          sendJson(res, 400, { error: 'workspaceRoot must be a string or null' });
+          return;
+        }
+        sendJson(res, 200, (await setWorkspaceRoot(value)) as unknown as Json);
+        return;
+      }
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'GET or PUT required' });
+        return;
+      }
+      const info = await resolveWorkspaceRootInfo();
+      sendJson(res, 200, {
+        workspaceRoot: info.root,
+        source: info.source,
+        defaultRoot: info.defaultRoot,
+        envOverride: info.source === 'env',
+        previousRoots: info.previousRoots,
+      });
       return;
     }
 
@@ -1171,7 +1227,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // D5/D6: the user's canvas view state. GET answers view.json-or-default
-    // (absolute-dir gate like /stat); PATCH merges per key (camera/positions/
+    // (absolute-dir gate); PATCH merges per key (camera/positions/
     // mode) through view-state.ts and answers {ok:true}. There is NO PUT:
     // nothing may full-overwrite view.json except the service's own merge.
     if (url.pathname === '/view') {
@@ -1396,61 +1452,19 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (url.pathname === '/stat') {
-      const root = params.get('dir') ?? '';
-      const entry = params.get('path') ?? '';
-      if (!path.isAbsolute(root)) {
-        sendJson(res, 400, { error: 'dir must be absolute' });
-        return;
-      }
-      const abs = await requireFile(root, entry);
-      if (!abs) {
-        sendJson(res, 404, { error: 'entry not found' });
-        return;
-      }
-      const dir = path.dirname(abs);
-      sendJson(res, 200, { mtime: await newestMtime(dir, abs) });
-      return;
-    }
-
     // The live window's state. Never starts the browser: a panel that only
-    // reads state must not pop a Chrome window.
+    // reads state must not pop a Chrome window. `bridgeActive` is a vestige of
+    // the removed /bridge claim, always false; it stays only for the /state
+    // byte-compat pin in tests/v4-service.test.ts until that file is next edited.
     if (url.pathname === '/state') {
       const target = getBrowser();
       if (!target) {
-        sendJson(res, 200, { url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false, bridgeActive: bridge.active() });
+        sendJson(res, 200, { url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false, bridgeActive: false });
         return;
       }
       const state = (await target.state()) as { bridgeActive?: boolean };
-      state.bridgeActive = bridge.active();
+      state.bridgeActive = false;
       sendJson(res, 200, state as unknown as Json);
-      return;
-    }
-
-    // Pick-bridge ownership (see service/bridge-claim.ts). The hidden pane that
-    // /design mounts inside a chat window claims here and heartbeats; every
-    // panel reads `bridgeActive` from /state and stands down while a bridge
-    // holds the picks, so one pick becomes exactly one chip in one window.
-    if (url.pathname === '/bridge') {
-      if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'POST required' });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await readBody(req));
-      } catch {
-        sendJson(res, 400, { error: 'body must be JSON' });
-        return;
-      }
-      const body = parsed as { token?: unknown; release?: unknown } | null;
-      if (body?.release === true) {
-        const released = typeof body.token === 'string' ? bridge.release(body.token) : false;
-        sendJson(res, 200, { ok: released, bridgeActive: bridge.active() });
-        return;
-      }
-      const result = bridge.claim(typeof body?.token === 'string' ? body.token : undefined);
-      sendJson(res, 200, result as unknown as Json);
       return;
     }
 
@@ -1558,14 +1572,23 @@ const server = http.createServer(async (req, res) => {
 
       // Auto-start the dev server only for loopback URLs (the panel's Start
       // control owns manual starts; externally served workspaces skip this).
+      // #9: the wait is clamped (ensureDevServerWithin). A boot still running
+      // past it does not fail the open: the window launches anyway — its
+      // artboards show the error card + Retry until the server answers (V4-15)
+      // — and the answer says so: {ok:true, opening:true, serverStarting:true}.
       let started = false;
+      let serverStarting = false;
       if (isLoopbackUrl(configUrl)) {
-        const dev = await ensureDevServer(configUrl, { dir: dirValue });
-        if (!dev.up) {
+        const { result: dev, joined } = await ensureDevServerWithin(configUrl, { dir: dirValue });
+        if (!dev) {
+          serverStarting = true;
+          started = !joined;
+        } else if (!dev.up) {
           sendJson(res, 200, { ok: false, error: dev.error ?? 'the dev server is not available' });
           return;
+        } else {
+          started = dev.started;
         }
-        started = dev.started;
       }
 
       const registry = await readScreens(dirValue);
@@ -1582,7 +1605,7 @@ const server = http.createServer(async (req, res) => {
       const mode: CanvasMode = view.mode ?? getLastWorkspace()?.mode ?? 'edit';
       const viewScreens = mergeRegistryWithView(registry, view, configUrl);
 
-      try {
+      const openWindow = async (): Promise<Json> => {
         if (viewScreens.length === 0) {
           // No screens registered: fall back to the config url alone, exactly
           // like the { url } flow. The workspace echo still records the dir so
@@ -1595,7 +1618,7 @@ const server = http.createServer(async (req, res) => {
           setLastWorkspace({ dir: dirValue, screens: [], mode, activeScreen: null, view });
           startRegistryWatch(dirValue);
           wireBrowserHooks(browser);
-          sendJson(res, 200, { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started });
+          return { ok: true, url: nav.url, title: nav.title, settled: nav.settled, started };
         } else {
           const active = screenParam ?? viewScreens[0]!.id;
           const browser: Browser = await ensureBrowser();
@@ -1631,8 +1654,21 @@ const server = http.createServer(async (req, res) => {
           // modeApplied and per-screen state/message; V4 adds registryError
           // and shellBridge).
           const state = await browser.state();
-          sendJson(res, 200, { ok: true, started, ...state });
+          return { ok: true, started, ...(state as unknown as Record<string, Json>) };
         }
+      };
+
+      if (serverStarting) {
+        // The launch outlives this answer; a failure lands in the log (the
+        // row's /state poll shows no window and its open path retries).
+        void openWindow().catch((error: unknown) => {
+          console.error(`[design-canvas] background /open failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        sendJson(res, 200, { ok: true, opening: true, serverStarting: true, started, url: configUrl, title: '', settled: false });
+        return;
+      }
+      try {
+        sendJson(res, 200, await openWindow());
       } catch (error) {
         sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'open failed' });
       }
@@ -1661,45 +1697,6 @@ const server = http.createServer(async (req, res) => {
         /* best effort: closing the tracked window already succeeded */
       }
       sendJson(res, 200, { ok: true });
-      return;
-    }
-
-    // Briefly re-flash an element in the live window by CSS selector. The panel
-    // posts this while the user hovers a reference row so the corresponding
-    // element is visible in the window. Bearer-authed; answers ok:false (never a
-    // transport error) with no window open or when the selector matches nothing.
-    if (url.pathname === '/highlight') {
-      if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'POST required' });
-        return;
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(await readBody(req));
-      } catch {
-        sendJson(res, 400, { error: 'body must be JSON' });
-        return;
-      }
-      const selector = (parsed as { selector?: unknown } | null)?.selector;
-      if (typeof selector !== 'string' || selector === '') {
-        sendJson(res, 400, { error: 'selector is required' });
-        return;
-      }
-      const browser = getBrowser();
-      if (!browser) {
-        sendJson(res, 200, { ok: false, error: 'no live window is open' });
-        return;
-      }
-      try {
-        const highlighted = await browser.highlight(selector);
-        if (!highlighted) {
-          sendJson(res, 200, { ok: false, error: 'selector did not match any element' });
-          return;
-        }
-        sendJson(res, 200, { ok: true });
-      } catch (error) {
-        sendJson(res, 200, { ok: false, error: error instanceof Error ? error.message : 'highlight failed' });
-      }
       return;
     }
 

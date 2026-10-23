@@ -13,7 +13,11 @@ type ServiceRequest = { method: string; path: string; query?: Record<string, str
 type StubResult = { status: number; body: string };
 type Toast = { kind: string; message: string };
 
+// A real-sized frame: the row (and a real rail tab). The hidden 1×1 resolve
+// pane is simulated per test by shrinking these.
 const shim = {
+  innerWidth: 1024,
+  innerHeight: 768,
   addEventListener: () => undefined,
   removeEventListener: () => undefined,
   parent: { postMessage: () => undefined },
@@ -29,7 +33,7 @@ const main = await import('../panel/main.ts');
 const { NO_PROJECT_URL_MESSAGE, ATTACH_NEEDS_URL } = api;
 const { toggleMode, setProjectDirectory, setWorkspace, applyState, getModeState, getPendingOpen, loadStudioConfig, loadProjects, resolveCanvasCommand, allowResolve, startNewDesign, setSessionId, attachProjectReference, attachProjectPath, attachDroppedFiles } = main;
 const { runPickLoop, getPickCursor, resetPickLoop, applySessionSnapshot, handleSessionLifecycle, getWorkspaceState } = main;
-const { designMarkerKey, modeStorageKey, workspaceStorageKey } = await import('../panel/mode.ts');
+const { designMarkerKey, modeStorageKey, workspaceStorageKey, designSessionPrompt, briefLimitError, BRIEF_MAX } = await import('../panel/mode.ts');
 
 type StartSession = {
   providerId?: string;
@@ -92,7 +96,7 @@ function scaffoldJob(request: ServiceRequest): StubResult {
 
 const IS_SCAFFOLD_PATH = (path: string): boolean => path === '/scaffold' || path.startsWith('/scaffold/');
 
-function stubService(handler: (request: ServiceRequest) => StubResult): ServiceRequest[] {
+function stubService(handler: (request: ServiceRequest) => StubResult | Promise<StubResult>): ServiceRequest[] {
   const calls: ServiceRequest[] = [];
   (api.host as unknown as { serviceRequest: (r: ServiceRequest) => Promise<StubResult> }).serviceRequest = async (request) => {
     calls.push(request);
@@ -172,6 +176,32 @@ test('toggleMode(true) reads the workspace config and opens the canvas via POST 
   assert.ok(open, 'turning Design Mode ON opens the live canvas');
   assert.equal(open!.method, 'POST');
   assert.deepEqual(JSON.parse(open!.body ?? ''), { dir: '/p/site', focus: true }, 'spec §B + V4-8: {dir, focus:true} — the toggle turning ON IS user-initiated, so it may raise the window; the config url stays authoritative');
+});
+
+test('#9: an /open answered {opening, serverStarting} is success: Design Mode stays ON while the window launches', async () => {
+  stubService((request) => {
+    if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
+    if (request.path === '/open') {
+      return { status: 200, body: JSON.stringify({ ok: true, opening: true, serverStarting: true, started: true, url: 'http://localhost:5173', title: '', settled: false }) };
+    }
+    return { status: 404, body: '{}' };
+  });
+  const toasts = stubToast();
+  stubStorage();
+  useWorkspace();
+  setSessionId('ses_slowopen');
+
+  await resetToClosedWindow();
+  await toggleMode(true);
+  // The row's next /state tick: no window YET — it must not read as the user closing it.
+  await applyState({ url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false });
+  assert.equal(getModeState().on, true, 'a background open holds Design Mode ON');
+  assert.equal(toasts.some((toast) => toast.kind === 'error'), false, 'no failure toast for a slow boot');
+  // The window arrives, and a later close by hand still turns the mode OFF.
+  await applyState({ url: 'http://localhost:5173/', title: 'Site', lastPick: null, pickSeq: 0, windowOpen: true });
+  await applyState({ url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false });
+  assert.equal(getModeState().on, false, 'once the window was seen, a close is a close again');
+  setSessionId(null);
 });
 
 test('toggleMode(true) with the window already open focuses it and never opens a second', async () => {
@@ -434,18 +464,26 @@ test('/canvas <brief> creates the chat\'s workspace in the service root, toasts 
   const chip = await resolveCanvasCommand('checkout flow');
 
   const root = JSON.parse(WORKSPACES_BODY).root as string;
+  const dir = `${root}\\checkout-flow-3f2ad8`;
   const scaffold = calls.find((call) => call.path === '/scaffold');
   assert.ok(scaffold, 'the brief scaffolds the workspace');
   const scaffoldBody = JSON.parse(scaffold!.body ?? '') as { dir: string; type: string; brief: string; async?: boolean };
-  assert.equal(scaffoldBody.dir, `${root}\\checkout-flow-3f2ad8`, 'the dir is <service root>/<slug> — never a Documents path of our own');
+  assert.equal(scaffoldBody.dir, dir, 'the dir is <service root>/<slug> — never a Documents path of our own');
   assert.equal(scaffoldBody.brief, 'checkout flow');
   assert.match(scaffoldBody.type, /^(wireframe|hi-fi|prototype|deck|custom)$/, 'the scaffold uses a real design type');
   assert.equal(scaffoldBody.async, true, 'V4-11: the first-run scaffold is the async job — it can never hit the 20 s host cap');
-  assert.ok(calls.some((call) => call.path === '/scaffold/status'), 'the job is polled until it reports done');
-  assert.ok(calls.some((call) => call.path === '/open'), 'Design Mode ON opens the canvas');
-  assert.deepEqual(store.get(workspaceStorageKey('ses_3f2ad8')!), { dir: `${root}\\checkout-flow-3f2ad8`, name: 'checkout flow' }, 'the ws/<sessionId> record is stored');
+  assert.equal(calls.some((call) => call.path === '/scaffold/status' || call.path === '/open'), false, 'F3: the resolve neither polls the job nor opens — the row does');
+  assert.deepEqual(store.get(workspaceStorageKey('ses_3f2ad8')!), { dir, name: 'checkout flow' }, 'the ws/<sessionId> record is stored');
+  assert.deepEqual({ ...(store.get(main.openHandoffKey('ses_3f2ad8')!) as object), at: 0 }, { dir, jobId: 'job-1', at: 0 }, 'F3: the open is handed to the row with the job to wait out');
   assert.equal(getModeState().on, true);
   assert.match(chip?.text ?? '', /Brief: checkout flow/);
+
+  // The status row picks the handoff up: polls the job WITH its dir (F1), then opens.
+  assert.equal(await main.runOpenHandoff(), 'opened');
+  const status = calls.find((call) => call.path === '/scaffold/status');
+  assert.deepEqual(status?.query, { job: 'job-1', dir }, 'F1: the status poll names the job AND its dir');
+  assert.ok(calls.some((call) => call.path === '/open'), 'Design Mode ON opens the canvas — from the row');
+  assert.equal(store.has(main.openHandoffKey('ses_3f2ad8')!), false, 'the handoff is consumed — one row, one open');
   assert.ok(
     toasts.some((toast) => toast.kind === 'info' && /permission prompts/.test(toast.message)),
     'the FIRST scaffold toasts the out-of-folder permission heads-up (decision 4b)',
@@ -476,7 +514,7 @@ test('the permission heads-up fires only ONCE (decision 4b)', async () => {
   assert.equal(toasts.filter((toast) => /permission prompts/.test(toast.message)).length, 1, 'the heads-up never repeats');
 });
 
-test('/canvas <brief> scaffold failure toasts the error and returns no chip', async () => {
+test('/canvas <brief> scaffold failure THROWS the error (the host shows it) and attaches nothing', async () => {
   setWorkspace(null);
   const calls = stubService((request) => {
     if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
@@ -484,18 +522,60 @@ test('/canvas <brief> scaffold failure toasts the error and returns no chip', as
     return { status: 200, body: JSON.stringify({ ok: true }) };
   });
   const toasts = stubToast();
-  stubStorage();
+  const store = stubStorage();
   setSessionId('ses_fail');
   allowResolve(true);
 
-  const chip = await resolveCanvasCommand('hi-fi landing page');
+  await assert.rejects(() => resolveCanvasCommand('hi-fi landing page'), /no template for type/, 'the scaffold error is surfaced verbatim through the host\'s command-failed toast');
 
   assert.equal(calls.some((call) => call.path === '/scaffold'), true, 'the scaffold was attempted');
-  assert.ok(
-    toasts.some((toast) => toast.kind === 'error' && /no template for type/.test(toast.message)),
-    'the scaffold error is surfaced, not swallowed',
-  );
-  assert.equal(chip, null, 'no chip without a workspace');
+  assert.equal(toasts.some((toast) => /no template for type/.test(toast.message)), false, 'no second copy of the same error as our own toast');
+  assert.equal(store.has(modeStorageKey('ses_fail')!), false, 'no workspace → Design Mode is never armed for the row');
+});
+
+test('F2: /canvas in a new-chat draft (no session yet) throws the "send a message first" instruction', async () => {
+  setWorkspace(null);
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  stubToast();
+  stubStorage();
+  setSessionId(null);
+  allowResolve(true);
+
+  await assert.rejects(() => resolveCanvasCommand('checkout flow'), /Start this chat by sending any message first, then run \/canvas again\./);
+  await assert.rejects(() => resolveCanvasCommand(''), /sending any message first/, 'a bare /canvas too');
+  assert.equal(calls.some((call) => call.path === '/scaffold' || call.path === '/workspaces'), false, 'nothing is created without a session to key it to');
+});
+
+test('F3: the resolve returns BEFORE install/boot — no status poll, dev-server, focus or Chrome call while it is pending', async () => {
+  setWorkspace(null);
+  setSessionId('ses_fast');
+  stubToast();
+  const store = stubStorage();
+  const calls = stubService((request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (request.path === '/scaffold') {
+      const body = JSON.parse(request.body ?? '{}') as { dir?: string };
+      return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-fast', dir: body.dir, url: 'http://localhost:5173/' }) };
+    }
+    if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
+    // A job that never finishes: a resolve still awaiting it would hang here.
+    if (request.path === '/scaffold/status') return { status: 200, body: JSON.stringify({ state: 'installing', elapsedMs: 1000 }) };
+    return { status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/', title: 'Site', settled: true }) };
+  });
+  allowResolve(true);
+  await resetToClosedWindow();
+  try {
+    const chip = await resolveCanvasCommand('fast landing');
+    assert.ok(chip, 'the mode chip comes back at once');
+    const forbidden = ['/scaffold/status', '/open', '/server/start', '/focus'];
+    assert.deepEqual(calls.filter((call) => forbidden.includes(call.path)).map((call) => call.path), [], 'no install/boot/window work inside the resolve');
+    assert.equal(getModeState().on, true, 'Design Mode is ON for the row to act on');
+    assert.ok(store.has(main.openHandoffKey('ses_fast')!), 'the open is handed off');
+  } finally {
+    store.delete(main.openHandoffKey('ses_fast')!);
+    setWorkspace(null);
+    setSessionId(null);
+  }
 });
 
 // ---- the page's New-design flow (no registered project required) ----
@@ -903,9 +983,16 @@ test('/canvas export png posts POST /export and polls /export/status until done,
   setWorkspace({ dir: '/p/site', name: 'Site' });
   allowResolve(true);
 
+  setSessionId('ses_exp');
   const chip = await resolveCanvasCommand('export png');
 
-  assert.equal(chip, null, 'export toasts, it never returns a chat chip');
+  // #6: the resolve answers at once with the info chip (never bare null) …
+  assert.ok(chip, 'export answers with an info chip, never null');
+  assert.equal(chip!.id, 'canvas-export-ses_exp');
+  assert.equal(chip!.text, 'Export started — the result is toasted when it finishes.');
+  // … and this real pane toasts the outcome once the poll settles.
+  await main.getCanvasJobTask();
+  setSessionId(null);
   const post = calls.find((call) => call.path === '/export');
   assert.ok(post, 'POST /export reached the service');
   assert.equal(post!.method, 'POST');
@@ -933,6 +1020,7 @@ test('/canvas export without format args omits formats (the service writes both)
   allowResolve(true);
 
   await resolveCanvasCommand('export');
+  await main.getCanvasJobTask();
 
   const post = calls.find((call) => call.path === '/export');
   assert.deepEqual(JSON.parse(post!.body ?? ''), { dir: '/p/site' }, 'formats omitted → both formats');
@@ -953,6 +1041,7 @@ test('/canvas export surfaces a failed job with the per-screen failures', async 
   allowResolve(true);
 
   await resolveCanvasCommand('export pdf');
+  await main.getCanvasJobTask();
 
   assert.ok(toasts.some((toast) => toast.kind === 'error' && /Export failed: 1 screen — checkout \(print failed\)/.test(toast.message)), 'the failure is named');
   assert.ok(!toasts.some((toast) => toast.kind === 'success'), 'no success summary on failure');
@@ -964,10 +1053,11 @@ test('/canvas export with an unknown format refuses before touching the service'
   setWorkspace({ dir: '/p/site', name: 'Site' });
   allowResolve(true);
 
-  await resolveCanvasCommand('export svg');
+  // #6: a refusal is a THROWN failure the host shows, not a toast + "found nothing to attach".
+  await assert.rejects(resolveCanvasCommand('export svg'), /Unknown export format "svg"/);
 
   assert.equal(calls.some((call) => call.path === '/export'), false, 'no export is posted for a bad format');
-  assert.ok(toasts.some((toast) => toast.kind === 'error' && /Unknown export format "svg"/.test(toast.message)));
+  assert.equal(toasts.length, 0);
 });
 
 test('/canvas export with no workspace refuses with the actionable line', async () => {
@@ -977,10 +1067,10 @@ test('/canvas export with no workspace refuses with the actionable line', async 
   setWorkspace(null);
   allowResolve(true);
 
-  await resolveCanvasCommand('export png');
+  await assert.rejects(resolveCanvasCommand('export png'), /No canvas workspace yet/);
 
   assert.equal(calls.some((call) => call.path === '/export'), false);
-  assert.ok(toasts.some((toast) => toast.kind === 'error' && /No canvas workspace yet/.test(toast.message)));
+  assert.equal(toasts.length, 0);
 });
 
 test('a still-running export beyond the budget toasts the heads-up instead of polling forever', async () => {
@@ -1020,17 +1110,27 @@ test('/canvas critique posts POST /critique and returns the digest chip as a rev
   });
   stubToast();
   stubStorage();
+  const attached = stubAttach();
   setWorkspace({ dir: '/p/site', name: 'Site' });
   setSessionId('ses_crit');
   await loadStudioConfig();
   allowResolve(true);
 
-  const chip = await resolveCanvasCommand('critique');
+  // #6: the resolve answers at once with the info chip …
+  const started = await resolveCanvasCommand('critique');
+  assert.ok(started, 'critique answers with an info chip, never null');
+  assert.equal(started!.id, 'canvas-critique-ses_crit');
+  assert.equal(started!.text, 'Critique started — the review chip follows when it finishes.');
+  // … and the digest chip is attached when it lands, under the SAME id (it replaces the info chip).
+  await main.getCanvasJobTask();
+  assert.equal(attached.length, 1, 'the review chip follows');
+  const chip = attached[0];
 
   const critique = calls.find((call) => call.path === '/critique');
   assert.ok(critique, 'POST /critique reached the service');
   assert.deepEqual(JSON.parse(critique!.body ?? ''), { dir: '/p/site' }, 'D7-C body: {dir}');
   assert.ok(chip, 'the digest returns as a chat chip (the compose path)');
+  assert.equal(chip!.id, started!.id, 'the review chip replaces the info chip');
   assert.equal(chip!.providerId, 'design-canvas');
   assert.match(chip!.text ?? '', /^Canvas critique — deterministic gate digest \(advisory\):/);
   assert.match(chip!.text ?? '', /- home · 1280×800 · ready · http:\/\/localhost:5173\/home\.html/);
@@ -1039,7 +1139,7 @@ test('/canvas critique posts POST /critique and returns the digest chip as a rev
   assert.equal(chip!.url, 'http://localhost:5173', 'the chip carries the workspace url');
 });
 
-test('/canvas critique service failure toasts the error and returns no chip', async () => {
+test('/canvas critique service failure toasts the error and attaches no review chip', async () => {
   const calls = stubService((request) =>
     request.path === '/critique'
       ? { status: 200, body: JSON.stringify({ ok: false, error: 'no browser window open' }) }
@@ -1047,12 +1147,15 @@ test('/canvas critique service failure toasts the error and returns no chip', as
   );
   const toasts = stubToast();
   stubStorage();
+  const attached = stubAttach();
   setWorkspace({ dir: '/p/site', name: 'Site' });
   allowResolve(true);
 
   const chip = await resolveCanvasCommand('critique');
+  await main.getCanvasJobTask();
 
-  assert.equal(chip, null);
+  assert.match(chip?.text ?? '', /Critique started/, 'the resolve answered with the info chip');
+  assert.equal(attached.length, 0, 'no digest to attach');
   assert.ok(toasts.some((toast) => toast.kind === 'error' && /no browser window open/.test(toast.message)));
 });
 
@@ -1063,11 +1166,139 @@ test('/canvas critique without a workspace refuses without posting', async () =>
   setWorkspace(null);
   allowResolve(true);
 
-  const chip = await resolveCanvasCommand('critique');
+  await assert.rejects(resolveCanvasCommand('critique'), /No canvas workspace yet/);
 
-  assert.equal(chip, null);
   assert.equal(calls.some((call) => call.path === '/critique'), false);
-  assert.ok(toasts.some((toast) => toast.kind === 'error' && /No canvas workspace yet/.test(toast.message)));
+  assert.equal(toasts.length, 0);
+});
+
+test('#6: in the hidden 1×1 resolve pane export and critique throw the rail-tab line and touch nothing', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true, jobId: 'job-x' }) }));
+  const toasts = stubToast();
+  stubStorage();
+  setWorkspace({ dir: '/p/site', name: 'Site' });
+  allowResolve(true);
+  const frame = shim as { innerWidth: number; innerHeight: number };
+  frame.innerWidth = 1;
+  frame.innerHeight = 1;
+  main.setSurface('panel');
+  try {
+    await assert.rejects(resolveCanvasCommand('export png'), { message: 'Open the Design Canvas rail tab to run exports and critiques.' });
+    await assert.rejects(resolveCanvasCommand('critique'), { message: 'Open the Design Canvas rail tab to run exports and critiques.' });
+    assert.equal(calls.length, 0, 'no job is kicked from a pane that dies with its answer');
+    assert.equal(toasts.length, 0);
+  } finally {
+    frame.innerWidth = 1024;
+    frame.innerHeight = 768;
+    setWorkspace(null);
+  }
+});
+
+test('#10: /canvas with a brief over BRIEF_MAX throws the page\'s limit line and writes nothing', async () => {
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  const store = stubStorage();
+  stubToast();
+  setWorkspace(null);
+  setSessionId('ses_long');
+  allowResolve(true);
+  try {
+    const brief = 'b'.repeat(BRIEF_MAX + 1);
+    await assert.rejects(resolveCanvasCommand(brief), { message: briefLimitError(brief)! });
+    await assert.rejects(resolveCanvasCommand(`wireframe ${brief}`), /limit is 3000/);
+    assert.equal(calls.length, 0, 'no scaffold for a refused brief');
+    assert.equal(store.size, 0, 'no mode/ws/handoff write — nothing is silently sliced and stored');
+  } finally {
+    setSessionId(null);
+  }
+});
+
+// ---- #11: stale per-session storage keys are pruned on a real pane mount ----
+
+function stubSessionList(byProject: Record<string, string[] | Error>, state: 'ready' | 'loading' = 'ready'): void {
+  (api.host as unknown as { listSessions: (id: string) => Promise<unknown> }).listSessions = async (projectId) => {
+    const entry = byProject[projectId];
+    if (entry instanceof Error) throw entry;
+    return { kind: 'sessions', projectId, state, coverage: [], sessions: (entry ?? []).map((id) => ({ id, archivedAt: null })) };
+  };
+}
+
+function seedSessionKeys(store: Map<string, unknown>, ids: string[]): void {
+  for (const id of ids) {
+    store.set(workspaceStorageKey(id)!, { dir: `/p/${id}`, name: id });
+    store.set(modeStorageKey(id)!, { on: false });
+    store.set(main.openHandoffKey(id)!, { dir: `/p/${id}`, jobId: null, at: 1 });
+    store.set(designMarkerKey(id)!, { on: true, at: '2026-01-01T00:00:00.000Z' });
+  }
+  store.set('prefs/first-run', true);
+}
+
+test('#11: a real pane prunes ws/ mode/ canvas-open/ keys of gone sessions, never design/, once per mount', async () => {
+  const store = stubStorage();
+  seedSessionKeys(store, ['ses_live', 'ses_gone', 'ses_archived']);
+  stubListProjects([{ id: 'p1', name: 'one', directory: '/p/one' }, { id: 'p2', name: 'two', directory: '/p/two' }]);
+  stubSessionList({ p1: ['ses_live'], p2: ['ses_archived'] });
+  main.setSurface('panel');
+  main.resetStaleKeyPrune();
+  setSessionId(null);
+
+  const pruned = await main.pruneStaleSessionKeys();
+
+  assert.deepEqual(pruned.sort(), ['canvas-open/ses_gone', 'mode/ses_gone', 'ws/ses_gone']);
+  for (const id of ['ses_live', 'ses_archived']) {
+    assert.ok(store.has(workspaceStorageKey(id)!) && store.has(modeStorageKey(id)!) && store.has(main.openHandoffKey(id)!), `${id} keeps its keys`);
+  }
+  assert.ok(store.has(designMarkerKey('ses_gone')!), 'the permanent design marker is never pruned');
+  assert.ok(store.has('prefs/first-run'), 'unrelated keys are untouched');
+
+  // At most once per mount: a second call (even with more stale keys) does nothing.
+  seedSessionKeys(store, ['ses_gone2']);
+  assert.deepEqual(await main.pruneStaleSessionKeys(), []);
+  assert.ok(store.has(workspaceStorageKey('ses_gone2')!));
+});
+
+test('#11: a failed, loading or empty session list prunes nothing; the hidden pane never prunes', async () => {
+  const store = stubStorage();
+  seedSessionKeys(store, ['ses_a']);
+  const before = [...store.keys()].sort();
+  stubListProjects([{ id: 'p1', name: 'one', directory: '/p/one' }, { id: 'p2', name: 'two', directory: '/p/two' }]);
+  main.setSurface('panel');
+
+  stubSessionList({ p1: ['ses_other'], p2: new Error('host unavailable') });
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'one failed project list → no prune at all');
+
+  stubSessionList({ p1: ['ses_other'], p2: [] }, 'loading');
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'a list still loading is not complete');
+
+  stubSessionList({ p1: [], p2: [] });
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'an empty live set is treated as unknown');
+
+  (api.host as unknown as { listProjects: () => Promise<unknown> }).listProjects = async () => { throw new Error('nope'); };
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'the project list failing prunes nothing');
+
+  stubListProjects([{ id: 'p1', name: 'one', directory: '/p/one' }]);
+  stubSessionList({ p1: ['ses_other'] });
+  const frame = shim as { innerWidth: number; innerHeight: number };
+  frame.innerWidth = 1;
+  frame.innerHeight = 1;
+  try {
+    main.resetStaleKeyPrune();
+    assert.deepEqual(await main.pruneStaleSessionKeys(), [], 'the 1×1 resolve pane never prunes');
+  } finally {
+    frame.innerWidth = 1024;
+    frame.innerHeight = 768;
+  }
+  assert.deepEqual([...store.keys()].sort(), before, 'every key survived');
+
+  // The current session is always live, even when the host list lags behind it.
+  setSessionId('ses_a');
+  main.resetStaleKeyPrune();
+  assert.deepEqual(await main.pruneStaleSessionKeys(), []);
+  assert.ok(store.has(workspaceStorageKey('ses_a')!));
+  setSessionId(null);
 });
 
 // The panel command verbs never leak into the brief/mode paths.
@@ -1118,7 +1349,7 @@ const queuedScreen = (seq: number): QueuedScreenPick => ({
  */
 function stubPickQueue() {
   const queue: QueuedPick[] = [];
-  const acks: Array<{ seq: number; label: string }> = [];
+  const acks: Array<{ seq: number; label: string; dir?: string }> = [];
   const requests: ServiceRequest[] = [];
   let latest = 0;
   let waiters: Array<{ since: number; settle: (result: StubResult) => void }> = [];
@@ -1127,7 +1358,7 @@ function stubPickQueue() {
   (api.host as unknown as { serviceRequest: (r: ServiceRequest) => Promise<StubResult> }).serviceRequest = async (request) => {
     requests.push(request);
     if (request.path === '/picks/ack') {
-      acks.push(JSON.parse(request.body ?? '{}') as { seq: number; label: string });
+      acks.push(JSON.parse(request.body ?? '{}') as { seq: number; label: string; dir?: string });
       return ok({ ok: true });
     }
     if (request.path === '/picks') {
@@ -1195,7 +1426,7 @@ test('two queued picks become two chips IN ORDER, then ONE ack with the last seq
     const loop = runPickLoop(() => stop);
     await flush();
     assert.deepEqual(chips.map((chip) => chip.id), ['element-1', 'screen-2'], 'every queued pick becomes its own chip, in seq order — a menu screen-send rides the same path (V4-10)');
-    assert.deepEqual(queue.acks, [{ seq: 2, label: 'screen home' }], 'ONE ack carrying the LAST delivered seq rides to the canvas pill');
+    assert.deepEqual(queue.acks, [{ seq: 2, label: 'screen home', dir: '' }], 'ONE ack carrying the LAST delivered seq rides to the canvas pill');
     assert.equal(getPickCursor(), 2, 'the since-cursor advanced');
     stop = true;
     mock.timers.tick(12_000);
@@ -1270,7 +1501,7 @@ test('a failed attach is NOT acked; the queue redelivers and the retry acks once
     assert.equal(getPickCursor(), 0, 'the cursor held — the queued pick comes back');
     mock.timers.tick(1_000); await flush(); // the idle-pacled loop retries: since=0 redelivers seq 4, which now lands
     assert.deepEqual(chips.map((chip) => chip.id), ['element-4'], 'the retry delivered it');
-    assert.deepEqual(queue.acks, [{ seq: 4, label: '#e4' }], 'acked exactly once');
+    assert.deepEqual(queue.acks, [{ seq: 4, label: '#e4', dir: '' }], 'acked exactly once');
     assert.equal(getPickCursor(), 4);
     stop = true;
     mock.timers.tick(12_000);
@@ -1318,37 +1549,6 @@ test('a /picks request error falls back to wait=0 short polls every 250 ms, then
   }
 });
 
-test('a claimed bridge stands the row down; on release the queue delivers everything since the cursor (V4-5)', async () => {
-  setWorkspace(null);
-  stubToast();
-  const store = stubStorage();
-  await seedModeOn('ses_q5', store);
-  const chips = stubAttach();
-  const queue = stubPickQueue();
-  await applyState(live({ bridgeActive: true }));
-  resetPickLoop();
-  mock.timers.enable({ apis: ['setTimeout'] });
-  try {
-    let stop = false;
-    const loop = runPickLoop(() => stop);
-    await flush();
-    mock.timers.tick(5_000); await flush();
-    assert.deepEqual(queue.requests, [], 'no /picks reads while the bridge is claimed — the claim still stands the row down');
-    queue.push(queuedElement(1));
-    await applyState(live({ bridgeActive: false })); // bridge released
-    mock.timers.tick(900); await flush(); // the held loop re-checks at its idle cadence
-    assert.deepEqual(chips.map((chip) => chip.id), ['element-1'], 'the queued pick arrives on release, nothing lost');
-    assert.deepEqual(queue.acks, [{ seq: 1, label: '#e1' }]);
-    stop = true;
-    mock.timers.tick(12_000);
-    await flush(); // the timed-out long-poll answers idle → one more pacing sleep to drain
-    mock.timers.tick(1_000);
-    await loop;
-  } finally {
-    mock.timers.reset();
-  }
-});
-
 // ---- V4-4: the registry error is loud, once ----
 
 test('registryError toasts once per distinct message, repeats are silent, a clear re-arms it (V4-4)', async () => {
@@ -1371,6 +1571,9 @@ test('registryError toasts once per distinct message, repeats are silent, a clea
 // ---- V4-12: the agent turn is mirrored to the canvas (display-only) ----
 
 test('busy transitions post /agent-status exactly on the flip; a completed turn backstops /screens/sync (V4-12/V4-4)', async () => {
+  // Hermetic: the snapshot names the CURRENT session, so it never re-binds
+  // (and unbinds) the workspace whatever session an earlier test left behind.
+  setSessionId('ses_as');
   setWorkspace({ dir: '/p/site', name: 'Site' });
   stubStorage();
   stubToast();
@@ -1449,14 +1652,17 @@ test('async first run: ws/ stored AT THE POST, progress toasts per state, ONE wo
   await resetToClosedWindow();
   mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    const pending = resolveCanvasCommand('slow landing');
+    const chip = await resolveCanvasCommand('slow landing');
+    assert.ok(chip, 'F3: the command answers with its chip as soon as the files + ws/ exist');
+    assert.deepEqual(timeline, ['scaffold-post', 'ws-stored'], 'F3: the resolve stops at the fast half — no job poll, no open');
+    // The status row owns the long half: it claims the handoff and polls the job.
+    const pending = main.runOpenHandoff();
     await flush();
     for (let i = 0; i < 10 && !timeline.includes('open'); i += 1) {
       mock.timers.tick(2000);
       await flush();
     }
-    const chip = await pending;
-    assert.ok(chip, 'the command answers with its chip once the job is done');
+    assert.equal(await pending, 'opened');
     assert.deepEqual(timeline.slice(0, 7), ['scaffold-post', 'ws-stored', 'status:installing', 'status:installing', 'status:booting', 'status:done', 'open'], 'the V4-11 order: ws/ stored BEFORE any poll, the window opens only AFTER done');
     assert.equal(calls.filter((call) => call.path === '/scaffold').length, 1, 'exactly ONE scaffold POST — no orphan second workspace');
     assert.ok(base.has(workspaceStorageKey('ses_slow')!), 'ws/ses_slow persisted at the {ok:true, jobId} answer');
@@ -1491,8 +1697,9 @@ test('a failed scaffold job: error toast, NO open, and the ws/ record STAYS (V4-
   await resetToClosedWindow();
   mock.timers.enable({ apis: ['setTimeout'] });
   try {
-    const chip = await resolveCanvasCommand('doomed brief'); // the first status answers failed — no sleeps needed
-    assert.equal(chip, null, 'no chip for a workspace whose job failed');
+    const chip = await resolveCanvasCommand('doomed brief');
+    assert.ok(chip, 'F3: the files exist, so the chip (with the real path) still lands — the job is the row\'s');
+    assert.equal(await main.runOpenHandoff(), 'failed', 'the row reads the failed job'); // the first status answers failed — no sleeps needed
     assert.equal(calls.some((call) => call.path === '/open'), false, 'the window never opens on a failed job');
     assert.equal(calls.filter((call) => call.path === '/scaffold').length, 1, 'ONE workspace POST');
     assert.ok(store.has(workspaceStorageKey('ses_broke')!), 'the ws/ record STAYS — a retry re-opens this dir, it never scaffolds a second workspace');
@@ -1525,4 +1732,618 @@ test('a WORKSPACE_MISSING /open deletes the ws/ record, unbinds, and offers a ne
   assert.ok(toasts.some((toast) => /no longer exists/.test(toast.message) && /Start creates a new canvas/.test(toast.message)), 'the toast states the loss and the next action');
   assert.equal(store.has('lastUrl//p/gone'), false, 'a failed open persists nothing');
   setSessionId(null);
+});
+// =====================================================================
+// The /canvas + Start repair (F1–F8): the resolve hands the long half to
+// the status row, the row re-reads what other frames wrote, and every pick
+// chip carries the workspace path the model must edit.
+// =====================================================================
+
+test('F3/F5: the row adopts ws/ + mode/ another frame wrote and claims the open BEFORE /state can read "ON, no window" as a close', async () => {
+  setWorkspace(null);
+  setSessionId('ses_row');
+  stubToast();
+  const store = stubStorage();
+  await applySessionSnapshot({ id: 'ses_row', busy: false });
+  await resetToClosedWindow();
+  assert.equal(getModeState().on, false, 'the row loaded OFF before the hidden pane ran');
+  const calls = stubService((request) => {
+    if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
+    if (request.path === '/open') return { status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/home.html', title: 'Site', settled: true }) };
+    return { status: 404, body: '{}' };
+  });
+  // What the hidden resolve pane leaves behind, in its write order.
+  store.set(workspaceStorageKey('ses_row')!, { dir: '/p/site', name: 'Site' });
+  store.set(main.openHandoffKey('ses_row')!, { dir: '/p/site', jobId: null, at: Date.now() });
+  store.set(modeStorageKey('ses_row')!, { on: true, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: 'landing' });
+
+  await main.syncRowFromStorage();
+  assert.deepEqual(getWorkspaceState(), { dir: '/p/site', name: 'Site' }, 'the row binds the workspace the resolve created — no more "No canvas workspace yet"');
+  assert.equal(getModeState().on, true, 'the row adopts Design Mode ON from storage');
+  assert.equal(getPendingOpen(), true, 'the handoff holds the pending-open guard');
+  await applyState({ url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false });
+  assert.equal(getModeState().on, true, 'a closed-window /state read during the handoff is NOT a user close');
+  await flush();
+  await flush();
+  assert.ok(calls.some((call) => call.path === '/open'), 'the row opens the canvas the resolve asked for');
+  assert.equal(store.has(main.openHandoffKey('ses_row')!), false, 'the handoff is consumed');
+  setWorkspace(null);
+  setSessionId(null);
+});
+
+test('F5: a row holding picks because its in-memory mode is OFF re-reads mode/ and delivers once another frame turned it ON', async () => {
+  setWorkspace(null);
+  stubToast();
+  const store = stubStorage();
+  store.set(modeStorageKey('ses_held')!, { on: false, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' });
+  await applySessionSnapshot({ id: 'ses_held', busy: false });
+  assert.equal(getModeState().on, false);
+  const chips = stubAttach();
+  const queue = stubPickQueue();
+  queue.push(queuedElement(1));
+  resetPickLoop();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let stop = false;
+    const loop = runPickLoop(() => stop);
+    await flush();
+    assert.equal(chips.length, 0, 'held while the mode reads OFF');
+    store.set(modeStorageKey('ses_held')!, { on: true, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' });
+    mock.timers.tick(900); await flush(); await flush();
+    assert.deepEqual(chips.map((chip) => chip.id), ['element-1'], 'the storage re-read releases the hold — the pick lands');
+    assert.deepEqual(queue.acks.map((ack) => ack.seq), [1]);
+    stop = true;
+    mock.timers.tick(12_000);
+    await flush();
+    mock.timers.tick(1_000);
+    await loop;
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('F6/F7: with a workspace bound, a batch carries ONE compact mode chip first, and each pick chip names Workspace: and File:', async () => {
+  setWorkspace(null);
+  stubToast();
+  const store = stubStorage();
+  await seedModeOn('ses_paths', store);
+  const ws = ['C:', 'Docs', 'Design Canvas', 'site'].join('\\');
+  const homeFile = `${ws}\\home.html`;
+  setWorkspace({ dir: ws, name: 'Site' });
+  await applyState(live({ screens: [{ id: 'home', title: 'Home', url: 'http://127.0.0.1:5173/home.html', width: 1280, height: 800, active: true }] }));
+  const chips = stubAttach();
+  const queue = stubPickQueue();
+  queue.push(queuedElement(1));
+  queue.push(queuedElement(2, '#second'));
+  resetPickLoop();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let stop = false;
+    const loop = runPickLoop(() => stop);
+    await flush();
+    assert.deepEqual(chips.map((chip) => chip.id), ['design-mode-ses_paths', 'element-1', 'element-2'], 'F7: at most one mode chip per batch, ahead of the first pick');
+    const mode = chips[0]!.text ?? '';
+    assert.match(mode, /^Design Mode: ON/);
+    const modeLines = mode.split('\n');
+    assert.ok(modeLines.includes(`Workspace: ${ws}`), mode);
+    assert.match(mode, /it is the ONLY place design files are written/, 'the same path rule the full mode chip carries');
+    assert.ok(modeLines.includes(`- home · ${homeFile}`), 'screens are listed with absolute files');
+    for (const chip of chips.slice(1)) {
+      const chipLines = (chip.text ?? '').split('\n');
+      assert.ok(chipLines.includes(`Workspace: ${ws}`), 'F6: the pick names its workspace');
+      assert.ok(chipLines.includes(`File: ${homeFile}`), 'F6: …and the screen file to edit');
+    }
+    assert.deepEqual(queue.acks.map((ack) => ack.seq), [2], 'the mode chip never changes the ack');
+    stop = true;
+    mock.timers.tick(12_000);
+    await flush();
+    mock.timers.tick(1_000);
+    await loop;
+  } finally {
+    mock.timers.reset();
+    setWorkspace(null);
+  }
+});
+
+test('R5 (B4): a pick from another canvas dir is passed over — cursor advances, no chip, no ack — while own-dir picks name their own dir', async () => {
+  setWorkspace(null);
+  stubToast();
+  const store = stubStorage();
+  await seedModeOn('ses_dirs', store);
+  const ws = ['C:', 'Docs', 'Design Canvas', 'site'].join('\\');
+  const other = ['C:', 'Docs', 'Design Canvas', 'other'].join('\\');
+  setWorkspace({ dir: ws, name: 'Site' });
+  const chips = stubAttach();
+  const queue = stubPickQueue();
+  queue.push({ ...queuedElement(1, '#foreign'), dir: other, batch: 'b-x' });
+  // Same dir, different separators/drive case: still ours.
+  queue.push({ ...queuedElement(2, '#mine'), dir: 'c:/Docs/Design Canvas/site', batch: 'b-y' });
+  queue.push({ ...queuedElement(3, '#foreign2'), dir: other, batch: 'b-x' });
+  resetPickLoop();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let stop = false;
+    const loop = runPickLoop(() => stop);
+    await flush();
+    const pickChips = chips.filter((chip) => chip.id?.startsWith('element-'));
+    assert.deepEqual(pickChips.map((chip) => chip.id), ['element-2'], 'only the own-dir pick becomes a chip');
+    const lines = (pickChips[0]!.text ?? '').split('\n');
+    assert.ok(lines.includes('Workspace: c:/Docs/Design Canvas/site'), 'Workspace: uses the pick\'s own dir');
+    assert.deepEqual(queue.acks.map((ack) => ack.seq), [2], 'the ack covers the delivered pick only — a trailing foreign pick is never acked here');
+    assert.equal(queue.acks[0]!.dir, ws, "the ack names the row's bound dir — the service floors only that dir's picks");
+    assert.equal(getPickCursor(), 3, 'the cursor still moves past the foreign picks');
+    stop = true;
+    mock.timers.tick(12_000);
+    await flush();
+    mock.timers.tick(1_000);
+    await loop;
+  } finally {
+    mock.timers.reset();
+    setWorkspace(null);
+  }
+});
+
+test('R5 (B4): a delivered page carrying N>1 elements of one batch acks "N elements"; a single element keeps its own label', async () => {
+  setWorkspace(null);
+  stubToast();
+  const store = stubStorage();
+  await seedModeOn('ses_batch', store);
+  stubAttach();
+  const queue = stubPickQueue();
+  queue.push({ ...queuedElement(1, '#a'), batch: 'b-1' });
+  queue.push({ ...queuedElement(2, '#b'), batch: 'b-1' });
+  queue.push({ ...queuedElement(3, '#c'), batch: 'b-1' });
+  resetPickLoop();
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let stop = false;
+    const loop = runPickLoop(() => stop);
+    await flush();
+    assert.deepEqual(queue.acks, [{ seq: 3, label: '3 elements', dir: '' }], 'one ack, counted label');
+    queue.push({ ...queuedElement(4, '#solo'), batch: 'b-2' });
+    await flush();
+    assert.deepEqual(queue.acks.at(-1), { seq: 4, label: '#solo', dir: '' }, 'a one-element send names the element');
+    stop = true;
+    mock.timers.tick(12_000);
+    await flush();
+    mock.timers.tick(1_000);
+    await loop;
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('F2: Start in a draft chat (no session) toasts the "send a message first" instruction and creates nothing', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  const toasts = stubToast();
+  stubStorage();
+  await main.clickServerControl();
+  assert.ok(toasts.some((toast) => toast.kind === 'error' && /sending any message first/.test(toast.message)), 'a visible error, not only the screen-reader live region');
+  assert.equal(calls.length, 0, 'nothing is scaffolded');
+});
+
+test('F2: Start shows a busy state across the workspace creation and swallows a double click; a failure toasts', async () => {
+  setWorkspace(null);
+  setSessionId('ses_start');
+  const toasts = stubToast();
+  stubStorage();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const calls = stubService(async (request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (request.path === '/scaffold') {
+      const body = JSON.parse(request.body ?? '{}') as { dir?: string };
+      return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-s', dir: body.dir, url: 'http://localhost:5173/' }) };
+    }
+    if (request.path === '/scaffold/status') {
+      await gate;
+      return { status: 200, body: JSON.stringify({ state: 'failed', elapsedMs: 1000, error: 'npm exited with code 1' }) };
+    }
+    return { status: 404, body: '{}' };
+  });
+  const first = main.clickServerControl();
+  await flush();
+  assert.equal(main.getServerControlState().pending, true, 'the button is busy while the workspace is created');
+  await main.clickServerControl();
+  release();
+  await first;
+  assert.equal(calls.filter((call) => call.path === '/scaffold').length, 1, 'the second click was swallowed');
+  assert.equal(main.getServerControlState().pending, false, 'the busy state clears');
+  assert.ok(toasts.some((toast) => toast.kind === 'error' && /Could not create the canvas workspace/.test(toast.message)), 'the failure is a visible toast');
+  setWorkspace(null);
+  setSessionId(null);
+});
+
+test('F4/F8: the page flow scaffolds with the PAGE selections, and a failed job still ships the real path and binds ws/', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  const store = stubStorage();
+  stubToast();
+  const sessions = stubStartSession();
+  stubListProjects([]);
+  const calls = stubService((request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (request.path === '/scaffold') {
+      const body = JSON.parse(request.body ?? '{}') as { dir?: string };
+      return { status: 200, body: JSON.stringify({ ok: true, jobId: 'job-p', dir: body.dir, url: 'http://localhost:5173/' }) };
+    }
+    if (request.path === '/scaffold/status') return { status: 200, body: JSON.stringify({ state: 'failed', elapsedMs: 3000, error: 'npm exited with code 1' }) };
+    return { status: 200, body: JSON.stringify({ ok: true }) };
+  });
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  main.setPrompt('Quarterly review deck');
+  main.setPageChoice({ type: 'deck', direction: 'auto' });
+  try {
+    await startNewDesign();
+    const body = JSON.parse(calls.find((call) => call.path === '/scaffold')!.body ?? '{}') as { dir: string; type: string; fidelity: string };
+    assert.equal(body.type, 'deck', 'F8: the page\'s chosen type, not the row mode');
+    assert.equal(body.fidelity, 'hi-fi', 'F8/P4: the fidelity the page\'s type implies (FIDELITY_FOR_TYPE)');
+    assert.deepEqual(calls.find((call) => call.path === '/scaffold/status')?.query, { job: 'job-p', dir: body.dir }, 'F1: the page poll names the dir too');
+    assert.equal(sessions.length, 1, 'the session still starts');
+    assert.ok((sessions[0]!.text ?? '').includes(`Design Canvas workspace: ${body.dir}`), 'F4: the prompt names the folder that exists on disk');
+    assert.doesNotMatch(sessions[0]!.text ?? '', /ask if the path is missing/, 'F4: never the "missing path" fallback next to a real folder');
+    assert.deepEqual((store.get(workspaceStorageKey('s1')!) as { dir?: string } | undefined)?.dir, body.dir, 'F4: ws/ binds the new session to the real folder');
+  } finally {
+    main.setPageChoice({ type: 'hi-fi', direction: 'auto' });
+    main.setSurface('panel');
+    main.setPrompt('');
+    setWorkspace(null);
+  }
+});
+
+// =====================================================================
+// F9 + the hidden-pane safety net (rail package).
+// =====================================================================
+
+test('F9: a page-started session gets a FRESH canvas-open handoff before mode/, so its row opens the window instead of turning mode OFF', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  const store = stubStorage();
+  const order: string[] = [];
+  const set = (api.host as unknown as { storage: { set: (key: string, value: unknown) => Promise<void> } }).storage.set;
+  (api.host as unknown as { storage: { set: (key: string, value: unknown) => Promise<void> } }).storage.set = async (key, value) => {
+    order.push(key);
+    await set(key, value);
+  };
+  stubToast();
+  stubStartSession();
+  stubListProjects([]);
+  // Chrome takes a while to come up: the open stays in flight until released,
+  // which is exactly when a closed-window /state read could flip the mode.
+  let releaseOpen: () => void = () => undefined;
+  const openGate = new Promise<void>((resolve) => { releaseOpen = resolve; });
+  const calls = stubService(async (request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (IS_SCAFFOLD_PATH(request.path)) return scaffoldJob(request);
+    if (request.path === '/config') return { status: 200, body: CONFIG_BODY };
+    if (request.path === '/open') {
+      await openGate;
+      return { status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/home.html', title: 'Site', settled: true }) };
+    }
+    return { status: 200, body: JSON.stringify({ ok: true }) };
+  });
+  await resetToClosedWindow();
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  main.setPrompt('A pricing page');
+  const before = Date.now();
+  try {
+    await startNewDesign();
+    const handoff = store.get(main.openHandoffKey('s1')!) as { dir?: string; jobId?: unknown; at?: number } | undefined;
+    const ws = store.get(workspaceStorageKey('s1')!) as { dir: string };
+    assert.ok(handoff, 'the new session carries a canvas-open handoff');
+    assert.equal(handoff!.dir, ws.dir, 'it names the workspace the session was bound to');
+    assert.equal(handoff!.jobId, null, 'the page already waited out the job');
+    assert.ok((handoff!.at ?? 0) >= before, 'written fresh (the 5-minute staleness rule)');
+    assert.ok(order.indexOf(main.openHandoffKey('s1')!) < order.indexOf(modeStorageKey('s1')!), 'the handoff lands BEFORE mode/ turns ON');
+
+    // The new session's row mounts: it adopts ON and claims the handoff
+    // BEFORE /state can read "ON, no window" as the user closing it.
+    main.setSurface('status');
+    setWorkspace(null);
+    await applySessionSnapshot({ id: 's1', busy: false });
+    assert.equal(getModeState().on, true, 'the new session is born ON');
+    await main.syncRowFromStorage();
+    assert.equal(getPendingOpen(), true, 'the claimed handoff holds the pending-open guard');
+    await flush();
+    await applyState({ url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false });
+    assert.equal(getModeState().on, true, 'the row did NOT flip the mode OFF');
+    assert.ok(calls.some((call) => call.path === '/open'), 'the row is opening the canvas window');
+    releaseOpen();
+    await flush();
+    await flush();
+    assert.equal(store.has(main.openHandoffKey('s1')!), false, 'the handoff is consumed');
+  } finally {
+    main.setSurface('panel');
+    main.setPrompt('');
+    setWorkspace(null);
+    setSessionId(null);
+  }
+});
+
+test('isRealPane safety net: in a 1×1 panel frame (the hidden resolve pane) beginOpenHandoff claims nothing and opens nothing', async () => {
+  setWorkspace(null);
+  setSessionId('ses_tiny');
+  stubToast();
+  const store = stubStorage();
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true, url: 'http://localhost:5173/', title: '', settled: true }) }));
+  store.set(workspaceStorageKey('ses_tiny')!, { dir: '/p/site', name: 'Site' });
+  store.set(main.openHandoffKey('ses_tiny')!, { dir: '/p/site', jobId: null, at: Date.now() });
+  store.set(modeStorageKey('ses_tiny')!, { on: true, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' });
+  const frame = shim as { innerWidth: number; innerHeight: number };
+  frame.innerWidth = 1;
+  frame.innerHeight = 1;
+  main.setSurface('panel');
+  try {
+    assert.equal(main.isRealPane(), false);
+    assert.equal(await main.runOpenHandoff(), 'none', 'the hidden pane never claims');
+    await main.syncRowFromStorage();
+    await flush();
+    assert.ok(store.has(main.openHandoffKey('ses_tiny')!), 'the record is LEFT for the row');
+    assert.equal(calls.length, 0, 'no /open, /focus or job poll from a 1×1 frame');
+    // The row is exempt from the size gate (its section may be 24 px tall).
+    main.setSurface('status');
+    assert.equal(await main.runOpenHandoff(), 'opened', 'the row still claims in a small frame');
+  } finally {
+    frame.innerWidth = 1024;
+    frame.innerHeight = 768;
+    main.setSurface('panel');
+    setWorkspace(null);
+    setSessionId(null);
+  }
+});
+
+// ---- P2': the session text the page sends (main.ts wires the spec fields later) ----
+
+test("P2': questions off sends an assumptions-first prompt with no numbered questions", () => {
+  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'a dog-walking app', questions: false }, { dir: 'C:\\ws', name: 'ws' });
+  assert.match(text, /turned questions off/);
+  assert.doesNotMatch(text, /numbered questions/);
+  assert.match(text, /Your "Assumptions" list, then the build\./);
+  assert.match(text, /Questions first: off · Options: 1/);
+});
+
+test("P2': options 2 tells the agent the user wants 2 directions", () => {
+  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x', options: 2 }, { dir: 'C:\\ws', name: 'ws' });
+  assert.match(text, /the user wants 2 directions/);
+});
+
+test("P2': a brief over BRIEF_MAX is refused with the limit", () => {
+  assert.equal(BRIEF_MAX, 3000);
+  assert.equal(briefLimitError('x'.repeat(BRIEF_MAX)), null);
+  assert.match(briefLimitError('x'.repeat(BRIEF_MAX + 1)) ?? '', /limit is 3000/);
+});
+
+// ---- P4: the creation page wires its toggles, chips and starters into the session ----
+
+type PageStartSession = StartSession & { title?: string };
+
+/** The page flow against a service that scaffolds and finishes the job at once. */
+function pageFlowService(): ServiceRequest[] {
+  return stubService((request) => {
+    if (request.path === '/workspaces') return { status: 200, body: WORKSPACES_BODY };
+    if (IS_SCAFFOLD_PATH(request.path)) return scaffoldJob(request);
+    return { status: 200, body: JSON.stringify({ ok: true }) };
+  });
+}
+
+function pageReset(): void {
+  main.resetPagePrefs();
+  main.setPageChoice({ type: 'hi-fi', direction: 'auto', look: null, presetId: null });
+  main.setSurface('panel');
+  main.setPrompt('');
+  setProjectDirectory(null);
+  setWorkspace(null);
+  setSessionId(null);
+}
+
+test('P4 page: questions off + options 2 reach the session text, titled from the brief', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  setProjectDirectory(null);
+  stubStorage();
+  stubToast();
+  stubListProjects([]);
+  const sessions = stubStartSession() as PageStartSession[];
+  pageFlowService();
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  try {
+    await main.setPagePrefs({ questions: false, options: 2 });
+    main.setPrompt('A budget app, three screens');
+    await startNewDesign();
+    assert.equal(sessions.length, 1);
+    const text = sessions[0]!.text ?? '';
+    assert.match(text, /turned questions off/);
+    assert.match(text, /the user wants 2 directions/);
+    assert.match(text, /Questions first: off · Options: 2/);
+    assert.equal(sessions[0]!.title, 'Design · A budget app', 'the title is the first clause of the brief');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: an open project rides as read-only design context, with the chosen devices', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  stubStorage();
+  stubToast();
+  stubListProjects([]);
+  const sessions = stubStartSession() as PageStartSession[];
+  const calls = pageFlowService();
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  setProjectDirectory('/Users/me/projects/budget');
+  try {
+    await main.setPagePrefs({ devices: ['desktop', 'phone'] });
+    main.setPrompt('');
+    main.setPrompt('Goal: onboarding');
+    await startNewDesign();
+    const text = sessions[0]!.text ?? '';
+    // mode.ts words it "User project: …" today; the planner's wording is accepted too.
+    assert.match(text, /User(?:'s)? project(?: \(read-only design context\))?: "?\/Users\/me\/projects\/budget/, 'the project dir is named as read-only design context');
+    assert.match(text, /Look: take it from the user's project/, 'with a project open the default look is Match project');
+    assert.match(text, /Devices: phone 390×844 · desktop 1440×900/);
+    const body = JSON.parse(calls.find((call) => call.path === '/scaffold')!.body ?? '{}') as { devices?: string[]; projectDir?: string };
+    assert.deepEqual(body.devices, ['phone', 'desktop'], 'the scaffold gets the devices (R4 forwards them)');
+    assert.equal(body.projectDir, '/Users/me/projects/budget', 'the scaffold gets the project dir');
+    assert.equal(sessions[0]!.title, 'Design · Onboarding');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: a brief over 3000 characters is refused before any scaffold or session', async () => {
+  setWorkspace(null);
+  setSessionId(null);
+  stubStorage();
+  const toasts = stubToast();
+  stubListProjects([]);
+  const sessions = stubStartSession();
+  const calls = pageFlowService();
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  try {
+    main.setPrompt('x'.repeat(BRIEF_MAX + 1));
+    await startNewDesign();
+    assert.equal(sessions.length, 0, 'no session starts');
+    assert.equal(calls.some((call) => call.path === '/scaffold'), false, 'nothing is scaffolded');
+    assert.match(main.getPageDraft().error, /limit is 3000/);
+    assert.ok(toasts.some((toast) => toast.kind === 'error' && /limit is 3000/.test(toast.message)));
+    assert.equal(main.getPageDraft().prompt.length, BRIEF_MAX + 1, 'the draft is kept to shorten');
+  } finally {
+    pageReset();
+  }
+});
+
+/** A minimal DOM node: enough for the page renderers and a click. */
+class PageNode {
+  tagName: string;
+  className = '';
+  textContent = '';
+  disabled = false;
+  type = '';
+  title = '';
+  innerHTML = '';
+  dataset: Record<string, string> = {};
+  style: Record<string, string> = {};
+  children: PageNode[] = [];
+  listeners = new Map<string, Array<() => void>>();
+  constructor(tag: string) { this.tagName = tag.toUpperCase(); }
+  append(...nodes: PageNode[]): void { this.children.push(...nodes); }
+  setAttribute(): void {}
+  addEventListener(name: string, callback: () => void): void { this.listeners.set(name, [...(this.listeners.get(name) ?? []), callback]); }
+  click(): void { if (!this.disabled) for (const callback of this.listeners.get('click') ?? []) callback(); }
+  text(): string { return this.textContent + this.children.map((child) => child.text()).join(''); }
+  all(cls: string): PageNode[] {
+    const mine = this.className.split(' ').includes(cls) ? [this] : [];
+    return [...mine, ...this.children.flatMap((child) => child.all(cls))];
+  }
+}
+
+function withPageDocument<T>(run: () => T): T {
+  const doc = globalThis.document as unknown as Record<string, unknown>;
+  const before = { createElement: doc.createElement, createElementNS: doc.createElementNS, createTextNode: doc.createTextNode };
+  doc.createElement = (tag: string) => new PageNode(tag);
+  doc.createElementNS = (_ns: string, tag: string) => new PageNode(tag);
+  doc.createTextNode = (text: string) => Object.assign(new PageNode('#text'), { textContent: text });
+  try {
+    return run();
+  } finally {
+    Object.assign(doc, before);
+  }
+}
+
+test('P4 page: a starter card seeds the composer with its structured brief and its type', () => {
+  main.setSurface('page');
+  main.resetReferenceDraft();
+  main.setPrompt('');
+  try {
+    const wrap = withPageDocument(() => main.renderStarters()) as unknown as PageNode;
+    const cards = wrap.all('ds-starter');
+    assert.equal(cards.length, 15, 'three starters for each of the five types');
+    const pitch = cards.find((card) => card.text().includes('Pitch'));
+    assert.ok(pitch, 'the Pitch starter renders');
+    withPageDocument(() => pitch!.click());
+    assert.equal(main.getPageDraft().prompt, 'Goal: a short pitch deck.\nSlides: problem, solution, proof, pricing, ask');
+    assert.equal(main.getPageChoice().type, 'deck', 'the starter picks its type');
+    const print = cards.find((card) => card.text().includes('Print page'));
+    withPageDocument(() => print!.click());
+    assert.equal(main.getPageDraft().prompt, 'Goal: a one-page A4 flyer.\nSize: 794×1123');
+    assert.equal(main.getPageChoice().type, 'custom');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: Structure brief turns a draft into the skeleton once (idempotent), with the chosen devices', async () => {
+  stubStorage();
+  main.setSurface('page');
+  try {
+    await main.setPagePrefs({ devices: ['tablet'] });
+    main.setPrompt('Budget app onboarding. Three screens, calm.');
+    main.applyStructureBrief();
+    const once = main.getPageDraft().prompt;
+    assert.match(once, /^Goal: Budget app onboarding\./);
+    assert.match(once, /\nDevices: tablet\n/);
+    assert.match(once, /\nNotes: Three screens, calm\.$/);
+    main.applyStructureBrief();
+    assert.equal(main.getPageDraft().prompt, once, 'running it again changes nothing');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: questions/options/devices/look persist to prefs/page and restore on the next mount', async () => {
+  const store = stubStorage();
+  main.setSurface('page');
+  try {
+    await main.setPagePrefs({ questions: false, options: 3, devices: ['tablet'], look: { kind: 'direction', presetId: null, direction: 'editorial' } });
+    const saved = { questions: false, options: 3, devices: ['tablet'], look: { kind: 'direction', presetId: null, direction: 'editorial' } };
+    assert.deepEqual(store.get('prefs/page'), saved, 'written under prefs/page');
+    main.resetPagePrefs(); // a fresh mount starts from the defaults…
+    assert.equal(main.getPagePrefs().questions, true);
+    await main.loadPagePrefs(); // …and restores what was remembered
+    assert.deepEqual(main.getPagePrefs(), saved);
+    const { spec } = main.getPageChoice();
+    assert.equal(spec.direction, 'editorial', 'the remembered direction is the Look');
+    assert.equal(spec.look, 'new');
+    assert.equal(spec.fidelity, 'hi-fi', 'fidelity follows the type');
+    store.set('prefs/page', { questions: 'nope', options: 9, devices: ['watch', 'phone'], look: { kind: 'bogus', presetId: 'no-such', direction: 'neon' } });
+    main.resetPagePrefs();
+    await main.loadPagePrefs();
+    assert.deepEqual(main.getPagePrefs(), { questions: true, options: 'ask', devices: ['phone'], look: { kind: null, presetId: null, direction: 'auto' } }, 'malformed fields are ignored');
+  } finally {
+    pageReset();
+  }
+});
+
+test('P4 page: the hidden 1×1 resolve frame stays inert — no page prefs read, no claim, no service call', async () => {
+  const store = stubStorage();
+  const reads: string[] = [];
+  const storage = (api.host as unknown as { storage: { get: (key: string) => Promise<unknown> } }).storage;
+  storage.get = async (key) => {
+    reads.push(key);
+    return store.get(key);
+  };
+  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ ok: true }) }));
+  setSessionId('ses_tiny_p4');
+  const frame = shim as { innerWidth: number; innerHeight: number };
+  frame.innerWidth = 1;
+  frame.innerHeight = 1;
+  main.setSurface('panel');
+  try {
+    assert.equal(main.isRealPane(), false);
+    await main.loadPagePrefs();
+    assert.equal(reads.includes('prefs/page'), false, 'the page prefs are a page-surface read only');
+    assert.equal(await main.runOpenHandoff(), 'none');
+    assert.equal(calls.length, 0, 'no service call from a 1×1 frame');
+  } finally {
+    frame.innerWidth = 1024;
+    frame.innerHeight = 768;
+    pageReset();
+  }
 });

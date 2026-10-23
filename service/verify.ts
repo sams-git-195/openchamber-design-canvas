@@ -233,18 +233,7 @@ export function detectOscillation(
   return { reappeared, flipped };
 }
 
-let history: RunSnapshot[] = [];
-let lastReport: VerifyReport | null = null;
-
-/** The most recent report, for `GET /verify/report`. */
-export function getLastReport(): VerifyReport | null {
-  return lastReport;
-}
-
-/** Forget cross-run oscillation history (tests and a fresh session). */
-export function resetVerifyHistory(): void {
-  history = [];
-}
+const history: RunSnapshot[] = [];
 
 // ---- provider verification block ------------------------------------------
 
@@ -403,7 +392,6 @@ export async function runVerification(opts: RunVerificationOptions): Promise<Ver
     iterations,
     ...(halts.length > 0 ? { halted: halts[0] } : {}),
   };
-  lastReport = report;
   return report;
   } finally {
     if (getController() !== 'user' && (await browser.state()).windowOpen) {

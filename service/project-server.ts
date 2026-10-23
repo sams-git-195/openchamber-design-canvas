@@ -7,7 +7,7 @@
 // service (and its Chrome window) is the only thing the panel controls; the dev
 // server is the project's own process and outlives a single open call.
 //
-// Loopback only: Design Studio drives local dev servers, never remote hosts.
+// Loopback only: Design Canvas drives local dev servers, never remote hosts.
 //
 // Lifetime: a started server is spawned `detached`, so its pid is also its
 // process-GROUP id. Killing the positive pid would only kill the shell, leaving
@@ -105,7 +105,14 @@ export type DevServerRecord = {
 export type StopDevServerResult = { stopped: boolean; error?: string };
 
 /** What `getDevServerStatus` reports: reachability, port and group leader. */
-export type DevServerStatus = { up: boolean; port: number | null; pid?: number; error?: string };
+export type DevServerStatus = {
+  up: boolean;
+  port: number | null;
+  pid?: number;
+  error?: string;
+  /** #9: a start for this dir is still booting in the background (not up yet). */
+  starting?: boolean;
+};
 
 /** What `ensureDevServer` accepts. */
 export type EnsureDevServerOptions = {
@@ -147,6 +154,15 @@ const activeSpawns = new Map<string, Promise<EnsureDevServerResult>>();
  * fast, while the on-disk record lets a restarted service stop it too.
  */
 const serverRecords = new Map<string, DevServerRecord>();
+
+/**
+ * #9: whether an `ensureDevServer` for `dir` is in flight right now. Routes
+ * that answer before a slow boot finishes use it to report `starting`, and to
+ * tell their own spawn from joining someone else's.
+ */
+export function isDevServerStarting(dir: string): boolean {
+  return activeSpawns.has(path.resolve(dir));
+}
 
 function serverStatePath(dir: string): string {
   return path.join(dir, SERVER_STATE_DIR, SERVER_STATE_FILE);
@@ -596,6 +612,23 @@ async function stopDevServerWin32(key: string, record: DevServerRecord): Promise
   return { stopped: true };
 }
 
+export type DevServerPeek = { recorded: boolean; up: boolean; port: number | null };
+
+/**
+ * R4 (F2): a cheap look at a workspace's dev server for the GET /workspaces
+ * list — the in-memory or on-disk record plus a loopback reachability probe
+ * of its port. Deliberately NO process-identity check (the Windows tasklist
+ * call is too slow for a list); `up` only says the recorded port answers.
+ * POST /server/stop still runs the full verification before killing anything.
+ */
+export async function peekDevServer(dir: string): Promise<DevServerPeek> {
+  const key = path.resolve(dir);
+  const record = serverRecords.get(key) ?? (await readServerRecord(key));
+  if (!record) return { recorded: false, up: false, port: null };
+  const up = record.port !== null ? await isReachable(`http://127.0.0.1:${record.port}/`) : false;
+  return { recorded: true, up, port: record.port };
+}
+
 /**
  * Status of the dev server recorded for `dir`: whether the recorded port answers
  * and the group leader's pid. With no record the status stays silent
@@ -617,6 +650,14 @@ async function stopDevServerWin32(key: string, record: DevServerRecord): Promise
  */
 export async function getDevServerStatus(dir: string): Promise<DevServerStatus> {
   const key = path.resolve(dir);
+  // #9: a start still in flight reports `starting`, not the half-born record:
+  // mid-boot the port is unbound, which the identity checks below would read
+  // as "not ours" (win32) or "down" — and a status poll must never clear the
+  // record of a spawn that is still coming up.
+  if (isDevServerStarting(key)) {
+    const record = serverRecords.get(key);
+    return { up: false, port: record?.port ?? null, starting: true };
+  }
   const record = serverRecords.get(key) ?? (await readServerRecord(key));
   if (!record) {
     // No record: still name an occupied configured port instead of staying

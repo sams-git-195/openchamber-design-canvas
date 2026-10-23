@@ -39,7 +39,7 @@ const approvedTemp = '/private/var/folders/hx/6ykzfqb5519dsfc25bzxxrzc0000gn/T/o
 const tempRoot = await access(approvedTemp).then(() => approvedTemp, () => tmpdir());
 const scratch = await mkdtemp(join(tempRoot, 'reference-breaker-'));
 await mkdir(join(scratch, 'panel'));
-for (const name of ['api', 'attach-dialog', 'compose', 'craft', 'harness', 'main', 'mode', 'reference-draft', 'settings', 'tokens']) {
+for (const name of ['api', 'attach-dialog', 'copy', 'craft', 'diagnostics', 'main', 'mode', 'reference-draft', 'version']) {
   await cp(join(root, 'panel', `${name}.ts`), join(scratch, 'panel', `${name}.ts`));
 }
 await cp(join(root, 'shared'), join(scratch, 'shared'), { recursive: true });
@@ -56,8 +56,8 @@ async function linkNodeModules(target: string, dest: string): Promise<void> {
 }
 await linkNodeModules(join(root, 'node_modules'), join(scratch, 'node_modules'));
 let source = await readFile(join(scratch, 'panel/main.ts'), 'utf8');
-// Export-only seam: execute the real Ideas renderer/click handler, not a replica.
-source += '\nexport { renderIdeas };\n';
+// main.ts exports the real Start-from renderer (renderStarters); its click
+// handler runs here, not a replica.
 const mutant = process.env.REFERENCE_BREAKER_MUTANT;
 function replaceExactlyOnce(from: string, to: string): void {
   assert.equal(source.split(from).length - 1, 1, 'scratch mutant must match exactly once');
@@ -69,16 +69,16 @@ if (mutant === 'stale-result') {
   replaceExactlyOnce('sourceDirectory: resolved.sourceDirectory, label: fileBaseName(resolved.path)', 'sourceDirectory: attachProject().dir, label: fileBaseName(resolved.path)');
 } else if (mutant === 'ideas-while-busy') {
   replaceExactlyOnce('    card.disabled = state.pageBusy;', '    card.disabled = false;');
-  replaceExactlyOnce('      if (state.pageBusy) return;\n      state.prompt = idea.prompt;', '      state.prompt = idea.prompt;');
+  replaceExactlyOnce('      if (state.pageBusy) return;\n      state.prompt = starter.prompt;', '      state.prompt = starter.prompt;');
 } else if (mutant === 'unconsumed-delivery') {
   replaceExactlyOnce("    if (spec.references !== undefined) {\n      cancelReferenceValidation();\n      state.references = [];\n      state.prompt = '';\n      attachPathDraft = '';\n      referenceError = '';\n    }", '    // Scratch fault: confirmed delivery does not consume its draft.');
 } else if (mutant === 'unhandled-success-toast') {
-  replaceExactlyOnce("    try {\n      await host.toast({ kind: 'success', message: 'Design session started — its controls are in Work Status.' });\n    } catch {\n      /* Notification transport is not session-delivery failure. */\n    }", "    await host.toast({ kind: 'success', message: 'Design session started — its controls are in Work Status.' });");
+  replaceExactlyOnce("    try {\n      await host.toast(copy.successToast(copy.DESIGN_STARTED));\n    } catch {\n      /* Notification transport is not session-delivery failure. */\n    }", "    await host.toast(copy.successToast(copy.DESIGN_STARTED));");
 } else if (mutant === 'empty-reference-preflight') {
   // The oversized-brief rejection has two layers (the page guard + the
   // submission cap). The mutant empties BOTH: B1 must still catch the now
   // silent clamp — that is the adequacy this probe demands.
-  replaceExactlyOnce('if (spec.brief.length > GUEST_COMPOSE_TEXT_MAX) {', 'if (false) { /* Scratch fault: the oversized-brief guard is gone */');
+  replaceExactlyOnce('if (tooLong) {', 'if (false) { /* Scratch fault: the oversized-brief guard is gone */');
   const draftSource = await readFile(join(scratch, 'panel', 'reference-draft.ts'), 'utf8');
   const draftPatched = draftSource.replace('if (submittedText.length > PAYLOAD_LIMIT) {', 'if (false) { /* Scratch fault: no payload preflight */');
   assert.notEqual(draftPatched, draftSource, 'the reference-draft preflight must exist to be neutralized');
@@ -88,7 +88,7 @@ if (mutant === 'stale-result') {
 }
 await writeFile(join(scratch, 'panel/main.ts'), source);
 const api = await import(pathToFileURL(join(scratch, 'panel/api.ts')).href) as typeof import('../panel/api.ts');
-const main = await import(pathToFileURL(join(scratch, 'panel/main.ts')).href) as typeof import('../panel/main.ts') & { renderIdeas: () => FixtureNode };
+const main = await import(pathToFileURL(join(scratch, 'panel/main.ts')).href) as typeof import('../panel/main.ts');
 
 type Request = { path: string; body?: string; query?: Record<string, string> };
 type Result = { status: number; body: string };
@@ -196,7 +196,7 @@ test('A2 pending source p1 survives target switch and submits to p2', async () =
   }, 'reference source must not become the delivery target');
 });
 
-test('A3 delivered A must not erase a newer Ideas draft B', async () => {
+test('A3 delivered A must not erase a newer starter draft B', async () => {
   await page();
   await main.attachProjectPath('src/app.ts');
   const delivery = deferred<Delivery>();
@@ -204,15 +204,15 @@ test('A3 delivered A must not erase a newer Ideas draft B', async () => {
   host.startSession = async () => { started.resolve(undefined); return delivery.promise; };
   const sendingA = main.startNewDesign();
   await started.promise;
-  const ideas = main.renderIdeas();
-  const card = ideas.children[1]!.children[0]!;
+  const starters = main.renderStarters() as unknown as FixtureNode;
+  const card = starters.children[1]!.children[0]!;
   card.click(); // exact production click handler; FixtureNode respects disabled
   const newerPrompt = main.getPageDraft().prompt;
   delivery.resolve({ sessionId: 'sent-A', sent: 'sent' });
   await sendingA;
   const expected = newerPrompt === 'Draft A: settings screen' ? '' : newerPrompt;
   console.info('A3 evidence:', JSON.stringify({ ideaDisabled: card.disabled, newerPrompt, retainedPrompt: main.getPageDraft().prompt }));
-  assert.equal(main.getPageDraft().prompt, expected, 'successful A may clear its own draft, never the newer clickable Ideas draft');
+  assert.equal(main.getPageDraft().prompt, expected, 'successful A may clear its own draft, never the newer clickable starter draft');
 });
 
 test('A4 toast rejection after delivery must not make the same references resendable', async () => {
@@ -221,7 +221,7 @@ test('A4 toast rejection after delivery must not make the same references resend
   // The canvas flow gained a scaffold success toast BEFORE delivery; the seam
   // this test pins is the DELIVERY notification (the failure of which must
   // never un-deliver), so only the session-started toast rejects.
-  host.toast = async (toast) => { if (toast.kind === 'success' && /Design session started/.test(toast.message)) throw new Error('toast transport unavailable'); };
+  host.toast = async (toast) => { if (toast.kind === 'success' && /Design started/.test(toast.message)) throw new Error('toast transport unavailable'); };
   await main.startNewDesign();
   const firstDraft = main.getPageDraft();
   host.toast = async () => undefined;

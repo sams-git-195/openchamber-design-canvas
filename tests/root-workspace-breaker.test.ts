@@ -20,7 +20,7 @@ const mutant = process.env.ROOT_WORKSPACE_BREAKER_MUTANT;
 assert.ok(mutant === undefined || mutant === 'restore-isolation-write' || mutant === 'keep-old-plugin', 'known scratch mutant');
 await mkdir(path.join(scratch, 'panel'));
 await mkdir(path.join(scratch, 'service'));
-for (const name of ['api', 'attach-dialog', 'compose', 'craft', 'harness', 'main', 'mode', 'reference-draft', 'settings', 'tokens']) {
+for (const name of ['api', 'attach-dialog', 'copy', 'craft', 'diagnostics', 'main', 'mode', 'reference-draft', 'version']) {
   await cp(path.join(root, 'panel', `${name}.ts`), path.join(scratch, 'panel', `${name}.ts`));
 }
 await cp(path.join(root, 'shared'), path.join(scratch, 'shared'), { recursive: true });
@@ -210,7 +210,7 @@ test('R2 refresh actual old disk artifact ignores stale and late requests withou
   console.info('R2 evidence:', JSON.stringify({ moves: running.moves.length + legacy.moves.length, inventoryUnchanged: JSON.stringify(Object.entries(after).sort()) === JSON.stringify(Object.entries(expected).sort()) }));
   assert.deepEqual({ moves: [...running.moves, ...legacy.moves], inventory: after }, { moves: [], inventory: expected }, 'refresh/context must preserve root, existing child, screenshots and request bytes/paths');
   assert.ok(firstS.system.some((item) => /You are an expert designer/.test(item.text)), 'refreshed disk plugin still injects harness');
-  const nudged = (event: Event): boolean => event.system.some((item) => /A file was just edited in this Design Studio session/.test(item.text));
+  const nudged = (event: Event): boolean => event.system.some((item) => /A file was just edited in this Design Canvas session/.test(item.text));
   assert.deepEqual([nudged(tBeforeEdit), nudged(sAfterEdit), nudged(tAfterEdit), nudged(sConsumed)], [false, true, true, false], 'sibling edit nudges are session-local and consumed once');
   const handwritten = await mkdtemp(path.join(scratch, 'handwritten-project-'));
   const manual = 'export default { id: "user-owned-plugin" };\n';

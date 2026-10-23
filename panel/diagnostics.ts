@@ -1,0 +1,109 @@
+// Diagnostics: the error ring buffer and the copyable report. Pure (no host, no
+// DOM), so the shape is testable on its own; main.ts supplies the readings.
+
+/** The ring keeps the newest N errors. */
+export const DIAG_ERRORS_MAX = 20;
+/** One entry's message is clipped here, so 20 of them stay a small report. */
+export const DIAG_MESSAGE_MAX = 300;
+
+export type DiagnosticError = {
+  /** ISO timestamp of the newest occurrence. */
+  at: string;
+  /** Where it came from: `GET /settings`, `scaffold`, `start-session`, … */
+  source: string;
+  message: string;
+  /** Present (> 1) when the same error repeated back to back. */
+  count?: number;
+};
+
+export function isDiagnosticError(value: unknown): value is DiagnosticError {
+  if (!value || typeof value !== 'object') return false;
+  const entry = value as Partial<DiagnosticError>;
+  return typeof entry.at === 'string' && typeof entry.source === 'string' && typeof entry.message === 'string'
+    && (entry.count === undefined || (typeof entry.count === 'number' && Number.isFinite(entry.count)));
+}
+
+/** Whatever storage holds, as a valid, capped, newest-first list. */
+export function sanitizeDiagnosticErrors(value: unknown): DiagnosticError[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isDiagnosticError).slice(0, DIAG_ERRORS_MAX);
+}
+
+/**
+ * Add one error, newest first, capped at `DIAG_ERRORS_MAX`. The same
+ * source + message back to back (a poll hitting a dead service every second)
+ * refreshes the newest entry and counts instead of flooding the ring.
+ */
+export function addDiagnosticError(
+  list: readonly DiagnosticError[],
+  source: string,
+  message: string,
+  at: Date = new Date(),
+): DiagnosticError[] {
+  const text = message.length > DIAG_MESSAGE_MAX ? `${message.slice(0, DIAG_MESSAGE_MAX - 1)}…` : message;
+  const newest = list[0];
+  if (newest && newest.source === source && newest.message === text) {
+    return [{ ...newest, at: at.toISOString(), count: (newest.count ?? 1) + 1 }, ...list.slice(1)].slice(0, DIAG_ERRORS_MAX);
+  }
+  return [{ at: at.toISOString(), source, message: text }, ...list].slice(0, DIAG_ERRORS_MAX);
+}
+
+/**
+ * Two views of the same ring (this frame's memory and what storage holds) as
+ * one list: an error is identified by source + message, keeps its newest time
+ * and highest count, newest first, capped.
+ */
+export function mergeDiagnosticErrors(a: readonly DiagnosticError[], b: readonly DiagnosticError[]): DiagnosticError[] {
+  const byKey = new Map<string, DiagnosticError>();
+  for (const entry of [...a, ...b]) {
+    const key = `${entry.source}\u0000${entry.message}`;
+    const kept = byKey.get(key);
+    if (!kept) {
+      byKey.set(key, entry);
+      continue;
+    }
+    const count = Math.max(kept.count ?? 1, entry.count ?? 1);
+    const newest = kept.at >= entry.at ? kept : entry;
+    byKey.set(key, count > 1 ? { ...newest, count } : { ...newest });
+  }
+  return [...byKey.values()].sort((x, y) => (x.at < y.at ? 1 : x.at > y.at ? -1 : 0)).slice(0, DIAG_ERRORS_MAX);
+}
+
+export type DiagnosticsSnapshot = {
+  version: string;
+  apiVersion: number;
+  /** `host.serviceStatus()` — stopped / starting / ready / failed — or why it could not be read. */
+  service: string;
+  /** `GET /settings`, or null when unreadable. */
+  settings: { workspaceRoot: string; source: string; previousRoots: number } | null;
+  /** The bound workspace's folder, or null when this chat has none. */
+  workspace: string | null;
+  /** The bound workspace's recorded dev server, or null when unknown. */
+  devServer: { recorded: boolean; up: boolean; port: number | null } | null;
+  errors: DiagnosticError[];
+};
+
+export function formatDevServer(server: DiagnosticsSnapshot['devServer'], workspace: string | null): string {
+  if (!workspace) return 'no workspace bound to this chat';
+  if (!server) return 'unknown';
+  if (!server.recorded) return 'not started by Design Canvas';
+  return `${server.up ? 'up' : 'down'}${server.port ? ` on port ${server.port}` : ''}`;
+}
+
+/** The plain-text report "Copy diagnostics" puts on the clipboard. */
+export function formatDiagnostics(snapshot: DiagnosticsSnapshot): string {
+  const lines = [
+    `Design Canvas ${snapshot.version} (apiVersion ${snapshot.apiVersion})`,
+    `Service: ${snapshot.service}`,
+    snapshot.settings
+      ? `Designs folder: ${snapshot.settings.workspaceRoot} (source: ${snapshot.settings.source}; previous folders: ${snapshot.settings.previousRoots})`
+      : 'Designs folder: unreadable',
+    `Workspace: ${snapshot.workspace ?? 'none'}`,
+    `Dev server: ${formatDevServer(snapshot.devServer, snapshot.workspace)}`,
+    `Recent errors (${snapshot.errors.length}, newest first):`,
+    ...(snapshot.errors.length === 0
+      ? ['  none']
+      : snapshot.errors.map((entry) => `  ${entry.at} [${entry.source}]${entry.count && entry.count > 1 ? ` ×${entry.count}` : ''} ${entry.message}`)),
+  ];
+  return lines.join('\n');
+}

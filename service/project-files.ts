@@ -1,11 +1,8 @@
-// Project file listing.
+// Pasted-reference validation for `POST /reference`.
 //
-// The panel iframe cannot touch the filesystem, so when the user wants to
-// attach a FILE reference to a message it asks the service for the files under
-// a project root and shows them in a picker. The listing is deliberately
-// narrow: the source-shaped files a user is likely to attach, never the noise a
-// dependency install or a build leaves behind, and never a path that escapes
-// the project root through a symlink.
+// The panel iframe cannot touch the filesystem, so when the user pastes a file
+// path to attach as a reference it asks the service to confirm the path names a
+// readable regular file, confined to the project when relative.
 import { promises as fs, constants } from 'node:fs';
 import path from 'node:path';
 
@@ -67,111 +64,3 @@ export async function resolveReferencePath(dir: string, input: string): Promise<
   return { path: canonical, sourceDirectory };
 }
 
-/**
- * Directories that are never descended into, in addition to any dotted
- * directory. A dotted directory is tooling: `.git`, `.next`, `.cache`,
- * `.design-studio`, `.openchamber`, and the like. Dotted *files* are kept at
- * every level, since project config lives in files such as
- * `.design-studio.json`.
- */
-export const SKIP_DIRS = new Set(['node_modules', 'dist', 'build']);
-
-/** How many files a listing returns by default, and the hard ceiling. */
-export const DEFAULT_FILE_LIMIT = 500;
-export const MAX_FILE_LIMIT = 2000;
-
-function shouldSkipDir(name: string): boolean {
-  return name.startsWith('.') || SKIP_DIRS.has(name);
-}
-
-/** True when `target` is `root` or lies beneath it. Both are real paths. */
-function isInside(root: string, target: string): boolean {
-  return target === root || target.startsWith(root + path.sep);
-}
-
-/**
- * List the files under an absolute `dir`, recursively, as sorted POSIX paths
- * relative to `dir`. Directories are never returned. The walk skips
- * `node_modules`, `dist`, `build`, and any dotted directory (see `SKIP_DIRS`),
- * and it never follows a symlink whose real target lies outside `dir` or would
- * revisit a directory already walked. The result is capped at `limit` entries
- * (default 500, hard max 2000).
- *
- * Throws when `dir` is not absolute, when `limit` is not a positive integer, or
- * when `dir` itself cannot be read.
- */
-export async function listProjectFiles(dir: string, limit?: number): Promise<string[]> {
-  if (typeof dir !== 'string' || !path.isAbsolute(dir)) {
-    throw new Error('dir must be an absolute path');
-  }
-  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
-    throw new Error('limit must be a positive integer');
-  }
-  const cap = Math.min(limit ?? DEFAULT_FILE_LIMIT, MAX_FILE_LIMIT);
-
-  const rootAbs = path.resolve(dir);
-  // Resolve a symlinked root itself (on macOS /tmp is a symlink to /private/tmp)
-  // so the escape check compares against the real location.
-  const rootReal = await fs.realpath(rootAbs);
-
-  const found: string[] = [];
-  const visitedDirs = new Set<string>([rootReal]);
-
-  const walk = async (absDir: string): Promise<void> => {
-    if (found.length >= cap) return;
-    let entries;
-    try {
-      entries = await fs.readdir(absDir, { withFileTypes: true });
-    } catch {
-      return; // an unreadable subdirectory is skipped, never fatal
-    }
-    // Name order makes both the walk and the cap deterministic.
-    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-
-    for (const entry of entries) {
-      if (found.length >= cap) return;
-      const abs = path.join(absDir, entry.name);
-
-      if (entry.isSymbolicLink()) {
-        // A symlink may point outside the project or form a cycle. Follow it
-        // only when its real target stays inside the root and is a directory we
-        // have not walked; otherwise ignore it entirely.
-        let real: string;
-        try {
-          real = await fs.realpath(abs);
-        } catch {
-          continue;
-        }
-        if (!isInside(rootReal, real)) continue;
-        let stat;
-        try {
-          stat = await fs.stat(real);
-        } catch {
-          continue;
-        }
-        if (stat.isDirectory()) {
-          if (shouldSkipDir(entry.name) || visitedDirs.has(real)) continue;
-          visitedDirs.add(real);
-          await walk(abs);
-        } else if (stat.isFile()) {
-          found.push(path.relative(rootAbs, abs));
-        }
-        continue;
-      }
-
-      if (entry.isDirectory()) {
-        if (shouldSkipDir(entry.name)) continue;
-        await walk(abs);
-      } else if (entry.isFile()) {
-        found.push(path.relative(rootAbs, abs));
-      }
-    }
-  };
-
-  await walk(rootAbs);
-
-  return found
-    .map((rel) => rel.split(path.sep).join('/'))
-    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-    .slice(0, cap);
-}

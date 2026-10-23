@@ -12,11 +12,25 @@
 import type { AttachIssueRequest } from '@openchamber/sdk';
 import { GUEST_COMPOSE_TEXT_MAX } from '@openchamber/sdk';
 import { DIRECTIONS, type DirectionId } from './craft.ts';
-import { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP, DESIGN_AUTHORITY, DESIGN_WORKSPACE_NOTE, IDENTITY, VERIFY_PROTOCOL, defaultCraft } from '../shared/harness-text.ts';
+import {
+  CANVAS_PROTOCOL,
+  CANVAS_PROTOCOL_CHIP,
+  DESIGN_AUTHORITY,
+  DESIGN_WORKSPACE_NOTE,
+  IDENTITY,
+  VERIFY_PROTOCOL,
+  WORKING_AGREEMENT_CHIP,
+  defaultCraft,
+  firstReplyContract,
+  workingAgreementChip,
+  workingAgreementCompact,
+  type CraftRuleId,
+  type OptionsChoice,
+} from '../shared/harness-text.ts';
 import { DESIGN_SYSTEMS, type DesignSystemPreset } from '../shared/design-systems.ts';
 import type { CritiqueScreenDigest, ExportFormat, ExportStatusResult, ScreenInfo, StudioConfig, WorkspaceRecord } from './api.ts';
 
-export { VERIFY_PROTOCOL };
+export { VERIFY_PROTOCOL, WORKING_AGREEMENT_CHIP };
 
 /** The text cap every attach / start-session payload must respect (SDK). */
 export const GUEST_ATTACH_TEXT_MAX = 16000;
@@ -29,8 +43,8 @@ export type DesignType = 'wireframe' | 'hi-fi' | 'prototype' | 'deck' | 'custom'
 export const DESIGN_TYPES: DesignType[] = ['wireframe', 'hi-fi', 'prototype', 'deck', 'custom'];
 
 export const TYPE_HINT: Record<DesignType, string> = {
-  wireframe: 'structure and navigation only — no final colour, type or copy',
-  'hi-fi': 'static screens with the full design system (tokens, type, colour)',
+  wireframe: 'structure and navigation only — no final color, type or copy',
+  'hi-fi': 'static screens with the full design system (tokens, type, color)',
   prototype: 'a real, interactive app with a dev server, all five states and motion',
   deck: 'a presentation deck (HTML slides) with its own nav and print layout',
   custom: 'ask what is being made, then choose the closest approach',
@@ -42,18 +56,9 @@ export const FIDELITIES: Fidelity[] = ['wireframe', 'hi-fi', 'interactive'];
 
 export const FIDELITY_HINT: Record<Fidelity, string> = {
   wireframe: 'low fidelity: boxes, flows and labels, no polish',
-  'hi-fi': 'final visual quality: tokens, type, colour, spacing',
+  'hi-fi': 'final visual quality: tokens, type, color, spacing',
   interactive: 'hi-fi plus working interactions and transitions',
 };
-
-/** Select options shared by the page composer. English only. */
-export const TYPE_OPTIONS: Array<[DesignType, string]> = [
-  ['wireframe', 'Wireframe'],
-  ['hi-fi', 'Hi-fi screens'],
-  ['prototype', 'Interactive prototype'],
-  ['deck', 'Presentation deck'],
-  ['custom', 'Custom'],
-];
 
 export const FIDELITY_OPTIONS: Array<[Fidelity, string]> = [
   ['hi-fi', 'Hi-fi'],
@@ -158,7 +163,37 @@ export type DesignMode = {
   fidelity: Fidelity;
   canvMode: CanvasMode;
   brief: string;
+  /** Ask clarifying questions before building (default true; old stored modes omit it). */
+  questions?: boolean;
+  /** How many directions the user wants, or 'ask' (default). */
+  options?: OptionsChoice;
+  /** The device artboards to design; omitted = not chosen yet. */
+  devices?: DeviceId[];
 };
+
+export type DeviceId = 'phone' | 'tablet' | 'desktop';
+
+/** The device artboard sizes the canvas offers (CANVAS_PROTOCOL presets). */
+export const DEVICE_PRESETS: Record<DeviceId, { label: string; width: number; height: number }> = {
+  phone: { label: 'phone', width: 390, height: 844 },
+  tablet: { label: 'tablet', width: 768, height: 1024 },
+  desktop: { label: 'desktop', width: 1440, height: 900 },
+};
+
+/** `phone 390×844 · desktop 1440×900`, or the not-chosen wording for none. */
+export function devicesLabel(devices: readonly DeviceId[] | null | undefined, questions = true): string {
+  const known = [...new Set(devices ?? [])].filter((id) => Object.hasOwn(DEVICE_PRESETS, id));
+  if (known.length === 0) return questions ? 'not chosen yet — agree them first' : 'not chosen — pick them and list them in your Assumptions';
+  return known.map((id) => `${DEVICE_PRESETS[id].label} ${DEVICE_PRESETS[id].width}×${DEVICE_PRESETS[id].height}`).join(' · ');
+}
+
+/** `Questions first: on · Options: ask · Devices: …` — old stored modes read as defaults. */
+export function agreementStatusLine(input: { questions?: boolean; options?: OptionsChoice; devices?: readonly DeviceId[] }): string {
+  const questions = input.questions !== false;
+  const options = input.options === 'ask' && !questions ? 1 : input.options ?? (questions ? 'ask' : 1);
+  const optionsText = options === 'ask' ? 'ask the user' : input.options === 'ask' ? 'one direction' : options;
+  return `Questions first: ${questions ? 'on' : 'off'} · Options: ${optionsText} · Devices: ${devicesLabel(input.devices, questions)}`;
+}
 
 export const DEFAULT_MODE: DesignMode = { on: false, type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', canvMode: 'edit', brief: '' };
 
@@ -236,6 +271,29 @@ export function designSessionIdFromKey(key: string): string | null {
 }
 
 /**
+ * #11: the per-session prefixes a stale-key prune may drop. `design/` is NOT
+ * here on purpose — the marker is permanent by design.
+ */
+export const PRUNABLE_SESSION_KEY_PREFIXES: readonly string[] = ['ws/', 'mode/', 'canvas-open/'];
+
+/**
+ * #11: the storage keys whose session is gone: a `ws/`, `mode/` or
+ * `canvas-open/` key whose `<sessionId>` is not in `liveSessionIds`. Pure; the
+ * caller supplies a COMPLETE live set (or skips the prune).
+ */
+export function staleSessionKeys(keys: readonly string[], liveSessionIds: ReadonlySet<string>): string[] {
+  const stale: string[] = [];
+  for (const key of keys) {
+    const prefix = PRUNABLE_SESSION_KEY_PREFIXES.find((candidate) => key.startsWith(candidate));
+    if (!prefix) continue;
+    const id = key.slice(prefix.length);
+    if (id === '' || id.includes('/')) continue;
+    if (!liveSessionIds.has(id)) stale.push(key);
+  }
+  return stale;
+}
+
+/**
  * Every `attach` / `start-session` payload must carry an http(s) URL — the host
  * rejects anything else with "URL must be http or https.". The canvas session
  * has no real page yet, so fall back to a placeholder that the chips can show.
@@ -271,14 +329,6 @@ export function fileBaseName(path: string): string {
 export function projectHttpUrl(config: StudioConfig | null | undefined): string | null {
   const url = config?.url?.trim();
   return isHttpUrl(url) ? (url as string) : null;
-}
-
-/**
- * Whether the `+` attach control can offer anything at all: a source is attachable
- * only when the workspace has an http(s) url.
- */
-export function attachAvailable(config: StudioConfig | null | undefined): boolean {
-  return projectHttpUrl(config) !== null;
 }
 
 /**
@@ -348,12 +398,6 @@ export function seedSessionData(
   return { mode: seedModeValue(type, brief, canvMode), workspace };
 }
 
-/** Map a `.design-studio.json` `type` onto a valid DesignType for the widget. */
-export function seedModeFromConfig(config: StudioConfig | null): { on: true; type: DesignType } {
-  const type = config && DESIGN_TYPES.includes(config.type as DesignType) ? (config.type as DesignType) : 'custom';
-  return { on: true, type };
-}
-
 export function directionLabel(value: 'auto' | DirectionId): string {
   return value === 'auto' ? 'Auto (infer from the brief)' : DIRECTIONS[value].name;
 }
@@ -368,7 +412,79 @@ export type DesignBriefSpec = {
    * omitted for "No design system".
    */
   designSystemId?: string | null;
+  /** The user's project directory (read-only design context), when one is open. */
+  projectDir?: string | null;
+  /** Ask clarifying questions before building (default true). */
+  questions?: boolean;
+  /** How many directions the user wants, or 'ask' (default). */
+  options?: OptionsChoice;
+  /** The device artboards to design; omitted = not chosen yet. */
+  devices?: DeviceId[];
+  /** Where the look comes from: the user's project, the chosen preset, or a new one. */
+  look?: DesignLook;
 };
+
+export type DesignLook = 'project' | 'preset' | 'new';
+
+function lookHint(look: DesignLook, questions: boolean): string {
+  if (look === 'project') return "take it from the user's project (its tokens, theme and components)";
+  if (look === 'preset') return 'use the chosen design-system preset';
+  return questions
+    ? 'a new look — propose it first and confirm it with the questions'
+    : 'a new look — put its palette and type pairing in your Assumptions list';
+}
+
+/** The longest brief the session prompt carries and stays inside its budget. */
+export const BRIEF_MAX = 3000;
+
+/** The refusal for a brief over BRIEF_MAX, or null when it fits. */
+export function briefLimitError(brief: string): string | null {
+  const length = brief.trim().length;
+  if (length <= BRIEF_MAX) return null;
+  return `The design brief is too long (${length} characters; the limit is ${BRIEF_MAX}). Shorten it, then send again.`;
+}
+
+/** The craft rule sections each artifact type ships in its session prompt (budget). */
+export const CRAFT_BY_TYPE: Record<DesignType, CraftRuleId[]> = {
+  wireframe: ['layout', 'content', 'anti-slop', 'states', 'laws-of-ux', 'responsive'],
+  'hi-fi': ['layout', 'typography', 'color', 'content', 'anti-slop', 'accessibility', 'laws-of-ux', 'responsive'],
+  prototype: ['layout', 'typography', 'color', 'content', 'anti-slop', 'states', 'motion', 'accessibility', 'responsive'],
+  deck: ['layout', 'typography', 'color', 'content', 'anti-slop'],
+  custom: ['layout', 'typography', 'color', 'content', 'anti-slop', 'accessibility', 'responsive'],
+};
+
+/** The fidelity each artifact type implies. */
+export const FIDELITY_FOR_TYPE: Record<DesignType, Fidelity> = {
+  wireframe: 'wireframe',
+  'hi-fi': 'hi-fi',
+  prototype: 'interactive',
+  deck: 'hi-fi',
+  custom: 'hi-fi',
+};
+
+/**
+ * Turn a free-text brief into the senior-practice skeleton: the first sentence
+ * becomes the Goal, any remainder is kept verbatim under Notes, and every other
+ * field is left blank for the user to fill. A draft that already has a Goal line
+ * is returned untouched, so running it on its own output changes nothing.
+ */
+export function structureBrief(draft: string, ctx: { devices?: readonly DeviceId[] | null } = {}): string {
+  const text = draft.trim();
+  if (/^Goal:/m.test(text)) return draft;
+  const [first = '', ...rest] = text.split(/(?<=[.!?])\s+|\n+/);
+  const devices = ctx.devices && ctx.devices.length ? ctx.devices.join(', ') : 'ask me';
+  return [
+    `Goal: ${first}`,
+    "Who it's for: ",
+    'Primary task: ',
+    'Feel / tone: ',
+    'Key screens: ',
+    `Devices: ${devices}`,
+    'Content I have (copy, data, brand assets): ',
+    'Must keep / avoid: ',
+    rest.length ? `Notes: ${rest.join(' ')}` : 'Notes: ',
+  ].join('\n');
+}
 
 /**
  * The workspace rule every prompt repeats (decision 4a): the absolute path is
@@ -384,25 +500,40 @@ export function workspacePathRule(dir: string): string {
 
 /**
  * The session's first message: what we are making and under which rules, with
- * the absolute workspace path front and centre (decision 4a). The full craft
- * rulebook ships HERE — the mode chip carries only the trimmed rules
- * (chip budget, audit #16).
+ * the absolute workspace path front and centre (decision 4a). Budget: it carries
+ * the agreement CHIP + first-reply contract (not the full `workingAgreement`),
+ * the identity, authority, the craft subset for the type (CRAFT_BY_TYPE) and
+ * VERIFY_PROTOCOL; the mode chip carries only the trimmed rules (audit #16).
  */
 export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceRecord | null): string {
   const brief = spec.brief.trim();
   const preset = findDesignSystem(spec.designSystemId);
+  const questions = spec.questions !== false;
+  const agreement = { questions: spec.questions, options: spec.options };
+  const projectDir = spec.projectDir?.trim();
   const lines: string[] = [
     `Design brief — ${spec.type}: ${TYPE_HINT[spec.type]}`,
     `Visual direction: ${directionLabel(spec.direction)}. Lock it before building.`,
     `Fidelity: ${spec.fidelity} — ${FIDELITY_HINT[spec.fidelity]}.`,
-    brief ? `Brief: ${brief}` : 'Brief: none given — ask at most 5 questions with sensible defaults, then proceed.',
+    agreementStatusLine({ questions: spec.questions, options: spec.options, devices: spec.devices }),
   ];
+  if (spec.look) lines.push(`Look: ${lookHint(spec.look, questions)}.`);
+  if (projectDir) {
+    lines.push(`User project: ${JSON.stringify(projectDir)} — read it first for design context; never write design files there.`);
+  }
+  lines.push(
+    brief
+      ? `Brief: ${brief}`
+      : questions
+        ? 'Brief: none given — ask 3–6 questions with a bold recommended default each, then proceed.'
+        : 'Brief: none given — state your assumptions, then build.',
+  );
   if (preset) {
     lines.push(
       `Design system: ${preset.name} (${preset.category}) — its tokens and DESIGN.md are authoritative; use them as given and keep every screen inside the system.`,
     );
   }
-  lines.push('');
+  lines.push('', IDENTITY, '', workingAgreementChip(agreement), '');
   if (workspace) {
     lines.push(
       `Design Canvas workspace: ${workspace.dir}`,
@@ -421,15 +552,15 @@ export function designSessionPrompt(spec: DesignBriefSpec, workspace: WorkspaceR
   }
   lines.push(
     '',
-    'Design system authority: DESIGN.md and tokens.css (when present) are the workspace design system — follow them over any conflicting instinct.',
+    DESIGN_AUTHORITY,
     '',
-    defaultCraft(),
-  );
-  lines.push(
+    defaultCraft(CRAFT_BY_TYPE[spec.type]),
     '',
-    'Workflow: in the live canvas (edit mode) the user clicks elements; EACH click arrives as its own reference chip with its screen id. Sending a whole artboard from its menu arrives as a `Screen: <id> (<w>×<h>) — <file>` chip with the screen URL — edit that file.',
+    'Workflow: in the live canvas (edit mode) clicking an element selects it. A referenced selection arrives as one chip per element, each naming its screen; the artboard menu\'s Send to chat arrives as a `Screen: <id> (<w>×<h>) — <file>` chip with the screen URL — edit that file.',
     '',
     VERIFY_PROTOCOL,
+    '',
+    firstReplyContract(questions),
   );
   return lines.join('\n');
 }
@@ -445,9 +576,11 @@ export function workspaceOpenPrompt(workspace: WorkspaceRecord): string {
     '',
     DESIGN_WORKSPACE_NOTE,
     '',
-    'Open the Design Canvas browser and reuse what is already there; the user will point at elements to change.',
+    'Reopening this canvas: open the Design Canvas browser, then read BRIEF.md and DESIGN.md in the workspace first — they hold the agreed devices, look and chosen option. Keep to them; ask before changing any of them. The user will point at elements to change.',
     '',
     IDENTITY,
+    '',
+    WORKING_AGREEMENT_CHIP,
     '',
     DESIGN_AUTHORITY,
     '',
@@ -460,7 +593,7 @@ export function workspaceOpenPrompt(workspace: WorkspaceRecord): string {
  * Chip budget (audit #16), in order: mode state → workspace path + screens
  * protocol (the canvas workspace note + the trimmed CANVAS_PROTOCOL lines,
  * SPEC-V3-P2-SCOPE.md D8) → screens id/URL list (cap 40) → TRIMMED rules
- * (IDENTITY + design-system authority + VERIFY_PROTOCOL only — the craft
+ * (IDENTITY + the agreement chip + design-system authority + VERIFY_PROTOCOL only — the craft
  * rulebook and the FULL protocol ship via `designSessionPrompt` instead).
  * Text is capped at `GUEST_ATTACH_TEXT_MAX`.
  */
@@ -474,10 +607,14 @@ export function buildModeChip(
   const id = `design-mode-${(sessionId || 'adhoc').slice(0, 110)}`;
   const lines: string[] = [
     'Design Mode: ON',
-    `Canvas mode: ${mode.canvMode}${mode.canvMode === 'edit' ? ' — clicking an element sends a pick chip' : ' — clicks and links drive the screens'}`,
+    `Canvas mode: ${mode.canvMode}${mode.canvMode === 'edit' ? ' — clicking an element selects it; Reference in chat sends the selection (one chip per element)' : ' — clicks and links drive the screens'}`,
     `Artifact type: ${mode.type} — ${TYPE_HINT[mode.type]}`,
     `Visual direction: ${directionLabel(mode.direction)} · Fidelity: ${mode.fidelity}`,
-    mode.brief ? `Brief: ${mode.brief}` : 'Brief: the user will say or type it next.',
+    agreementStatusLine(mode),
+    // The 2000-char cut keeps the chip inside its 15.5k budget (pinned by the
+    // budget test). It is not the brief LIMIT: /canvas and the page both refuse
+    // a brief over BRIEF_MAX up front with the same briefLimitError (#10).
+    mode.brief ? `Brief: ${mode.brief.slice(0, 2000)}` : 'Brief: the user will say or type it next.',
   ];
   if (workspace) {
     lines.push(
@@ -494,14 +631,14 @@ export function buildModeChip(
   if (screens.length > 0) {
     const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);
     lines.push(`Screens (${screens.length}):`);
-    for (const screen of shown) lines.push(`- ${screen.id} · ${screen.title || screen.file} · ${screen.file}`);
+    for (const screen of shown) lines.push(`- ${screen.id} · ${(screen.title || screen.file).slice(0, 60)} · ${screen.file}`);
     if (screens.length > MODE_CHIP_SCREEN_CAP) {
       lines.push(`… ${screens.length - MODE_CHIP_SCREEN_CAP} more — every screen is reachable through the canvas; the full registry is screens.json at the workspace root.`);
     }
   } else {
     lines.push('Screens: none yet — add a screen by writing `<file>.html` and adding `{id, file, title, width, height}` to screens.json at the workspace root.');
   }
-  lines.push('', IDENTITY, '', DESIGN_AUTHORITY, '', VERIFY_PROTOCOL);
+  lines.push('', IDENTITY, '', workingAgreementChip({ questions: mode.questions, options: mode.options }), '', DESIGN_AUTHORITY, '', VERIFY_PROTOCOL);
   return {
     providerId: 'design-canvas',
     id,
@@ -516,6 +653,9 @@ export function buildModeChip(
         fidelity: mode.fidelity,
         canvMode: mode.canvMode,
         brief: mode.brief.slice(0, 2000),
+        ...(mode.questions !== undefined ? { questions: mode.questions } : {}),
+        ...(mode.options !== undefined ? { options: mode.options } : {}),
+        ...(mode.devices !== undefined ? { devices: mode.devices.slice() } : {}),
       },
       workspace: workspace ? { dir: workspace.dir, name: workspace.name } : null,
       screens: screens.slice(0, MODE_CHIP_SCREEN_CAP).map((screen) => ({
@@ -525,6 +665,40 @@ export function buildModeChip(
       })),
     },
   };
+}
+
+/**
+ * The COMPACT mode chip (F7) the row re-attaches with the first pick of every
+ * delivered batch while Design Mode is ON. The full `buildModeChip` reaches the
+ * model once, at `/canvas`; every later design request was a bare pick chip
+ * with no standing instructions. This one is only the load-bearing part — mode
+ * ON, the canvas mode, the workspace path + its rule, the screens — and shares
+ * the full chip's id, so it REPLACES the composer's mode chip instead of
+ * stacking a new one per batch. Same `data` shape, so `isModeChipData` still
+ * reads it as a design session.
+ */
+export function buildCompactModeChip(
+  sessionId: string | null,
+  mode: DesignMode,
+  workspace: WorkspaceRecord,
+  screens: ReadonlyArray<Pick<ScreenInfo, 'id' | 'file' | 'title'>> = [],
+  workspaceUrl?: string | null,
+): AttachIssueRequest {
+  const full = buildModeChip(sessionId, mode, workspace, screens, workspaceUrl);
+  const lines: string[] = [
+    'Design Mode: ON — every pick below is a design request for this workspace.',
+    `Canvas mode: ${mode.canvMode} · Artifact type: ${mode.type}`,
+    `Workspace: ${workspace.dir}`,
+    workspacePathRule(workspace.dir),
+    workingAgreementCompact({ questions: mode.questions }),
+  ];
+  if (screens.length > 0) {
+    const shown = screens.slice(0, MODE_CHIP_SCREEN_CAP);
+    lines.push(`Screens (${screens.length}):`);
+    for (const screen of shown) lines.push(`- ${screen.id} · ${screen.file}`);
+    if (screens.length > MODE_CHIP_SCREEN_CAP) lines.push(`… ${screens.length - MODE_CHIP_SCREEN_CAP} more in screens.json at the workspace root.`);
+  }
+  return { ...full, text: lines.join('\n').slice(0, GUEST_ATTACH_TEXT_MAX) };
 }
 
 // ---- /canvas export (SPEC-V3-P2-SCOPE.md D4/D7-B) ----
@@ -662,5 +836,25 @@ export function critiqueReviewChip(
     title: 'Canvas critique — gate digest',
     url: attachUrl(workspaceUrl ?? undefined),
     text: critiqueReviewText(digest).slice(0, GUEST_COMPOSE_TEXT_MAX),
+  };
+}
+
+/**
+ * #6: the info chip `/canvas export|critique` answers with at once — the job
+ * itself outlives the host's resolve cap. The critique chip shares the review
+ * chip's id, so the digest attached later REPLACES it in the composer.
+ */
+export function canvasJobStartedChip(
+  kind: 'export' | 'critique',
+  sessionId: string | null,
+  workspaceUrl: string | null | undefined,
+  text: string,
+): AttachIssueRequest {
+  return {
+    providerId: 'design-canvas',
+    id: `canvas-${kind}-${(sessionId || 'adhoc').slice(0, 110)}`,
+    title: kind === 'export' ? 'Canvas export — started' : 'Canvas critique — started',
+    url: attachUrl(workspaceUrl ?? undefined),
+    text,
   };
 }

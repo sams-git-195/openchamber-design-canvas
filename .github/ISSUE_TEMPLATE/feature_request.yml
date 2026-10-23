@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an idea or improvement for OpenChamber Design Studio
+description: Suggest an idea or improvement for OpenChamber Design Canvas
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
@@ -21,7 +21,7 @@ body:
     id: proposal
     attributes:
       label: Proposed solution
-      description: What you would like Design Studio to do.
+      description: What you would like Design Canvas to do.
     validations:
       required: true
 

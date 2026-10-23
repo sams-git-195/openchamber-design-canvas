@@ -16,8 +16,8 @@ const shim = {
   documentElement: {},
 };
 
-const { DEFAULT_MODE, GUEST_ATTACH_TEXT_MAX, VERIFY_PROTOCOL, attachUrl, buildModeChip, designSessionPrompt, isHttpUrl, modeStorageKey, workspaceStorageKey, parseDesignArgs, seedModeFromConfig, seedModeValue, seedSessionData, NO_DESIGN_SYSTEM, designSystemGroups, designSystemLabel, designSystemSwatches, filterDesignSystems, findDesignSystem, isColorTokenValue, attachAvailable, designMarkerKey, designMarkerValue, designSessionIdFromKey, fileBaseName, fileReferenceChip, isDesignMarker, popoverStep, projectHttpUrl, projectReferenceChip, parseCanvasExportArgs, exportJobSummary, exportFailureSummary, critiqueReviewText, critiqueReviewChip, CRITIQUE_ADVISORY } = await import('../panel/mode.ts');
-const { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP } = await import('../shared/harness-text.ts');
+const { DEFAULT_MODE, GUEST_ATTACH_TEXT_MAX, VERIFY_PROTOCOL, attachUrl, buildModeChip, designSessionPrompt, isHttpUrl, modeStorageKey, workspaceStorageKey, parseDesignArgs, seedModeValue, seedSessionData, NO_DESIGN_SYSTEM, designSystemGroups, designSystemLabel, designSystemSwatches, filterDesignSystems, findDesignSystem, isColorTokenValue, designMarkerKey, designMarkerValue, designSessionIdFromKey, fileBaseName, fileReferenceChip, isDesignMarker, popoverStep, projectHttpUrl, projectReferenceChip, parseCanvasExportArgs, exportJobSummary, exportFailureSummary, critiqueReviewText, critiqueReviewChip, CRITIQUE_ADVISORY, BRIEF_MAX, CRAFT_BY_TYPE, DESIGN_TYPES, DEVICE_PRESETS, FIDELITIES, FIDELITY_FOR_TYPE, buildCompactModeChip, agreementStatusLine, devicesLabel, structureBrief, workspaceOpenPrompt } = await import('../panel/mode.ts');
+const { CANVAS_PROTOCOL, CANVAS_PROTOCOL_CHIP, CRAFT_RULES, DESIGN_AUTHORITY, IDENTITY, WORKING_AGREEMENT_CHIP, WORKING_AGREEMENT_COMPACT, firstReplyContract, harnessRulesText, workingAgreementCompact } = await import('../shared/harness-text.ts');
 const { isModeChipData } = await import('../panel/api.ts');
 const { DESIGN_SYSTEMS } = await import('../shared/design-systems.ts');
 // A type-only import: erased at compile time, so it needs no window shim.
@@ -107,18 +107,215 @@ test('design session prompt: names the absolute workspace path as the only place
   assert.doesNotMatch(text, /Scaffold the project/, 'the agent no longer scaffolds projects');
 });
 
-test('design session prompt: the full craft rulebook ships here, not in the chip', () => {
+test('design session prompt: the craft subset for the type ships here, not in the chip', () => {
   const text = designSessionPrompt({ type: 'wireframe', direction: 'auto', fidelity: 'wireframe', brief: '' }, null);
-  assert.match(text, /Brief: none given/);
-  assert.match(text, /Build one modular scale/, 'the typography rules are in the session prompt');
-  assert.match(text, /Hick: cut the number/, 'the laws-of-ux rules are in the session prompt');
+  assert.match(text, /Brief: none given — ask 3–6 questions with a bold recommended default each/);
+  assert.match(text, /Hick: cut the number/, 'the laws-of-ux rules are in the wireframe prompt');
+  assert.doesNotMatch(text, /Build one modular scale/, 'a wireframe carries no typography rulebook');
   assert.match(text, /created by the Design Canvas service/, 'a missing workspace is described, not refused');
+  const hifi = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x' }, null);
+  for (const id of CRAFT_BY_TYPE['hi-fi']) assert.ok(hifi.includes(`### ${id}\n${CRAFT_RULES[id]}`), `hi-fi ships ${id}`);
+  assert.match(hifi, /Build one modular scale/);
+  assert.doesNotMatch(text, /follow them over any conflicting instinct/, 'the old authority line is gone');
 });
 
-test('seed mode from config maps unknown types to custom', () => {
-  assert.deepEqual(seedModeFromConfig({ version: 1, type: 'prototype' }), { on: true, type: 'prototype' });
-  assert.deepEqual(seedModeFromConfig({ version: 1, type: 'banner' }), { on: true, type: 'custom' });
-  assert.deepEqual(seedModeFromConfig(null), { on: true, type: 'custom' });
+test('design session prompt carries the agreement chip, first-reply contract and authority', () => {
+  const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x' }, WORKSPACE);
+  assert.ok(text.includes(WORKING_AGREEMENT_CHIP));
+  assert.ok(text.includes(firstReplyContract(true)));
+  assert.ok(text.includes(DESIGN_AUTHORITY));
+  assert.ok(text.includes(IDENTITY));
+  assert.ok(!text.includes('## Working agreement'), 'the full working agreement does not fit the budget');
+  assert.match(text, /Questions first: on · Options: ask the user · Devices: not chosen yet/);
+});
+
+test('design session prompt names the user project and the chosen devices', () => {
+  const text = designSessionPrompt(
+    { type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x', projectDir: 'C:\\code\\app', devices: ['phone', 'desktop'], look: 'project' },
+    WORKSPACE,
+  );
+  assert.ok(text.split('\n').includes('User project: "C:\\\\code\\\\app" — read it first for design context; never write design files there.'));
+  assert.match(text, /Devices: phone 390×844 · desktop 1440×900/);
+  assert.match(text, /Look: take it from the user's project/);
+  assert.doesNotMatch(designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x' }, WORKSPACE), /User project:/);
+});
+
+test('devicesLabel and DEVICE_PRESETS name the artboard sizes', () => {
+  assert.deepEqual(DEVICE_PRESETS.phone, { label: 'phone', width: 390, height: 844 });
+  assert.deepEqual(DEVICE_PRESETS.tablet, { label: 'tablet', width: 768, height: 1024 });
+  assert.deepEqual(DEVICE_PRESETS.desktop, { label: 'desktop', width: 1440, height: 900 });
+  assert.equal(devicesLabel(['phone', 'tablet', 'desktop']), 'phone 390×844 · tablet 768×1024 · desktop 1440×900');
+  assert.equal(devicesLabel(undefined), 'not chosen yet — agree them first');
+  assert.equal(devicesLabel([]), 'not chosen yet — agree them first');
+});
+
+test('FIDELITY_FOR_TYPE and CRAFT_BY_TYPE cover every design type', () => {
+  for (const type of DESIGN_TYPES) {
+    assert.ok(FIDELITIES.includes(FIDELITY_FOR_TYPE[type]), `${type} has a fidelity`);
+    assert.ok(CRAFT_BY_TYPE[type].length > 0, `${type} has craft rules`);
+    for (const id of CRAFT_BY_TYPE[type]) assert.ok(id in CRAFT_RULES, `${type}: ${id} is a real rule`);
+  }
+  assert.equal(FIDELITY_FOR_TYPE.prototype, 'interactive');
+  assert.equal(FIDELITY_FOR_TYPE.wireframe, 'wireframe');
+});
+
+test('structureBrief is idempotent', () => {
+  for (const sample of ['', '   \n ', 'One sentence.', 'A booking app. Phone first! Real names?\nSecond line.']) {
+    for (const devices of [null, ['phone', 'desktop']] as const) {
+      const once = structureBrief(sample, { devices });
+      assert.equal(structureBrief(once, { devices }), once, `idempotent for ${JSON.stringify(sample)}`);
+    }
+  }
+});
+
+test('structureBrief: an empty draft yields the skeleton with an empty Goal', () => {
+  const out = structureBrief('', { devices: null });
+  assert.ok(out.startsWith('Goal: \n'), 'empty Goal line');
+  assert.ok(out.includes('\nDevices: ask me\n'));
+  assert.ok(out.endsWith('\nNotes: '));
+  assert.equal(structureBrief('  \n ', { devices: null }), out);
+});
+
+test('structureBrief: a one-sentence draft lands in Goal and nothing is lost', () => {
+  const out = structureBrief('A booking app for dog walkers.', { devices: null });
+  assert.ok(out.startsWith('Goal: A booking app for dog walkers.\n'));
+  assert.ok(out.endsWith('\nNotes: '));
+});
+
+test('structureBrief: the remainder of a multi-sentence draft stays in Notes verbatim', () => {
+  const out = structureBrief('A booking app for dog walkers. Owners book a walk in two taps! Phone first?\nReal names, prices', { devices: null });
+  assert.ok(out.startsWith('Goal: A booking app for dog walkers.\n'));
+  assert.ok(out.endsWith('\nNotes: Owners book a walk in two taps! Phone first? Real names, prices'));
+});
+
+test('structureBrief: devices fill the Devices line', () => {
+  assert.ok(structureBrief('x', { devices: ['phone', 'desktop'] }).includes('\nDevices: phone, desktop\n'));
+  assert.ok(structureBrief('x', { devices: [] }).includes('\nDevices: ask me\n'));
+});
+
+test('structureBrief: always carries the Feel / tone and Primary task lines and never drops user words', () => {
+  const sentences = ['A fintech dashboard.', 'Calm and trustworthy!', 'Show balances first?', 'Use our teal brand colour.'];
+  for (const sample of ['', 'Short', sentences.join(' '), sentences.join('\n')]) {
+    const out = structureBrief(sample, { devices: ['tablet'] });
+    assert.ok(out.includes('Feel / tone: '), 'Feel / tone line');
+    assert.ok(out.includes('Primary task: '), 'Primary task line');
+    for (const part of sample.split(/(?<=[.!?])\s+|\n+/).filter(Boolean)) assert.ok(out.includes(part), `kept: ${part}`);
+  }
+});
+
+test('the budget holds: session prompt at BRIEF_MAX, the 45-screen chip and the compact chip stay ≤ 15500', () => {
+  const ws = { dir: 'C:\\Users\\samhe\\OneDrive - Some Company Name Ltd\\Documents\\Design Canvas\\a-very-long-workspace-name-for-the-budget-1234567890', name: 'x' };
+  const longestPreset = DESIGN_SYSTEMS.reduce((a, b) => (b.name.length + b.category.length > a.name.length + a.category.length ? b : a));
+  const screens = Array.from({ length: 45 }, (_, i) => ({
+    id: `screen-${String(i).padStart(2, '0')}-abcdefghijklmnop`,
+    file: `screen-${String(i).padStart(2, '0')}-abcdefghijklmnop.html`,
+    title: `Screen ${String(i).padStart(2, '0')} ${'t'.repeat(120)}`,
+  }));
+  const brief = 'x'.repeat(BRIEF_MAX);
+  let worst = 0;
+  for (const type of DESIGN_TYPES) {
+    for (const questions of [true, false]) {
+      const text = designSessionPrompt(
+        { type, direction: 'auto', fidelity: 'interactive', brief, designSystemId: longestPreset.id, projectDir: 'C:\\Users\\samhe\\OneDrive - Some Company Name Ltd\\Documents\\GitHub\\some-project', questions, options: 3, devices: ['phone', 'tablet', 'desktop'], look: 'new' },
+        ws,
+      );
+      worst = Math.max(worst, text.length);
+    }
+  }
+  const chip = buildModeChip('ses_budget45', { ...DEFAULT_MODE, on: true, brief: 'y'.repeat(BRIEF_MAX), devices: ['phone', 'tablet', 'desktop'] }, ws, screens);
+  const compact = buildCompactModeChip('ses_budget45', { ...DEFAULT_MODE, on: true }, ws, screens);
+  console.info('P2 budget measurement:', JSON.stringify({ sessionPromptWorst: worst, chip: (chip.text ?? '').length, compact: (compact.text ?? '').length }));
+  assert.ok(worst <= 15500, `session prompt ${worst} ≤ 15500`);
+  assert.ok((chip.text ?? '').length <= 15500, `mode chip ${(chip.text ?? '').length} ≤ 15500`);
+  assert.ok((compact.text ?? '').length <= 15500, `compact chip ${(compact.text ?? '').length} ≤ 15500`);
+  assert.ok((chip.text ?? '').endsWith(VERIFY_PROTOCOL), 'the verification protocol is intact at the chip tail');
+  assert.ok((chip.text ?? '').includes(`Brief: ${'y'.repeat(2000)}\n`), 'the brief is capped at 2000 characters');
+  assert.ok(!(chip.text ?? '').includes('t'.repeat(61)), 'screen titles are capped at 60 characters');
+});
+
+test('the mode chip carries the agreement status line; old stored modes read as defaults', () => {
+  const chip = buildModeChip('ses_s', { ...DEFAULT_MODE, on: true }, WORKSPACE);
+  const lines = (chip.text ?? '').split('\n');
+  const at = lines.findIndex((line) => line.startsWith('Visual direction:'));
+  assert.equal(lines[at + 1], 'Questions first: on · Options: ask the user · Devices: not chosen yet — agree them first');
+  const off = buildModeChip('ses_s', { ...DEFAULT_MODE, on: true, questions: false, options: 2, devices: ['phone'] }, WORKSPACE);
+  assert.match(off.text ?? '', /Questions first: off · Options: 2 · Devices: phone 390×844/);
+  assert.match(off.text ?? '', /turned questions off/);
+  assert.doesNotMatch(off.text ?? '', /numbered questions/);
+  assert.equal((off.data as { mode: { questions?: boolean } }).mode.questions, false);
+  assert.equal('questions' in (chip.data as { mode: object }).mode, false, 'defaults add nothing to the data');
+});
+
+test('the compact chip carries the compact agreement after the path rule', () => {
+  const compact = buildCompactModeChip('ses_c', { ...DEFAULT_MODE, on: true }, WORKSPACE);
+  const lines = (compact.text ?? '').split('\n');
+  const rule = lines.findIndex((line) => line.includes('the ONLY place design files are written'));
+  assert.equal(lines[rule + 1], WORKING_AGREEMENT_COMPACT);
+});
+
+test("P2'': the compact chip with questions off never asks", () => {
+  const compact = buildCompactModeChip('ses_c', { ...DEFAULT_MODE, on: true, questions: false }, WORKSPACE);
+  assert.ok((compact.text ?? '').includes(workingAgreementCompact({ questions: false })));
+  assert.match(compact.text ?? '', /state your reading in one line and make the change/);
+  assert.doesNotMatch(compact.text ?? '', /ask one question/);
+  assert.equal(workingAgreementCompact(), WORKING_AGREEMENT_COMPACT);
+});
+
+test("P2'': questions off with options 'ask' resolves to one direction and never says stop and ask", () => {
+  assert.equal(
+    agreementStatusLine({ questions: false, options: 'ask' }),
+    'Questions first: off · Options: one direction · Devices: not chosen — pick them and list them in your Assumptions',
+  );
+  assert.match(agreementStatusLine({ questions: false }), /Options: 1 ·/);
+  assert.match(agreementStatusLine({ questions: true, options: 'ask' }), /Options: ask the user · Devices: not chosen yet — agree them first/);
+  assert.doesNotMatch(agreementStatusLine({ questions: false, options: 'ask' }), /agree them first|ask the user/);
+});
+
+test("P2'': devicesLabel drops duplicates and inherited keys", () => {
+  assert.equal(devicesLabel(['phone', 'phone', 'desktop']), 'phone 390×844 · desktop 1440×900');
+  assert.equal(devicesLabel(['toString' as never, 'constructor' as never]), 'not chosen yet — agree them first');
+});
+
+test("P2'': the new-look hint follows the questions choice", () => {
+  const base = { type: 'hi-fi' as const, direction: 'auto' as const, fidelity: 'hi-fi' as const, brief: 'x', look: 'new' as const };
+  assert.match(designSessionPrompt(base, WORKSPACE), /Look: a new look — propose it first and confirm it with the questions\./);
+  const off = designSessionPrompt({ ...base, questions: false }, WORKSPACE);
+  assert.match(off, /Look: a new look — put its palette and type pairing in your Assumptions list\./);
+  assert.doesNotMatch(off, /propose it first/);
+});
+
+test("P2'': the first-reply contract is the last thing in the session prompt", () => {
+  for (const questions of [true, false]) {
+    const text = designSessionPrompt({ type: 'hi-fi', direction: 'auto', fidelity: 'hi-fi', brief: 'x', questions }, WORKSPACE);
+    assert.ok(text.endsWith(`${VERIFY_PROTOCOL}\n\n${firstReplyContract(questions)}`), `questions ${questions}`);
+  }
+});
+
+test("P2'': every artifact type ships the anti-slop rules", () => {
+  for (const type of DESIGN_TYPES) {
+    assert.ok(CRAFT_BY_TYPE[type].includes('anti-slop'), `${type} carries anti-slop`);
+    const text = designSessionPrompt({ type, direction: 'auto', fidelity: FIDELITY_FOR_TYPE[type], brief: 'x' }, WORKSPACE);
+    assert.ok(text.includes(`### anti-slop\n${CRAFT_RULES['anti-slop']}`), `${type} session prompt has the anti-slop section`);
+  }
+});
+
+test("P2'': the session prompt, chips and rulebook use one spelling (color, not colour)", () => {
+  for (const type of DESIGN_TYPES) {
+    for (const fidelity of FIDELITIES) {
+      const text = designSessionPrompt({ type, direction: 'auto', fidelity, brief: 'x', look: 'new' }, WORKSPACE);
+      assert.doesNotMatch(text, /colour/i, `${type}/${fidelity}`);
+    }
+  }
+  assert.doesNotMatch(buildModeChip('ses_s', { ...DEFAULT_MODE, on: true }, WORKSPACE).text ?? '', /colour/i);
+  assert.doesNotMatch(harnessRulesText(), /colour/i);
+});
+
+test('the workspace open prompt points at BRIEF.md and DESIGN.md and carries the agreement', () => {
+  const text = workspaceOpenPrompt(WORKSPACE);
+  assert.match(text, /Reopening this canvas: open the Design Canvas browser, then read BRIEF\.md and DESIGN\.md in the workspace first/);
+  assert.doesNotMatch(text, /reuse what is already there/);
+  assert.ok(text.indexOf(IDENTITY) < text.indexOf(WORKING_AGREEMENT_CHIP));
+  assert.ok(text.indexOf(WORKING_AGREEMENT_CHIP) < text.indexOf(DESIGN_AUTHORITY));
 });
 
 test('seed mode value is a persisted Design Mode payload', () => {
@@ -259,9 +456,6 @@ test('a reference is attachable only when the workspace has an http(s) url', () 
   assert.equal(projectHttpUrl({ url: 'about:blank' }), null, 'a non-http url cannot become a chip');
   assert.equal(projectHttpUrl({ url: '' }), null);
   assert.equal(projectHttpUrl(null), null);
-  assert.equal(attachAvailable({ url: 'https://x.test' }), true);
-  assert.equal(attachAvailable({ url: 'about:blank' }), false);
-  assert.equal(attachAvailable(null), false, 'no config means no + at all');
 });
 
 test('the workspace reference chip names the workspace and its dir', () => {
@@ -334,7 +528,7 @@ test('CANVAS_PROTOCOL ships the D8 wording verbatim: five lines, exact openings'
   assert.match(lines[1]!, /sizes 200–8192/);
   assert.match(lines[2]!, /\.design-studio\/view\.json/);
   assert.match(lines[3]!, /2–3 complete sibling screens/);
-  assert.match(lines[4]!, /390×844 phone · 768×1024 tablet · 1280×800 desktop \(default\) · 1440×900 large desktop · 1080×1080 social post · 794×1123 A4 print at 96 dpi/);
+  assert.match(lines[4]!, /390×844 phone · 768×1024 tablet · 1440×900 desktop \(default\) · 1280×800 laptop · 1080×1080 social post · 794×1123 A4 print at 96 dpi/);
   assert.match(lines[4]!, /three artboards of the same screen \(phone, tablet, desktop\)/);
 });
 
@@ -348,13 +542,15 @@ test('the full protocol ships in the session prompt; the trimmed copy ships in t
   assert.ok((chip.text ?? '').includes('Screens are artboards on one shared canvas.'));
   assert.ok((chip.text ?? '').includes('^[a-z0-9][a-z0-9-]{0,30}$'));
   assert.ok((chip.text ?? '').includes('mean 2–3 complete sibling screens'));
-  assert.ok((chip.text ?? '').includes('390×844 phone · 768×1024 tablet · 1280×800 desktop (default)'));
+  assert.ok((chip.text ?? '').includes('390×844 phone · 768×1024 tablet · 1440×900 desktop (default)'));
   assert.doesNotMatch(chip.text ?? '', /Positions are not design content/, 'the view.json positions line is not chip text');
   // The chip order (audit #16): protocol → screens → IDENTITY → authority → VERIFY_PROTOCOL.
   const t = chip.text ?? '';
   const at = (needle: string): number => { const i = t.indexOf(needle); assert.ok(i >= 0, `chip contains ${needle}`); return i; };
   assert.ok(at('screens.json') < at('You are an expert designer'), 'protocol before the trimmed rules');
   assert.ok(at('You are an expert designer') < at('DESIGN.md and tokens.css'), 'IDENTITY before authority');
+  assert.ok(at('You are an expert designer') < at(WORKING_AGREEMENT_CHIP), 'IDENTITY before the agreement chip');
+  assert.ok(at(WORKING_AGREEMENT_CHIP) < at('DESIGN.md and tokens.css'), 'the agreement chip before authority');
   assert.ok(at('DESIGN.md and tokens.css') < at('Before editing, state'), 'authority before VERIFY_PROTOCOL');
 });
 

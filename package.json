@@ -1,6 +1,6 @@
 {
   "name": "openchamber-design-canvas",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "OpenChamber Design Canvas — a project-free, multi-screen artboard canvas with live edit/play and point-and-edit into the standard OpenChamber chat.",
   "license": "MIT",
   "private": true,
@@ -42,6 +42,23 @@
         {
           "name": "canvas",
           "description": "Start or toggle the design canvas and attach design context"
+        }
+      ],
+      "actions": [
+        {
+          "id": "open-in-design-canvas",
+          "label": "Open in Design Canvas",
+          "where": "message",
+          "roles": [
+            "assistant"
+          ],
+          "mode": "open"
+        },
+        {
+          "id": "turn-on-design-mode",
+          "label": "Turn on Design Mode",
+          "where": "session",
+          "mode": "open"
         }
       ],
       "capabilities": [

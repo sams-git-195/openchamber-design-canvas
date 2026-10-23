@@ -2,8 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  AWKWARD_WIDTHS,
-  GATE_LABELS,
   GATE_ORDER,
   VIEWPORTS,
   findingSignature,
@@ -25,14 +23,11 @@ test('VIEWPORTS is ordered small to large with the agreed sizes', () => {
   );
   const widths = VIEWPORTS.map((v) => v.width);
   assert.deepEqual(widths, [...widths].sort((a, b) => a - b));
-  assert.deepEqual([...AWKWARD_WIDTHS], [320, 375, 1024, 1440]);
 });
 
 test('GATE_ORDER is cheap-first and holds exactly the five gate ids', () => {
   assert.deepEqual([...GATE_ORDER], ['G1', 'G4', 'G3', 'G6', 'G5']);
   assert.deepEqual([...GATE_ORDER].sort(), ['G1', 'G3', 'G4', 'G5', 'G6']);
-  const labelled = Object.keys(GATE_LABELS).sort();
-  assert.deepEqual(labelled, ['G1', 'G3', 'G4', 'G5', 'G6']);
 });
 
 function finding(over: Partial<VerifyFinding> = {}): VerifyFinding {

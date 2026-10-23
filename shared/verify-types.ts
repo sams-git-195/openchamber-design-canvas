@@ -24,10 +24,6 @@ export const VIEWPORTS: readonly Viewport[] = [
   { id: 'wide', label: 'Wide', width: 2048, height: 1152, mode: 'wide' },
 ];
 
-// Pinch points a preset-only layout usually forgets; mirrors the responsive
-// rule in panel/craft.ts ("test the awkward widths, not just the presets").
-export const AWKWARD_WIDTHS: readonly number[] = [320, 375, 1024, 1440];
-
 // ---- The page probe's shapes (single source of truth) -----------------------
 //
 // shared/probe-script.ts installs the in-page probe and returns a ProbeReport
@@ -83,14 +79,6 @@ export type GateId = 'G1' | 'G3' | 'G4' | 'G5' | 'G6';
 
 // Cheap and deterministic first, so an obviously broken page fails fast.
 export const GATE_ORDER: readonly GateId[] = ['G1', 'G4', 'G3', 'G6', 'G5'];
-
-export const GATE_LABELS: Record<GateId, string> = {
-  G1: 'overflow',
-  G3: 'accessibility',
-  G4: 'design tokens',
-  G5: 'layout invariants',
-  G6: 'semantics',
-};
 
 export type GateStatus = 'pass' | 'fail' | 'warn' | 'skipped';
 

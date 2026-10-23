@@ -82,13 +82,6 @@ async function waitForHealth(port: number, child: ChildProcess, stderr: () => st
 
 test('service requires the bearer token and reports live-window state', async () => {
   const port = await pickFreePort(43000, 2000);
-  const project = await mkdtemp(path.join(tmpdir(), 'ds-service-'));
-  await mkdir(path.join(project, 'design'), { recursive: true });
-  await writeFile(
-    path.join(project, 'design', 'index.html'),
-    '<!doctype html><html><head><style>body{color:#123}</style></head><body><h1 class="t">Hi</h1></body></html>',
-  );
-
   const child = spawn(process.execPath, [path.join(root, 'service', 'main.js')], {
     env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN },
     stdio: 'ignore',
@@ -123,13 +116,6 @@ test('service requires the bearer token and reports live-window state', async ()
       bridgeActive: false,
     });
 
-    const stat = await fetch(
-      `http://127.0.0.1:${port}/stat?dir=${encodeURIComponent(project)}&path=${encodeURIComponent('design/index.html')}`,
-      { headers: { authorization: `Bearer ${TOKEN}` } },
-    );
-    assert.equal(stat.status, 200);
-    assert.equal(typeof ((await stat.json()) as { mtime: number }).mtime, 'number');
-
     // /close requires the bearer token; with no window open it is a no-op that
     // still answers ok:true (the panel's Design Mode toggle OFF path).
     const closeNoAuth = await fetch(`http://127.0.0.1:${port}/close`, { method: 'POST' });
@@ -151,32 +137,6 @@ test('service requires the bearer token and reports live-window state', async ()
     });
     assert.equal(focusRes.status, 200);
     assert.deepEqual(await focusRes.json(), { ok: true });
-
-    // /highlight requires the bearer token. With no window open it answers
-    // ok:false with an error (never a crash), for any selector.
-    const highlightNoAuth = await fetch(`http://127.0.0.1:${port}/highlight`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ selector: '#x' }),
-    });
-    assert.equal(highlightNoAuth.status, 401, '/highlight needs the bearer token');
-    const highlightRes = await fetch(`http://127.0.0.1:${port}/highlight`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ selector: '#x' }),
-    });
-    assert.equal(highlightRes.status, 200);
-    const highlightBody = (await highlightRes.json()) as { ok: boolean; error?: string };
-    assert.equal(highlightBody.ok, false, 'no window: highlight answers ok:false');
-    assert.equal(typeof highlightBody.error, 'string', 'a failed highlight carries an error message');
-
-    // A missing/empty selector is a validation error.
-    const highlightEmpty = await fetch(`http://127.0.0.1:${port}/highlight`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ selector: '' }),
-    });
-    assert.equal(highlightEmpty.status, 400, 'an empty selector is rejected');
   } finally {
     child.kill('SIGKILL');
   }
@@ -313,115 +273,6 @@ test('POST /scaffold requires the bearer token, validates dir/type, and refuses 
   } finally {
     child.kill('SIGKILL');
     await rm(existing, { recursive: true, force: true }).catch(() => undefined);
-  }
-});
-
-// Design Mode turning ON posts to /harness; the service drops the in-session
-// OpenCode plugin into the project and answers the write result. Idempotent.
-test('POST /harness writes the generated plugin and is idempotent', async () => {
-  const port = await pickFreePort(50000, 1500);
-  const project = await mkdtemp(path.join(tmpdir(), 'ds-harness-route-'));
-  const child = spawn(process.execPath, [path.join(root, 'service', 'main.js')], {
-    env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN },
-    stdio: 'ignore',
-  });
-
-  try {
-    await waitForHealth(port, child);
-
-    const noAuth = await fetch(`http://127.0.0.1:${port}/harness`, { method: 'POST' });
-    assert.equal(noAuth.status, 401, '/harness needs the bearer token');
-
-    const badDir = await fetch(`http://127.0.0.1:${port}/harness`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ dir: 'relative/path' }),
-    });
-    assert.equal(badDir.status, 400, 'dir must be an absolute project path');
-
-    const first = await fetch(`http://127.0.0.1:${port}/harness`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ dir: project }),
-    });
-    assert.equal(first.status, 200);
-    const firstBody = (await first.json()) as { path: string; created: boolean; changed: boolean };
-    assert.equal(firstBody.path, '.opencode/plugin/design-studio-harness.ts');
-    assert.equal(firstBody.created, true);
-    assert.equal(firstBody.changed, true);
-    assert.match(await readFile(path.join(project, firstBody.path), 'utf8'), /design-studio harness — generated, do not edit/);
-
-    const second = await fetch(`http://127.0.0.1:${port}/harness`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ dir: project }),
-    });
-    assert.equal(second.status, 200);
-    assert.deepEqual(await second.json(), {
-      path: '.opencode/plugin/design-studio-harness.ts',
-      created: false,
-      updated: false,
-      changed: false,
-    });
-  } finally {
-    child.kill('SIGKILL');
-    await rm(project, { recursive: true, force: true }).catch(() => undefined);
-  }
-});
-
-// The files route: bearer-authed, listing a project's files so the panel can
-// attach a FILE reference. Validation of dir/limit is a 400; the listing itself
-// is a 200 with the sorted relative paths.
-test('POST /files requires the bearer token, validates dir/limit, and lists files', async () => {
-  const port = await pickFreePort(54000, 1500);
-  const project = await mkdtemp(path.join(tmpdir(), 'ds-files-route-'));
-  await mkdir(path.join(project, 'src'), { recursive: true });
-  await writeFile(path.join(project, 'src', 'app.ts'), 'export const x = 1;\n');
-  await writeFile(path.join(project, 'readme.md'), '# hi\n');
-  await mkdir(path.join(project, 'node_modules', 'dep'), { recursive: true });
-  await writeFile(path.join(project, 'node_modules', 'dep', 'index.js'), '// dep\n');
-  const child = spawn(process.execPath, [path.join(root, 'service', 'main.js')], {
-    env: { ...process.env, DS_KILL_WINDOW_ON_STOP: '1', OPENCHAMBER_SERVICE_PORT: String(port), OPENCHAMBER_SERVICE_TOKEN: TOKEN },
-    stdio: 'ignore',
-  });
-
-  try {
-    await waitForHealth(port, child);
-
-    const noAuth = await fetch(`http://127.0.0.1:${port}/files`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ dir: project }),
-    });
-    assert.equal(noAuth.status, 401, '/files needs the bearer token');
-
-    const badDir = await fetch(`http://127.0.0.1:${port}/files`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ dir: 'relative/path' }),
-    });
-    assert.equal(badDir.status, 400, 'dir must be an absolute project path');
-
-    const badLimit = await fetch(`http://127.0.0.1:${port}/files`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ dir: project, limit: 0 }),
-    });
-    assert.equal(badLimit.status, 400, 'limit must be a positive integer');
-
-    const listed = await fetch(`http://127.0.0.1:${port}/files`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ dir: project }),
-    });
-    assert.equal(listed.status, 200);
-    const body = (await listed.json()) as { ok: boolean; files: string[] };
-    assert.equal(body.ok, true);
-    assert.deepEqual(body.files, ['readme.md', 'src/app.ts']);
-    assert.equal(body.files.some((file) => file.includes('node_modules')), false, 'node_modules is skipped');
-  } finally {
-    child.kill('SIGKILL');
-    await rm(project, { recursive: true, force: true }).catch(() => undefined);
   }
 });
 
@@ -756,10 +607,12 @@ test('resolveWorkspaceRoot probes "Documents" existence (win32 branch)', async (
   await mkdir(path.join(one, 'Documents'));
   await mkdir(path.join(two, 'Documents'));
   try {
-    const picked = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two });
+    // R4: point the settings file at nothing so a real user choice cannot leak in.
+    const noSettings = path.join(one, 'no-settings.json');
+    const picked = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two, DS_SETTINGS_PATH: noSettings });
     assert.equal(picked, path.resolve(one, 'Documents', WORKSPACE_FOLDER), 'first existing Documents wins');
     await rm(path.join(one, 'Documents'), { recursive: true });
-    const second = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two });
+    const second = await resolveWorkspaceRoot({ ONEDRIVE: one, USERPROFILE: two, DS_SETTINGS_PATH: noSettings });
     assert.equal(second, path.resolve(two, 'Documents', WORKSPACE_FOLDER), 'when the first dies the next wins');
   } finally {
     await rm(one, { recursive: true, force: true }).catch(() => undefined);
@@ -886,20 +739,27 @@ test('GET /workspaces answers {root, workspaces} from the workspace root on disk
   await writeFile(path.join(beta, '.design-studio.json'), JSON.stringify({ version: 1 })); // no name → basename, no url, no screens
   await writeFile(path.join(wsRoot, 'stray.txt'), 'not a workspace'); // files are skipped
 
-  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: wsRoot });
+  // R4: a settings file that does not exist keeps previousRoots empty (hermetic).
+  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: wsRoot, DS_SETTINGS_PATH: path.join(wsRoot, 'no-settings.json') });
   try {
     const res = await fetch(`http://127.0.0.1:${port}/workspaces`, { headers: { authorization: `Bearer ${TOKEN}` } });
     assert.equal(res.status, 200);
-    const body = (await res.json()) as { root: string; workspaces: Array<Record<string, unknown>> };
+    const body = (await res.json()) as { root: string; roots: string[]; workspaces: Array<Record<string, unknown>> };
     assert.equal(body.root, wsRoot);
+    assert.deepEqual(body.roots, [wsRoot], 'R4: roots lists every scanned root, current first');
     assert.equal(body.workspaces.length, 2, 'only dirs with .design-studio.json are listed');
+    // R4 additive keys: root, legacyRoot, and the cheap server peek.
+    const noServer = { recorded: false, up: false, port: null };
     assert.deepEqual(body.workspaces[0], {
       dir: alpha,
       name: 'Alpha',
       url: 'http://localhost:5173/',
       screens: [{ id: 'home', file: 'home.html', title: 'Home', width: 1280, height: 800 }],
+      root: wsRoot,
+      legacyRoot: false,
+      server: noServer,
     });
-    assert.deepEqual(body.workspaces[1], { dir: beta, name: 'beta' }, 'no url/screens keys when absent');
+    assert.deepEqual(body.workspaces[1], { dir: beta, name: 'beta', root: wsRoot, legacyRoot: false, server: noServer }, 'no url/screens keys when absent');
     assert.equal(JSON.stringify(body.workspaces).includes('gamma'), false, 'no-config dirs are excluded');
   } finally {
     child.kill('SIGKILL');
@@ -909,11 +769,11 @@ test('GET /workspaces answers {root, workspaces} from the workspace root on disk
 
 test('GET /workspaces with a missing root answers the root with an empty list', { timeout: 60_000 }, async () => {
   const missing = path.join(await mkdtemp(path.join(tmpdir(), 'ds-wsroot-missing-')), 'never-created');
-  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: missing });
+  const { port, child } = await startServiceTs({ DS_WORKSPACE_ROOT: missing, DS_SETTINGS_PATH: path.join(missing, 'no-settings.json') });
   try {
     const res = await fetch(`http://127.0.0.1:${port}/workspaces`, { headers: { authorization: `Bearer ${TOKEN}` } });
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { root: missing, workspaces: [] });
+    assert.deepEqual(await res.json(), { root: missing, roots: [missing], workspaces: [] }, 'a missing root is empty, not a rootError');
   } finally {
     child.kill('SIGKILL');
   }

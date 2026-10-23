@@ -35,6 +35,25 @@ function describe(error: unknown): string {
   return String(error);
 }
 
+/**
+ * Where service failures are reported (P5 diagnostics ring buffer). The panel
+ * installs one sink; a failing call reports `METHOD /path` and the message
+ * once, then throws as before. Never throws itself.
+ */
+let serviceErrorSink: ((source: string, message: string) => void) | null = null;
+export function setServiceErrorSink(sink: ((source: string, message: string) => void) | null): void {
+  serviceErrorSink = sink;
+}
+
+function failService(method: string, path: string, message: string): never {
+  try {
+    serviceErrorSink?.(`${method} ${path}`, message);
+  } catch {
+    /* diagnostics never break a call */
+  }
+  throw new ServiceUnavailable(message);
+}
+
 async function callService<T>(
   path: string,
   query?: Record<string, string>,
@@ -45,7 +64,7 @@ async function callService<T>(
   try {
     result = await host.serviceRequest({ method, path, query, body });
   } catch (error) {
-    throw new ServiceUnavailable(describe(error));
+    return failService(method, path, describe(error));
   }
   if (result.status !== 200) {
     let detail = `HTTP ${result.status}`;
@@ -55,7 +74,7 @@ async function callService<T>(
     } catch {
       /* body was not JSON */
     }
-    throw new ServiceUnavailable(detail);
+    return failService(method, path, detail);
   }
   return JSON.parse(result.body) as T;
 }
@@ -86,6 +105,10 @@ export type QueuedElementPick = {
   screenUrl: string;
   at: number;
   additive: boolean;
+  /** R2 (B4): the send this pick belongs to (one id per Reference in chat). */
+  batch?: string;
+  /** R2 (B4): the workspace dir of the canvas window the pick came from. */
+  dir?: string;
 } & PickPayload;
 
 export type QueuedScreenPick = {
@@ -99,6 +122,8 @@ export type QueuedScreenPick = {
   height: number;
   /** The workspace file behind the screen (the registry path, absolute when the service resolves it). */
   file: string;
+  batch?: string;
+  dir?: string;
 };
 
 export type QueuedPick = QueuedElementPick | QueuedScreenPick;
@@ -119,12 +144,12 @@ export function getPicks(since: number, waitMs: number): Promise<PicksResult> {
 
 /** Confirm delivery through `seq`; the service answers the CANVAS with the
  * `Added to chat · <label>` pill — the panel only acks (V4-5). */
-export function ackPicks(seq: number, label: string): Promise<{ ok: boolean }> {
+export function ackPicks(seq: number, label: string, dir?: string): Promise<{ ok: boolean }> {
   return callService<{ ok: boolean }>(
     '/picks/ack',
     undefined,
     'POST',
-    JSON.stringify({ seq, label: label.slice(0, PICK_ACK_LABEL_MAX) }),
+    JSON.stringify({ seq, label: label.slice(0, PICK_ACK_LABEL_MAX), ...(dir !== undefined ? { dir } : {}) }),
   );
 }
 
@@ -134,6 +159,17 @@ export function pickAckLabel(entry: QueuedPick): string {
     ? `screen ${entry.screen}`
     : entry.selector || entry.tag || `screen ${entry.screen}`;
   return raw.slice(0, PICK_ACK_LABEL_MAX);
+}
+
+/**
+ * The ack label for a delivered page: when it carried N>1 elements of the
+ * LAST delivered pick's batch (one Reference in chat send), the pill names the
+ * count instead of one element.
+ */
+export function batchAckLabel(delivered: ReadonlyArray<QueuedPick>, last: QueuedPick): string {
+  if (last.kind !== 'element' || !last.batch) return pickAckLabel(last);
+  const count = delivered.filter((entry) => entry.kind === 'element' && entry.batch === last.batch).length;
+  return count > 1 ? `${count} elements` : pickAckLabel(last);
 }
 
 /** One screen as the canvas shell reports it (spec §B `GET /state`). */
@@ -158,11 +194,6 @@ export type LiveState = {
   /** LEGACY like `lastPick`; the queue's own seqs drive delivery. */
   pickSeq: number;
   windowOpen: boolean;
-  /**
-   * Another panel (the hidden pane `/canvas` mounts inside a chat window) is
-   * the pick→chat bridge right now: this panel must not attach picks too.
-   */
-  bridgeActive?: boolean;
   /** The canvas mode (`edit` | `play`), from `GET /state` (spec §B). */
   mode?: 'edit' | 'play';
   /** The workspace's screens, activation included (spec §B). */
@@ -179,6 +210,8 @@ export type LiveState = {
   registryError?: string | null;
   /** V4-15/E17 bridge-health telemetry: read by the integrator's loop, never rendered by the row. */
   shellBridge?: { authority: boolean; lastCommandAt: number | null };
+  /** The workspace dir the window has open, or null. */
+  dir?: string | null;
 };
 
 /** What `POST /open` answers after opening/navigating the real window. */
@@ -193,6 +226,13 @@ export type OpenResult = {
   error?: string;
   /** Machine code the panel reacts to; V4-15 answers `WORKSPACE_MISSING`. */
   code?: string;
+  /**
+   * #9: the dev server was still booting when the service's clamped wait ran
+   * out, so the window launches in the background (`ok` stays true). The
+   * row's `/state` and `/server/status` polls settle what happens next.
+   */
+  opening?: boolean;
+  serverStarting?: boolean;
 };
 
 /** The workspace folder no longer exists — the row clears its `ws/` record and offers a new create. */
@@ -200,6 +240,9 @@ export const WORKSPACE_MISSING_CODE = 'WORKSPACE_MISSING';
 
 /** Status shown in the dock while an open (and dev-server start) is in flight. */
 export const OPENING_STATUS = 'Starting dev server…';
+
+/** #9: the window is launching while the dev server keeps booting. */
+export const OPENING_SERVER_STARTING_STATUS = 'Opening the canvas · dev server still starting…';
 
 /**
  * Open (or warm-navigate) the workspace's live canvas: `POST /open`. Spec §B:
@@ -241,8 +284,24 @@ export function stopDevServer(dir: string): Promise<ServerStopResult> {
   return callService<ServerStopResult>('/server/stop', undefined, 'POST', JSON.stringify({ dir }));
 }
 
+/**
+ * R5: the work list's Stop dev server — `POST /server/stop {dir}` for ANY
+ * listed workspace. Deliberately not `requestDevServerStop`: its gates are
+ * about THIS chat's session; the list's own confirm step guards this one.
+ */
+export function stopWorkspaceServer(dir: string): Promise<ServerStopResult> {
+  return callService<ServerStopResult>('/server/stop', undefined, 'POST', JSON.stringify({ dir }));
+}
+
 /** What `POST /server/start` answers: whether the dev server is up and who started it. */
-export type ServerStartResult = { ok: boolean; started?: boolean; up?: boolean; error?: string };
+export type ServerStartResult = {
+  ok: boolean;
+  started?: boolean;
+  up?: boolean;
+  error?: string;
+  /** #9: a slow boot answered early (`ok:true, up:false`); `/server/status` settles it. */
+  starting?: boolean;
+};
 
 /**
  * Start (or confirm) the dev server for `dir`. When `url` is omitted the
@@ -260,7 +319,14 @@ export function startDevServer(dir: string, url?: string): Promise<ServerStartRe
  * conflict). When present the reachability bit must not be rendered as a
  * trustworthy green Start.
  */
-export type ServerStatus = { up: boolean; port: number | null; pid?: number; error?: string };
+export type ServerStatus = {
+  up: boolean;
+  port: number | null;
+  pid?: number;
+  error?: string;
+  /** #9: a start for this dir is still booting service-side. */
+  starting?: boolean;
+};
 
 /** The recorded dev-server status for a workspace dir (never starts one). */
 export function getServerStatus(dir: string): Promise<ServerStatus> {
@@ -278,22 +344,6 @@ export function getState(): Promise<LiveState> {
  */
 export function setMode(mode: 'edit' | 'play'): Promise<{ ok: boolean; mode?: 'edit' | 'play'; error?: string }> {
   return callService<{ ok: boolean; mode?: 'edit' | 'play'; error?: string }>('/mode', undefined, 'POST', JSON.stringify({ mode }));
-}
-
-/**
- * Claim (or heartbeat) the exclusive pick→chat bridge. Called by the hidden
- * pane `/canvas` mounts inside a chat window: while it holds a warm claim,
- * every OTHER panel stands down, so each Cmd/Ctrl-click becomes exactly one
- * chip in the window that owns the bridge. `token` renews an existing claim;
- * omit it to take ownership.
- */
-export function claimPickBridge(token?: string): Promise<{ ok: boolean; bridgeActive?: boolean; token?: string; ttlMs?: number }> {
-  return callService('/bridge', undefined, 'POST', JSON.stringify(token ? { token } : {}));
-}
-
-/** Give the bridge up (the holding pane is exiting). Harmless if already gone. */
-export function releasePickBridge(token: string): Promise<{ ok: boolean; bridgeActive?: boolean }> {
-  return callService('/bridge', undefined, 'POST', JSON.stringify({ release: true, token }));
 }
 
 /**
@@ -323,14 +373,6 @@ export function postAgentStatus(busy: boolean, label?: string): Promise<{ ok: bo
  */
 export function syncScreens(dir: string): Promise<{ ok: boolean; error?: string }> {
   return callService<{ ok: boolean; error?: string }>('/screens/sync', undefined, 'POST', JSON.stringify({ dir }));
-}
-
-/**
- * Flash a picked element in the live preview window: `POST /highlight` with its
- * selector. Best-effort and fire-and-forget from the caller.
- */
-export function highlightElement(selector: string): Promise<{ ok: boolean }> {
-  return callService<{ ok: boolean }>('/highlight', undefined, 'POST', JSON.stringify({ selector }));
 }
 
 export type StudioConfig = {
@@ -378,13 +420,82 @@ export type WorkspaceRow = {
   name: string;
   url?: string;
   screens?: ScreenInfo[];
+  /** R4: the root the workspace was found under. */
+  root?: string;
+  /** R4: true when that root is an earlier designs location. */
+  legacyRoot?: boolean;
+  /** R4: a cheap dev-server peek — recorded by the service, and reachable. */
+  server?: { recorded: boolean; up: boolean; port: number | null };
 };
 
 /** What `GET /workspaces` answers: the resolved root plus every workspace. */
 export type WorkspacesResult = {
   root: string;
   workspaces: WorkspaceRow[];
+  /** R4: every root scanned (the current one first). */
+  roots?: string[];
+  /** R4: roots that could not be read, with why. */
+  rootError?: Record<string, string>;
 };
+
+/** Whether a row's dev server is one the service recorded AND is up — the only one the list can stop. */
+export function workspaceServerRunning(row: Pick<WorkspaceRow, 'server'>): boolean {
+  return Boolean(row.server?.recorded && row.server.up);
+}
+
+/** What `POST /workspaces/rename` answers. */
+export type RenameResult = { ok: boolean; name?: string; error?: string };
+
+/** R4 (F1): rename a workspace — the service sets ONLY its config `name`. */
+export function renameWorkspace(dir: string, name: string): Promise<RenameResult> {
+  return callService<RenameResult>('/workspaces/rename', undefined, 'POST', JSON.stringify({ dir, name }));
+}
+
+/** What `GET /settings` answers: the designs location and where it came from. */
+export type DesignsSettings = {
+  workspaceRoot: string;
+  source: string;
+  defaultRoot: string;
+  envOverride: boolean;
+  previousRoots: string[];
+};
+
+/** The service's refusal codes for `PUT /settings`. */
+export type SettingsErrorCode =
+  | 'ENV_OVERRIDE' | 'NOT_ABSOLUTE' | 'INVALID' | 'IS_FS_ROOT' | 'IS_WORKSPACE'
+  | 'INSIDE_EXTENSION' | 'NOT_WRITABLE' | 'SETTINGS_WRITE_FAILED';
+
+export type SettingsPutResult =
+  | { ok: true; workspaceRoot: string }
+  | { ok: false; code: SettingsErrorCode; error: string };
+
+/** The service-owned designs location (R4, F4). */
+export function getSettings(): Promise<DesignsSettings> {
+  return callService<DesignsSettings>('/settings');
+}
+
+/** Choose the designs location, or reset it to the default with `null`. */
+export function putSettings(workspaceRoot: string | null): Promise<SettingsPutResult> {
+  return callService<SettingsPutResult>('/settings', undefined, 'PUT', JSON.stringify({ workspaceRoot }));
+}
+
+/** Whether a `/settings` answer has the shape the panel renders. */
+export function isDesignsSettings(value: unknown): value is DesignsSettings {
+  return Boolean(value && typeof value === 'object' && typeof (value as DesignsSettings).workspaceRoot === 'string' && (value as DesignsSettings).workspaceRoot !== '');
+}
+
+/** Copy a workspace folder path to the clipboard (host-mediated). */
+export function copyPath(dir: string): Promise<void> {
+  return host.writeClipboard(dir);
+}
+
+/** A long path shortened in the middle, so both the drive and the folder name stay readable. */
+export function middleTruncatePath(path: string, max = 36): string {
+  if (path.length <= max) return path;
+  const head = Math.max(1, Math.floor((max - 1) * 0.4));
+  const tail = max - 1 - head;
+  return `${path.slice(0, head)}…${path.slice(path.length - tail)}`;
+}
 
 /**
  * All workspaces on disk — the page's "Your design work" list (decision 2).
@@ -398,12 +509,6 @@ export function getWorkspaces(): Promise<WorkspacesResult> {
 /** The normalized screens.json registry for a workspace dir (spec §B). */
 export function getScreens(dir: string): Promise<ScreensRegistry> {
   return callService<ScreensRegistry>('/screens', { dir });
-}
-
-/** Validate and write the full registry (spec §B). The panel offers this so a
- * row action can repair a registry; the agent normally writes screens.json. */
-export function putScreens(dir: string, registry: ScreensRegistry): Promise<{ path: string }> {
-  return callService<{ path: string }>('/screens', { dir }, 'PUT', JSON.stringify(registry));
 }
 
 // ---- export (SPEC-V3-P2-SCOPE.md D4, `POST /export` + `GET /export/status`) ----
@@ -517,12 +622,17 @@ export function scaffoldProject(dir: string, spec: ScaffoldSpec): Promise<Scaffo
 /** The states of an async scaffold job (V4-11). */
 export type ScaffoldState = 'installing' | 'booting' | 'done' | 'failed';
 
-/** What `GET /scaffold/status?job=` answers. */
+/** What `GET /scaffold/status?dir=&job=` answers. */
 export type ScaffoldStatus = { state: ScaffoldState; elapsedMs: number; error?: string };
 
-/** Poll one async scaffold job by the id `POST /scaffold` returned. */
-export function getScaffoldStatus(job: string): Promise<ScaffoldStatus> {
-  return callService<ScaffoldStatus>('/scaffold/status', { job });
+/**
+ * Poll one async scaffold job by the id `POST /scaffold` returned. The service
+ * route REQUIRES `dir` next to `job` (F10: a poll must name the job's own
+ * workspace, or it answers 400 / "unknown scaffold job") — sending `job` alone
+ * was the F1 break that killed `/canvas` and Start on first use.
+ */
+export function getScaffoldStatus(job: string, dir: string): Promise<ScaffoldStatus> {
+  return callService<ScaffoldStatus>('/scaffold/status', { job, dir });
 }
 
 /**
@@ -662,6 +772,27 @@ export function joinWorkspaceDir(root: string, slug: string): string {
   return `${trimmed}${sep}${slug}`;
 }
 
+/** Whether `file` is already absolute: POSIX `/…`, a win32 drive `C:\…`/`C:/…`, or a UNC `\\host\…`. */
+function isAbsoluteFilePath(file: string): boolean {
+  return file.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(file) || file.startsWith('\\\\');
+}
+
+/**
+ * The absolute path of a workspace file for the chips the model edits from
+ * (F6). A registry `file` is workspace-relative and always `/`-separated; the
+ * join takes the WORKSPACE dir's separator style (the service hands win32 dirs
+ * with `\`), so the model is never handed a mixed `C:\ws/pages/home.html`. An
+ * already-absolute file passes through untouched.
+ */
+export function workspaceFilePath(dir: string, file: string): string {
+  const trimmedFile = file.trim();
+  if (isAbsoluteFilePath(trimmedFile)) return trimmedFile;
+  const root = dir.replace(/[\\/]+$/, '');
+  const sep = root.includes('\\') && !root.startsWith('/') ? '\\' : '/';
+  const relative = trimmedFile.replace(/^\.?[\\/]+/, '').split(/[\\/]+/).filter(Boolean).join(sep);
+  return `${root}${sep}${relative}`;
+}
+
 /** The screen url for a workspace-relative file, on a workspace base url (decision 6). */
 export function screenUrl(baseUrl: string, file: string): string {
   return `${baseUrl.replace(/\/+$/, '')}/${file}`;
@@ -687,11 +818,6 @@ export function joinWorkspaceSessions(rows: WorkspaceRow[], wsSessionMap: Readon
 export function workspaceMeta(row: WorkspaceRow): string {
   const url = row.url?.trim();
   return url ? url : row.dir;
-}
-
-/** A workspace is "ready" when its `.design-studio.json` carries a non-empty url. */
-export function workspaceReady(url: string | null | undefined): boolean {
-  return Boolean(url?.trim());
 }
 
 // ---- session detection (pure) ----
@@ -720,11 +846,11 @@ export function sessionShowsDesignMode(session: Pick<GuestSessionRecord, 'items'
 // ---- pure helpers (kept DOM-free so they can be unit-tested) ----
 
 /**
- * The row's compact pick gesture hint. V4 (V4-5/V4-6): in edit mode a plain
- * click picks the element under the (now hover-outlined) point; every click
- * becomes its own chip through the pick queue.
+ * The row's compact pick gesture hint. R2 (B4): a click SELECTS an element in
+ * the canvas; the explicit Reference in chat action sends the selection, which
+ * arrives through the pick queue.
  */
-export const PICK_HINT = 'Click an element in edit mode to add a reference';
+export const PICK_HINT = 'Click an element in the canvas, then Reference in chat.';
 
 /**
  * The hint is ACTIVE only while the live window is open; with no window there
@@ -734,15 +860,9 @@ export function pickHintActive(state: Pick<LiveState, 'windowOpen'>): boolean {
   return state.windowOpen;
 }
 
-/** One-line summary of the real window for the status row. */
-export function formatWindowStatus(state: Pick<LiveState, 'windowOpen' | 'url' | 'title'>): string {
-  if (!state.windowOpen) return 'Window closed';
-  const where = state.url && state.url !== 'about:blank' ? state.url : 'no page open';
-  return state.title ? `Window open · ${where} — ${state.title}` : `Window open · ${where}`;
-}
-
 /** One line describing the outcome of an open, for the status row. */
 export function formatOpenStatus(result: OpenResult): string {
+  if (result.ok && result.serverStarting) return OPENING_SERVER_STARTING_STATUS;
   if (result.ok) return result.started ? 'Dev server started · window open' : 'Window open';
   return result.error ?? 'Could not open the window';
 }
@@ -795,8 +915,6 @@ export const DESIGN_READY_BADGE = 'Canvas ready';
 export const NO_CONFIG_BADGE = 'No dev server yet';
 /** The workspaces list's true empty state. */
 export const NO_DESIGN_WORK_MESSAGE = 'No canvas workspaces yet — /canvas creates one.';
-/** The rail panel surface's whole content: a calm pointer to the sidebar page. */
-export const PANEL_SIDEBAR_HINT = 'Design Canvas opens from the sidebar.';
 /** The one line the row shows while this session has no canvas workspace yet. */
 export const NO_WORKSPACE_MESSAGE = 'No canvas workspace yet — Start creates one.';
 
@@ -837,7 +955,7 @@ export function shouldToastRegistryError(
  * a test share one wording.
  */
 export function registryErrorToastMessage(registryError: string): string {
-  return `The canvas screens registry is broken — ${registryError}`;
+  return `Screens registry is broken: ${registryError}. Fix screens.json in the workspace.`;
 }
 
 /** Actionable message when a workspace has no url to open or serve. */
@@ -894,8 +1012,11 @@ export type PickScreen = { id: string; url: string };
 /**
  * The text of a picked element's chat reference chip. `screen` adds the
  * `Screen: <id>` line and that screen's URL (spec §F pick-chip payload).
+ * `location` (F6) is the `Workspace:` / `File:` / path-rule block the caller
+ * resolved — it rides right under the URLs, ABOVE the selector and markup, so
+ * a chip the host trims from the end never loses the path the model edits.
  */
-export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, screen?: PickScreen): string {
+export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, screen?: PickScreen, location: string[] = []): string {
   const styles = PICK_STYLE_KEYS
     .filter((key) => pick.styles[key] && pick.styles[key] !== 'normal' && pick.styles[key] !== 'none')
     .map((key) => `  ${key}: ${pick.styles[key]};`)
@@ -905,6 +1026,7 @@ export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, s
     ...(pickedAt ? [`Picked at ${localTimeOf(pickedAt)}`] : []),
     ...(screen ? [`Screen: ${screen.id}`, `Screen URL: ${screen.url}`] : []),
     `URL: ${url}`,
+    ...location,
     `Selector: ${pick.selector}`,
     `Tag: ${pick.tag}${pick.classes ? `  Classes: ${pick.classes}` : ''}`,
     pick.text ? `Text: ${JSON.stringify(pick.text)}` : 'Text: (empty)',
@@ -926,12 +1048,15 @@ export function referenceText(pick: PickPayload, url: string, pickedAt?: Date, s
 export function screenReferenceText(
   entry: Pick<QueuedScreenPick, 'screen' | 'screenUrl' | 'width' | 'height' | 'file'>,
   pickedAt?: Date,
+  location: string[] = [],
 ): string {
+  // `location` (F6): the `Workspace:` / `File:` / path-rule block.
   return [
     'Reference from Design Canvas',
     ...(pickedAt ? [`Picked at ${localTimeOf(pickedAt)}`] : []),
     `Screen: ${entry.screen} (${entry.width}×${entry.height}) — ${entry.file}`,
     `Screen URL: ${entry.screenUrl}`,
+    ...location,
   ].join('\n');
 }
 
@@ -972,15 +1097,4 @@ export function contrastRatio(foreground: string, background: string): number | 
   const b = relativeLuminance(bg);
   const [hi, lo] = a >= b ? [a, b] : [b, a];
   return Math.round(((hi + 0.05) / (lo + 0.05)) * 10) / 10;
-}
-
-/**
- * The token a picked element's colour should come from. We can only guess from
- * the property that carries a hardcoded colour; `null` when there is none.
- */
-export function tokenNameFor(styles: Record<string, string>): string | null {
-  if (styles.backgroundColor) return '--color-surface';
-  if (styles.color) return '--color-text';
-  if (styles.borderColor) return '--color-border';
-  return null;
 }

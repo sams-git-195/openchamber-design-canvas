@@ -7,7 +7,11 @@
 //     client (V4-5): every queued pick — element chips and artboard-menu screen
 //     sends (V4-10) — arrives through `GET /picks` long-polling and becomes a
 //     chip, acked to the service after delivery.
-//   - "panel" (rail panel) — a one-line pointer to the creation page.
+//   - "panel" (rail panel) — the compact rail: this chat's canvas status, one
+//     Open/Create canvas button, a short brief box with Start design, and the
+//     "Your design work" list. The SAME surface also hosts the hidden 1×1
+//     `/canvas` resolve pane, which renders only the static shell and runs
+//     nothing long-lived (see `isRealPane`).
 //   - "page" (the sidebar "Extension pages → Design Canvas" entry) — the centred
 //     creation home: the hero, the prompt composer with its type chip, and the
 //     "Your design work" workspaces list from `GET /workspaces`.
@@ -20,7 +24,8 @@
 // (Start creates the workspace on first use). The canvas itself is a real
 // headful Chrome window the local service opens on the workspace dir; this page
 // only opens it, raises it and reads its state. English-only copy by requirement.
-import { type HostReadyContext, GUEST_COMPOSE_TEXT_MAX } from '@openchamber/sdk';
+import { isGuestMessageItem, isGuestSessionItem } from '@openchamber/sdk';
+import type { GuestMessageItem, GuestSessionItem, HostReadyContext } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 
 import {
@@ -31,7 +36,6 @@ import {
   NO_PROJECT_URL_MESSAGE,
   NO_WORKSPACE_MESSAGE,
   OPENING_STATUS,
-  PANEL_SIDEBAR_HINT,
   PICK_HINT,
   ServiceUnavailable,
   WORKSPACE_MISSING_CODE,
@@ -59,8 +63,17 @@ import {
   normalizeDirPath,
   openWorkspace,
   pathContains,
-  pickAckLabel,
+  batchAckLabel,
+  copyPath,
+  getSettings,
+  isDesignsSettings,
+  middleTruncatePath,
   pickHintActive,
+  putSettings,
+  renameWorkspace,
+  stopWorkspaceServer,
+  workspaceServerRunning,
+  type DesignsSettings,
   postAgentStatus,
   projectReady,
   registryErrorToastMessage,
@@ -69,6 +82,7 @@ import {
   scaffoldProgressText,
   scaffoldProject,
   setMode,
+  setServiceErrorSink,
   shouldStopDevServer,
   shouldToastRegistryError,
   startDevServer,
@@ -76,6 +90,7 @@ import {
   syncScreens,
   uniqueCanvasSlug,
   validateReferencePath,
+  workspaceFilePath,
   workspaceMeta,
   wsSessionIdFromKey,
   type CanvasScreenState,
@@ -95,22 +110,36 @@ import {
   type WorkspaceWorkRow,
 } from './api.ts';
 import { DIRECTIONS, type DirectionId } from './craft.ts';
+import * as copy from './copy.ts';
 import {
+  addDiagnosticError,
+  formatDiagnostics,
+  mergeDiagnosticErrors,
+  sanitizeDiagnosticErrors,
+  type DiagnosticError,
+  type DiagnosticsSnapshot,
+} from './diagnostics.ts';
+import { EXTENSION_API_VERSION, EXTENSION_VERSION } from './version.ts';
+import {
+  BRIEF_MAX,
   DEFAULT_MODE,
   DESIGN_TYPES,
+  DEVICE_PRESETS,
   FIDELITIES,
-  FIDELITY_OPTIONS,
-  NO_DESIGN_SYSTEM,
+  FIDELITY_FOR_TYPE,
   TYPE_HINT,
   attachUrl,
+  briefLimitError,
+  buildCompactModeChip,
   buildModeChip,
   critiqueReviewChip,
+  canvasJobStartedChip,
+  staleSessionKeys,
   designMarkerKey,
   designMarkerValue,
   designSessionIdFromKey,
   designSessionPrompt,
   designSystemGroups,
-  designSystemLabel,
   designSystemSwatches,
   exportFailureSummary,
   exportJobSummary,
@@ -118,6 +147,7 @@ import {
   fileReferenceChip,
   filterDesignSystems,
   findDesignSystem,
+  isDesignMarker,
   modeStorageKey,
   parseCanvasExportArgs,
   parseDesignArgs,
@@ -126,25 +156,32 @@ import {
   projectReferenceChip,
   seedModeValue,
   seedSessionData,
+  structureBrief,
   workspaceOpenPrompt,
   workspaceStorageKey,
   type DesignBriefSpec,
+  type DesignLook,
   type DesignMode,
   type DesignType,
+  type DeviceId,
   type Fidelity,
 } from './mode.ts';
+import type { OptionsChoice } from '../shared/harness-text.ts';
 import type { DesignSystemPreset } from '../shared/design-systems.ts';
 import { addDraftReference, removeDraftReference, buildReferenceSubmission, type DraftReference } from './reference-draft.ts';
-import { buildAttachPayload } from './attach-dialog.ts';
+import { buildAttachPayload, type PickContext } from './attach-dialog.ts';
 
 const POLL_MS = 900;
 
-/** One suggestion under the composer: a title, a one-liner and the brief it seeds. */
-type Idea = { title: string; description: string; prompt: string };
+/** The outline a starter card draws: what the brief is designed for. */
+type StarterGlyph = 'phone' | 'desktop' | 'slide' | 'square' | 'page';
+
+/** One "Start from" card: a pre-structured brief for one design type. */
+type Starter = { type: DesignType; title: string; description: string; glyph: StarterGlyph; prompt: string };
 
 /**
  * The design types as they read on the creation page: short labels for the
- * headline and the chip. The compact session row has no creation selectors.
+ * chip and the session title. The compact session row has no creation selectors.
  */
 const PAGE_TYPE_LABELS: Record<DesignType, string> = {
   wireframe: 'Wireframe',
@@ -154,43 +191,48 @@ const PAGE_TYPE_LABELS: Record<DesignType, string> = {
   custom: 'Custom',
 };
 
-/**
- * Idea cards, framed by the selected type: choosing a type reframes these. There
- * are no real project thumbnails, so each card carries a small abstract SVG
- * preview instead (see `ideaThumb`). English only.
- */
-const IDEAS: Record<DesignType, Idea[]> = {
-  prototype: [
-    { title: 'Gamified Habit App', description: 'Daily streaks with playful rewards', prompt: 'A gamified habit-tracking app with daily streaks, points, and playful rewards.' },
-    { title: 'Interactive Dashboard', description: 'Live metrics, filters and charts', prompt: 'An interactive dashboard with live metrics, filters, and charts.' },
-    { title: 'Booking Flow', description: 'Pick a slot, confirm, pay', prompt: 'An interactive booking flow: choose a date and slot, confirm the details, and pay.' },
-  ],
-  'hi-fi': [
-    { title: 'Luxury Property Website', description: 'Elegant listings and detail pages', prompt: 'A luxury property website with elegant listings, a photo gallery, and property detail pages.' },
-    { title: 'Product Pricing Page', description: 'Three tiers, clear comparison', prompt: 'A product pricing page with three tiers and a clear feature comparison.' },
-    { title: 'Marketing Landing Page', description: 'Hero, features and a call to action', prompt: 'A marketing landing page with a hero, feature highlights, and a strong call to action.' },
-  ],
-  deck: [
-    { title: 'New Hire Onboarding Guide', description: 'A welcome deck for the first week', prompt: 'A new-hire onboarding deck covering the first week, the tools, and the team.' },
-    { title: 'Q3 Product Review', description: 'Results, learnings and next bets', prompt: 'A Q3 product review deck: results, learnings, and the next bets.' },
-    { title: 'Sales Pitch', description: 'Problem, solution, proof, pricing', prompt: 'A sales pitch deck: problem, solution, proof, and pricing.' },
-  ],
-  wireframe: [
-    { title: 'Checkout Flow', description: 'Cart to confirmation, boxes only', prompt: 'A wireframe of the checkout flow from cart to confirmation, boxes and labels only.' },
-    { title: 'Onboarding Steps', description: 'Sign-up to first value', prompt: 'A wireframe of the onboarding steps from sign-up to first value.' },
-    { title: 'App Navigation', description: 'Tabs, menus and top-level screens', prompt: 'A wireframe of the app navigation: tabs, menus, and the top-level screens.' },
-  ],
-  custom: [
-    { title: 'Marketing Page', description: 'A single page that sells', prompt: 'A single marketing page that explains the product and asks for one clear action.' },
-    { title: 'Mobile App', description: 'A multi-screen product', prompt: 'A multi-screen mobile app for the core flow.' },
-    { title: 'Data Tool', description: 'A dashboard or console', prompt: 'A data tool: a dashboard or console for the team to read at a glance.' },
-  ],
+/** The "Start from" cards: three per type, each seeding an already-structured brief. */
+const STARTERS: Starter[] = [
+  { type: 'hi-fi', title: 'Landing page', description: 'Hero, proof, one call to action', glyph: 'desktop', prompt: 'Goal: a landing page that gets visitors to start a trial.\nKey screens: home\nDevices: phone, desktop' },
+  { type: 'hi-fi', title: 'Settings & account', description: 'Profile, billing, notifications', glyph: 'desktop', prompt: 'Goal: account settings for an existing app.\nKey screens: profile, billing, notifications\nDevices: desktop' },
+  { type: 'hi-fi', title: 'Dashboard home', description: 'The first screen after sign-in', glyph: 'desktop', prompt: 'Goal: a dashboard home that shows what needs attention today.\nKey screens: dashboard\nDevices: desktop, tablet' },
+  { type: 'wireframe', title: 'Checkout flow', description: 'Cart to confirmation', glyph: 'phone', prompt: 'Goal: map the checkout from cart to confirmation.\nKey screens: cart, details, payment, confirmation\nDevices: phone' },
+  { type: 'wireframe', title: 'Onboarding', description: 'Sign-up to first value', glyph: 'phone', prompt: 'Goal: onboarding from sign-up to the first useful moment.\nKey screens: welcome, sign-up, setup, first task\nDevices: phone' },
+  { type: 'wireframe', title: 'App navigation', description: 'Tabs, menus, top-level screens', glyph: 'phone', prompt: 'Goal: the top-level navigation and where each screen lives.\nDevices: phone, desktop' },
+  { type: 'prototype', title: 'Booking flow', description: 'Pick a slot, confirm, pay', glyph: 'phone', prompt: 'Goal: a clickable booking flow.\nKey screens: pick a date, pick a slot, confirm, paid\nDevices: phone' },
+  { type: 'prototype', title: 'Data table', description: 'Filter, sort, inspect a row', glyph: 'desktop', prompt: 'Goal: a working table with filters, sorting and a row detail panel.\nDevices: desktop' },
+  { type: 'prototype', title: 'Sign-in', description: 'Email, code, errors', glyph: 'phone', prompt: 'Goal: a sign-in flow with every state: idle, sending, wrong code, locked.\nDevices: phone, desktop' },
+  { type: 'deck', title: 'Product review', description: 'Results, learnings, next bets', glyph: 'slide', prompt: 'Goal: a quarterly product review deck.\nSlides: title, results, learnings, next bets, asks' },
+  { type: 'deck', title: 'Pitch', description: 'Problem, solution, proof, ask', glyph: 'slide', prompt: 'Goal: a short pitch deck.\nSlides: problem, solution, proof, pricing, ask' },
+  { type: 'deck', title: 'Onboarding guide', description: "A new hire's first week", glyph: 'slide', prompt: 'Goal: a first-week guide for new hires.\nSlides: welcome, team, tools, week plan, contacts' },
+  { type: 'custom', title: 'From my project', description: 'Redesign a screen you already have', glyph: 'desktop', prompt: 'Goal: redesign one existing screen in my project.\nScreen: \nKeep: ' },
+  { type: 'custom', title: 'Social post', description: '1080×1080 artboards', glyph: 'square', prompt: 'Goal: three social posts for a launch.\nSize: 1080×1080' },
+  { type: 'custom', title: 'Print page', description: 'A4 at 96 dpi', glyph: 'page', prompt: 'Goal: a one-page A4 flyer.\nSize: 794×1123' },
+];
+
+/** How many "Your design work" rows the page shows before "Show all". */
+const WORK_LIST_CAP = 5;
+
+/** The brief length at which the composer starts showing its counter. */
+const BRIEF_COUNTER_FROM = 2000;
+
+/** Where the page keeps its creation preferences across mounts. */
+const PAGE_PREFS_KEY = 'prefs/page';
+
+/** Where the look comes from: the open project, a preset, or a direction (or Auto). */
+type LookKind = 'project' | 'preset' | 'direction';
+
+/** The page's remembered creation preferences (`prefs/page`). */
+export type PagePrefs = {
+  questions: boolean;
+  options: OptionsChoice;
+  /** Empty = "Ask me — detect from the project". */
+  devices: DeviceId[];
+  look: { kind: LookKind | null; presetId: string | null; direction: 'auto' | DirectionId };
 };
 
 /** The one-time heads-up about out-of-folder edit permissions (decision 4b). */
 const PERMISSION_TOAST_KEY = 'ws-permission-notified';
-const PERMISSION_HEADS_UP =
-  'The agent edits the Design Canvas workspace, which lives outside the chat folder — approve its file-edit permission prompts so it can write the design files.';
 
 const state = {
   surface: 'panel',
@@ -216,10 +258,11 @@ const state = {
   /** True while OUR side is bringing the window up (see openCanvasWindow). */
   pendingOpen: false,
   /**
-   * V4-5: another panel currently claims the pick→chat bridge (`/state.bridgeActive`)
-   * — the row's pick loop HOLDS (no attach, no ack; the queue keeps everything).
+   * #9: until this epoch ms a service-side background open (`opening:true`)
+   * may still be launching the window, so a `/state` "no window" is not read
+   * as the user closing it. 0 = no background open pending.
    */
-  bridgeActive: false,
+  backgroundOpenUntil: 0,
   /**
    * V4-4: the last `/state.registryError` message we toasted while the condition
    * held. Null clears the arm, so a fixed-then-rebroken registry toasts again.
@@ -247,23 +290,65 @@ const state = {
   // ---- full-page creation surface ----
   /** The workspaces list (GET /workspaces joined with the cached ws/ scan). */
   workspaces: null as WorkspacesView | null,
-  /** The selected creation type; drives the headline, chip and the idea cards. */
+  /** The selected creation type; drives the type chip, the fidelity and the session title. */
   pageType: 'hi-fi' as DesignType,
+  /** The Look chip's direction (its Directions tab), or Auto. */
   pageDirection: 'auto' as 'auto' | DirectionId,
-  pageFidelity: 'hi-fi' as Fidelity,
+  /** Where the look comes from; null = the default (Project with a project open, else Directions). */
+  pageLookKind: null as LookKind | null,
+  /** "Ask me questions first". */
+  pageQuestions: true,
+  /** How many side-by-side directions, or 'ask'. */
+  pageOptions: 'ask' as OptionsChoice,
+  /** The device artboards; empty = "Ask me — detect from the project". */
+  pageDevices: [] as DeviceId[],
   prompt: '' as string,
   references: [] as DraftReference[],
   /** An actionable error from a failed scaffold (the session still starts). */
   pageError: '' as string,
   pageBusy: false,
-  typeMenuOpen: false,
-  /** The `+` attach overlay: its open state. */
-  attachMenuOpen: false,
-  /** The design-system picker panel open in the composer. */
-  dsMenuOpen: false,
-  /** The chosen design-system preset id, or null for "No design system". */
+  /** The one composer overlay open right now, or null. */
+  overlay: null as OverlayId | null,
+  /** The Look popover's visible tab. */
+  lookTab: 'directions' as LookTab,
+  /** "Your design work" shows every row instead of the first WORK_LIST_CAP. */
+  workShowAll: false,
+  /** The chosen design-system preset id (the Look chip's Presets tab), or null. */
   pageDesignSystemId: null as string | null,
+  /** The first-run strip's dismissal (`prefs/first-run`); null until storage answered, so it never flashes. */
+  firstRunDismissed: null as boolean | null,
 };
+
+/**
+ * The smallest frame (each side, px) that can be the right-rail tab. The host
+ * mounts the SAME `surface: 'panel'` twice: as the rail tab, and as the hidden
+ * pane that resolves one `/canvas` (GuestHosts wraps it in a `fixed … h-px
+ * w-px overflow-hidden` div, then unmounts it when the resolve settles). The
+ * hidden frame's document still reads `visibilityState: 'visible'`, so no
+ * visibility signal tells the two apart — only its 1×1 px size does.
+ */
+const REAL_PANE_MIN_PX = 64;
+
+/** Whether this frame is big enough to be a pane the user can see. Two property reads; re-check freely. */
+export function isRealPane(): boolean {
+  const width = typeof window.innerWidth === 'number' ? window.innerWidth : 0;
+  const height = typeof window.innerHeight === 'number' ? window.innerHeight : 0;
+  return width >= REAL_PANE_MIN_PX && height >= REAL_PANE_MIN_PX;
+}
+
+/**
+ * The headless `/canvas` resolve pane: a panel frame too small to be the rail
+ * tab. It lives for one resolve, so nothing long-lived or side-effecting
+ * (intervals, the pick loop, handoff claims, window opens, config/agent-status
+ * service calls) may run there. Keyed on the SURFACE as well as the size on
+ * purpose: the chat Work Status row is never the hidden pane, yet its frame
+ * may legitimately be shorter than 64 px (the host clamps status sections to
+ * `GUEST_STATUS_SECTION_HEIGHT_MIN`, 24 px) — a bare size gate there would
+ * strand every `/canvas` handoff the row owns.
+ */
+function isHiddenResolvePane(): boolean {
+  return state.surface === 'panel' && !isRealPane();
+}
 
 let hintEl: HTMLElement;
 let sessionLineEl: HTMLElement | null = null;
@@ -287,7 +372,9 @@ let serverAnnounceEl: HTMLElement | null = null;
 // steals the caret). Null whenever the page is not mounted.
 let promptEl: HTMLTextAreaElement | null = null;
 let sendEl: HTMLButtonElement | null = null;
-let accentFillEl: HTMLElement | null = null;
+let counterEl: HTMLElement | null = null;
+/** The page's designs-location line: one node kept across renders, so an open editor survives a redraw. */
+let pageLocationEl: HTMLElement | null = null;
 /** Play the staggered reveal only on the first paint, not on every re-render. */
 let pageEnter = true;
 /** Live state of the open design-system picker. */
@@ -301,12 +388,16 @@ let referenceSlow = false;
 let referenceRequest = 0;
 let referenceLiveEl: HTMLElement | null = null;
 let referenceFocusId: string | null = null;
-const DROP_PATH_MESSAGE = 'Paste an accessible file path using + → File path. Dropped filenames do not include their filesystem path.';
+const DROP_PATH_MESSAGE = copy.DROP_PATH_MESSAGE;
 
 /** The cached ws/ scan: normalized workspace dir → session id (audit #19). */
 let wsSessionMap = new Map<string, string>();
 /** Every registered project, for decision 4c detection only. */
 let allProjects: RegisteredProject[] = [];
+/** R4-fix (F3): roots the service could not read on the last /workspaces read
+ *  (map root → why), kept apart from `WorkspacesView` so the work list can say
+ *  which designs are hidden. null = no unreadable roots. */
+let workspaceRootErrors: Record<string, string> | null = null;
 
 function announceReference(message: string): void {
   if (!referenceLiveEl) return;
@@ -347,7 +438,7 @@ function setStatus(message: string, kind: 'info' | 'error' | 'warn' = 'info'): v
   if (kind === 'info') return;
   if (message === lastStatus) return;
   lastStatus = message;
-  void host.toast({ kind: kind === 'error' ? 'error' : 'info', message });
+  void host.toast(kind === 'error' ? copy.errorToast(message) : copy.infoToast(message));
 }
 
 // ---- last-known URL (per workspace dir) ----
@@ -440,13 +531,41 @@ async function maybeShowPermissionToast(dir: string): Promise<void> {
   } catch {
     return;
   }
-  await host.toast({ kind: 'info', message: PERMISSION_HEADS_UP });
+  await host.toast(copy.infoToast(copy.PERMISSION_HEADS_UP));
 }
 
 /** The outcome of the async scaffold POST for a NEW canvas workspace. */
 type ScaffoldOutcome =
   | { ok: true; record: WorkspaceRecord; jobId: string; url: string }
   | { ok: false; error: string };
+
+/**
+ * What the new workspace is scaffolded AS (F8). Each caller passes its own
+ * explicit selections — the page its type/direction/fidelity/design-system
+ * pickers, `/canvas` its parsed type over the session mode — instead of the
+ * scaffold reading `state.mode`, which on the page is the DEFAULT mode, not
+ * what the user picked.
+ */
+type ScaffoldChoice = {
+  type: DesignType;
+  direction: DesignMode['direction'];
+  fidelity: Fidelity;
+  designSystemId: string | null;
+  /** The page's Devices chip; omitted = not chosen. */
+  devices?: DeviceId[];
+  /** The user's open project (read-only design context). */
+  projectDir?: string | null;
+};
+
+/** The session mode as a scaffold choice (the row and `/canvas` flows). */
+function modeScaffoldChoice(type?: DesignType | null): ScaffoldChoice {
+  return {
+    type: type ?? state.mode.type,
+    direction: state.mode.direction,
+    fidelity: state.mode.fidelity,
+    designSystemId: state.pageDesignSystemId,
+  };
+}
 
 /**
  * Create the workspace: `GET /workspaces` for the service-resolved ROOT (the
@@ -456,15 +575,25 @@ type ScaffoldOutcome =
  * V4-11: the POST answers as soon as the FILES are written — the returned
  * `jobId` covers npm install + dev boot, which the caller polls so the request
  * can NEVER hit the 20 s host cap (E15).
+ * `notify:false` leaves the error toast to the caller — the `/canvas` resolver
+ * THROWS it instead, so the host shows it once rather than a toast followed by
+ * "found nothing to attach".
  */
-async function scaffoldCanvasWorkspace(brief: string, seed: string, designSystemId: string | null): Promise<ScaffoldOutcome> {
+async function scaffoldCanvasWorkspace(
+  brief: string,
+  seed: string,
+  choice: ScaffoldChoice,
+  options: { notify?: boolean } = {},
+): Promise<ScaffoldOutcome> {
+  const notify = options.notify ?? true;
   let result: WorkspacesResult;
   try {
     result = await getWorkspaces();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await host.toast({ kind: 'error', message: `Could not list canvas workspaces: ${message}` });
-    return { ok: false, error: `Could not list canvas workspaces: ${message}` };
+    const message = copy.listWorkspacesFailed(copy.reason(error));
+    await recordDiagnosticError('workspaces', message);
+    if (notify) await host.toast(copy.errorToast(message));
+    return { ok: false, error: message };
   }
   const slug = uniqueCanvasSlug(brief || 'canvas', seed, result.workspaces.map((row) => row.dir));
   const dir = joinWorkspaceDir(result.root, slug);
@@ -472,18 +601,22 @@ async function scaffoldCanvasWorkspace(brief: string, seed: string, designSystem
   let scaffold: ScaffoldResult;
   try {
     scaffold = await scaffoldProject(dir, {
-      type: state.mode.type,
-      direction: state.mode.direction,
-      fidelity: state.mode.fidelity,
+      type: choice.type,
+      direction: choice.direction,
+      fidelity: choice.fidelity,
       brief: brief || undefined,
       // Omitted for "No design system" so the request stays as before.
-      designSystemId: designSystemId ?? undefined,
+      designSystemId: choice.designSystemId ?? undefined,
+      // The service forwards both to the scaffold (R4); omitted when not chosen.
+      ...(choice.devices?.length ? { devices: choice.devices } : {}),
+      ...(choice.projectDir ? { projectDir: choice.projectDir } : {}),
     });
   } catch (error) {
     scaffold = { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
   if (!scaffold.ok) {
-    await host.toast({ kind: 'error', message: scaffold.error });
+    await recordDiagnosticError('scaffold', scaffold.error);
+    if (notify) await host.toast(copy.errorToast(copy.scaffoldFailed(scaffold.error)));
     return { ok: false, error: scaffold.error };
   }
   await maybeShowPermissionToast(dir);
@@ -503,13 +636,16 @@ const SCAFFOLD_TOAST_STEP_MS = 10_000;
 const SCAFFOLD_MAX_MS = 15 * 60_000;
 
 /**
- * Poll `GET /scaffold/status?job=` (every `timing.pollMs`, production 2 s) until
- * the job reports done/failed, TOASTING progress as it goes (V4-11): once per
- * state change, refreshed at most per `SCAFFOLD_TOAST_STEP_MS` inside a state.
- * `timing` is a test seam. Returns 'done' or an actionable error.
+ * Poll `GET /scaffold/status?job=&dir=` (every `timing.pollMs`, production 2 s)
+ * until the job reports done/failed, TOASTING progress as it goes (V4-11): once
+ * per state change, refreshed at most per `SCAFFOLD_TOAST_STEP_MS` inside a
+ * state. `dir` is the workspace the job scaffolds — the service matches it
+ * against the job (F10) and refuses a poll without it (F1). `timing` is a test
+ * seam. Returns 'done' or an actionable error.
  */
 export async function runScaffoldJob(
   jobId: string,
+  dir: string,
   timing: { pollMs?: number; maxMs?: number } = {},
 ): Promise<'done' | { error: string }> {
   const pollMs = timing.pollMs ?? SCAFFOLD_POLL_MS;
@@ -519,29 +655,43 @@ export async function runScaffoldJob(
   for (;;) {
     let job: ScaffoldStatus;
     try {
-      job = await getScaffoldStatus(jobId);
+      job = await getScaffoldStatus(jobId, dir);
     } catch (error) {
-      const message = `Canvas setup failed: the job status could not be read (${error instanceof Error ? error.message : String(error)}).`;
-      await host.toast({ kind: 'error', message });
+      const message = copy.setupStatusUnreadable(copy.reason(error));
+      await recordDiagnosticError('scaffold', message);
+      await host.toast(copy.errorToast(message));
+      return { error: message };
+    }
+    // An unknown job (the service restarted, or the single slot moved on)
+    // answers 200 `{ok:false,error}` with NO state. Read as "still running" it
+    // would poll for the full 15 minutes; it is a settled failure — the files
+    // exist, so Start retries the open.
+    if (job?.state !== 'installing' && job?.state !== 'booting' && job?.state !== 'done' && job?.state !== 'failed') {
+      const reason = (job as { error?: unknown } | null)?.error;
+      const message = copy.setupStatusUnavailable(typeof reason === 'string' ? reason : '');
+      await recordDiagnosticError('scaffold', message);
+      await host.toast(copy.errorToast(message));
       return { error: message };
     }
     if (job.state === 'done') {
-      await host.toast({ kind: 'success', message: scaffoldProgressText(job) });
+      await host.toast(copy.successToast(scaffoldProgressText(job)));
       return 'done';
     }
     if (job.state === 'failed') {
-      const message = scaffoldProgressText(job);
-      await host.toast({ kind: 'error', message });
+      const message = copy.setupFailed(scaffoldProgressText(job));
+      await recordDiagnosticError('scaffold', message);
+      await host.toast(copy.errorToast(message));
       return { error: message };
     }
     const key = `${job.state}:${Math.floor((job.elapsedMs ?? 0) / SCAFFOLD_TOAST_STEP_MS)}`;
     if (key !== lastKey) {
       lastKey = key;
-      await host.toast({ kind: 'info', message: scaffoldProgressText(job) });
+      await host.toast(copy.infoToast(scaffoldProgressText(job)));
     }
     if (Date.now() - start >= maxMs) {
-      const message = 'Canvas setup is taking unusually long — the workspace files exist; press Start to try opening it.';
-      await host.toast({ kind: 'error', message });
+      const message = copy.SETUP_TOO_LONG;
+      await recordDiagnosticError('scaffold', message);
+      await host.toast(copy.errorToast(message));
       return { error: message };
     }
     await sleep(pollMs);
@@ -557,9 +707,35 @@ export async function runScaffoldJob(
  * (files written) — before the install/boot job finishes — so an interrupted
  * wait can never orphan a second workspace. The window opens only after `done`.
  */
-async function ensureCanvasWorkspace(brief: string, forSessionId: string | null = null): Promise<WorkspaceRecord | null> {
-  const sessionId = forSessionId ?? state.sessionId;
-  if (state.workspace && state.workspace.dir.trim() !== '') return state.workspace;
+async function ensureCanvasWorkspace(brief: string, forSessionId: string | null = null, choice?: ScaffoldChoice): Promise<WorkspaceRecord | null> {
+  const prepared = await prepareCanvasWorkspace(brief, forSessionId ?? state.sessionId, choice ?? modeScaffoldChoice());
+  if ('error' in prepared) return null;
+  if (!prepared.jobId) return prepared.record;
+  const job = await runScaffoldJob(prepared.jobId, prepared.record.dir);
+  if (job !== 'done') return null; // `ws/` stays stored — the dir is real, Start retries the open
+  return prepared.record;
+}
+
+/** What the FAST half of the workspace ensure answers (F3). */
+type PreparedWorkspace =
+  | { record: WorkspaceRecord; jobId: string | null; url: string | null }
+  | { error: string; noSession?: true };
+
+/**
+ * The fast half of `ensureCanvasWorkspace` (F3): an existing record, or the
+ * scaffold POST (files only — the service answers before npm install) plus the
+ * `ws/<sessionId>` save. NEVER waits on the install/boot job: `jobId` is handed
+ * back for a long-lived surface to poll. This is all the `/canvas` resolver may
+ * await, because a hidden resolve pane is unmounted the moment it answers and
+ * must answer inside `GUEST_REQUEST_TIMEOUT_MS` (20 s).
+ */
+async function prepareCanvasWorkspace(
+  brief: string,
+  sessionId: string | null,
+  choice: ScaffoldChoice,
+  options: { notify?: boolean } = {},
+): Promise<PreparedWorkspace> {
+  if (state.workspace && state.workspace.dir.trim() !== '') return { record: state.workspace, jobId: null, url: null };
   const stored = await readStoredWorkspace(sessionId);
   if (stored) {
     if (!state.workspace) {
@@ -567,21 +743,27 @@ async function ensureCanvasWorkspace(brief: string, forSessionId: string | null 
       renderRow();
       rerender();
     }
-    return stored;
+    return { record: stored, jobId: null, url: null };
   }
   if (!sessionId) {
-    return null; // no session to key a workspace to — the caller surfaces it
+    return { error: NO_SESSION_MESSAGE, noSession: true }; // no session to key a workspace to — the caller surfaces it
   }
-  const outcome = await scaffoldCanvasWorkspace(brief, sessionId, state.pageDesignSystemId);
-  if (!outcome.ok) return null;
+  const outcome = await scaffoldCanvasWorkspace(brief, sessionId, choice, options);
+  if (!outcome.ok) return { error: outcome.error };
   await saveWorkspaceRecord(sessionId, outcome.record);
   state.workspace = outcome.record;
   renderRow();
   rerender();
-  const job = await runScaffoldJob(outcome.jobId);
-  if (job !== 'done') return null; // `ws/` stays stored — the dir is real, Start retries the open
-  return outcome.record;
+  return { record: outcome.record, jobId: outcome.jobId, url: outcome.url };
 }
+
+/**
+ * F2: a new-chat draft has no session id yet, so there is nothing to key a
+ * workspace or a mode to. Said plainly (the resolver throws it — the host shows
+ * a thrown message verbatim; the row toasts it and hints it on the Start control).
+ */
+const NO_SESSION_MESSAGE = 'Start this chat by sending any message first, then run /canvas again.';
+const NO_SESSION_HINT = 'Send a message to start this chat first';
 
 // ---- Design Mode ----
 
@@ -596,14 +778,66 @@ function modeStoragePayload(): { on: boolean; type: DesignType; direction: Desig
   };
 }
 
+/**
+ * Bumped by every LOCAL mode write. A storage read that started before a local
+ * write may return the pre-write value; `syncModeFromStorage` drops any read
+ * whose generation moved, so this frame never adopts its own stale echo.
+ */
+let modeWriteGeneration = 0;
+
 async function saveMode(): Promise<void> {
   const key = modeStorageKey(state.sessionId);
   if (!key) return;
+  modeWriteGeneration += 1;
   try {
     await host.storage.set(key, modeStoragePayload());
   } catch {
     /* mode is a convenience; chat still works */
   }
+}
+
+/** Apply a stored `mode/<sessionId>` value onto `state.mode`. Garbage keeps the current fields. */
+function applyStoredMode(stored: unknown): void {
+  if (!stored || typeof stored !== 'object') return;
+  const value = stored as Partial<DesignMode>;
+  state.mode.on = Boolean(value.on);
+  if (DESIGN_TYPES.includes(value.type as DesignType)) state.mode.type = value.type as DesignType;
+  if (value.direction !== undefined && (value.direction === 'auto' || value.direction in DIRECTIONS)) state.mode.direction = value.direction as DesignMode['direction'];
+  if (FIDELITIES.includes(value.fidelity as Fidelity)) state.mode.fidelity = value.fidelity as Fidelity;
+  if (value.canvMode === 'play' || value.canvMode === 'edit') state.mode.canvMode = value.canvMode;
+  state.mode.brief = typeof value.brief === 'string' ? value.brief : '';
+}
+
+/**
+ * Re-read `mode/<sessionId>` and adopt it when it disagrees with memory (F3/F5).
+ * Another frame — the hidden `/canvas` resolve pane above all — writes this key
+ * while the row holds its own copy from mount; without the re-read the row kept
+ * holding picks ("mode off") and never opened what `/canvas` turned ON. Returns
+ * whether Design Mode is ON after the read. A read raced by a local write is
+ * discarded (the local write is newer by construction).
+ */
+async function syncModeFromStorage(): Promise<boolean> {
+  const key = modeStorageKey(state.sessionId);
+  if (!key) return state.mode.on;
+  const generation = modeWriteGeneration;
+  const sessionId = state.sessionId;
+  let stored: unknown;
+  try {
+    stored = await host.storage.get(key);
+  } catch {
+    return state.mode.on;
+  }
+  if (generation !== modeWriteGeneration || sessionId !== state.sessionId) return state.mode.on;
+  if (!stored || typeof stored !== 'object') return state.mode.on;
+  const value = stored as Partial<DesignMode>;
+  const differs = Boolean(value.on) !== state.mode.on
+    || (DESIGN_TYPES.includes(value.type as DesignType) && value.type !== state.mode.type)
+    || (typeof value.brief === 'string' && value.brief !== state.mode.brief);
+  if (differs) {
+    applyStoredMode(stored);
+    renderModeUi();
+  }
+  return state.mode.on;
 }
 
 /**
@@ -625,15 +859,7 @@ async function loadMode(): Promise<void> {
   const key = modeStorageKey(state.sessionId);
   if (!key) return;
   try {
-    const stored = (await host.storage.get(key)) as Partial<DesignMode> | undefined;
-    if (stored && typeof stored === 'object') {
-      state.mode.on = Boolean(stored.on);
-      if (DESIGN_TYPES.includes(stored.type as DesignType)) state.mode.type = stored.type as DesignType;
-      if (stored.direction !== undefined && (stored.direction === 'auto' || stored.direction in DIRECTIONS)) state.mode.direction = stored.direction as DesignMode['direction'];
-      if (FIDELITIES.includes(stored.fidelity as Fidelity)) state.mode.fidelity = stored.fidelity as Fidelity;
-      if (stored.canvMode === 'play' || stored.canvMode === 'edit') state.mode.canvMode = stored.canvMode;
-      state.mode.brief = typeof stored.brief === 'string' ? stored.brief : '';
-    }
+    applyStoredMode(await host.storage.get(key));
   } catch {
     /* keep defaults */
   }
@@ -669,7 +895,7 @@ export async function toggleMode(next: boolean, type?: DesignType | null, brief?
         try {
           await focusLive();
         } catch (error) {
-          setStatus(`Focus failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+          setStatus(copy.focusFailed(copy.reason(error)), 'error');
         }
       } else {
         await openCanvasWindow(false);
@@ -702,6 +928,17 @@ function currentScreens(): Array<{ id: string; file: string; title: string }> {
   }));
 }
 
+/** `/canvas help`: the verbs as one chip. Needs no session and no workspace. */
+function canvasHelpChip(): ReturnType<typeof buildModeChip> {
+  return {
+    providerId: 'design-canvas',
+    id: 'canvas-help',
+    title: copy.CANVAS_HELP_TITLE,
+    url: attachUrl(undefined),
+    text: copy.canvasHelpText(),
+  };
+}
+
 /** The `/canvas` resolver. Registered on panel and page surfaces only. */
 async function resolveCanvasCommand(args: string): Promise<null | Awaited<ReturnType<typeof buildModeChip>>> {
   if (!state.resolveAllowed) return null;
@@ -710,20 +947,33 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
   // — the canvas workspace is created when the chat does not have one yet.
   // `export` and `critique` are reserved verbs (SPEC-V3-P2-SCOPE.md D7-B/C):
   // they never fall through to the brief branch.
+  if (copy.isHelpVerb(args)) return canvasHelpChip();
   const [head = '', ...rest] = args.trim().split(/\s+/);
+  // #6: both verbs outlast the host's 20 s resolve cap, so the resolve only
+  // KICKS them and answers at once with an info chip; this (real, long-lived)
+  // pane toasts or attaches the outcome when it lands. The hidden resolve pane
+  // dies with its answer, so there it is a thrown, shown failure instead.
   if (/^export$/i.test(head!)) {
-    await canvasExportCommand(rest.join(' '));
-    return null;
+    if (isHiddenResolvePane()) throw new Error(copy.CANVAS_JOBS_NEED_RAIL);
+    return startCanvasExportCommand(rest.join(' '));
   }
   if (/^critique$/i.test(head!)) {
-    return await canvasCritiqueCommand();
+    if (isHiddenResolvePane()) throw new Error(copy.CANVAS_JOBS_NEED_RAIL);
+    return startCanvasCritiqueCommand();
   }
   const parsed = parseDesignArgs(args);
   if (!parsed.on) {
     await toggleMode(false);
-    await host.toast({ kind: 'info', message: 'Design Mode is off.' });
+    await host.toast(copy.infoToast(copy.DESIGN_MODE_OFF));
     return null;
   }
+  // #10: the same refusal the page gives — never a silent slice of the brief.
+  const tooLong = briefLimitError(parsed.brief);
+  if (tooLong) throw new Error(tooLong);
+  // F2: every ON path keys a workspace and a mode to the session. A new-chat
+  // draft has none yet; null would surface only the host's generic "found
+  // nothing to attach", while a THROWN error is shown to the user verbatim.
+  if (!state.sessionId) throw new Error(NO_SESSION_MESSAGE);
   // `/canvas play|edit`: the canvas mode switch (spec §B `POST /mode`), in-memory
   // echo drives the row; persisted with the session's mode.
   if (parsed.mode) {
@@ -732,23 +982,247 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
       if (result.ok === false && result.error) setStatus(result.error, 'error');
       else state.liveMode = parsed.mode;
     } catch (error) {
-      setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      setStatus(copy.switchModeFailed(copy.reason(error)), 'error');
     }
     state.mode.canvMode = parsed.mode;
     await saveMode();
   }
-  if (parsed.brief.trim() !== '') {
-    // `/canvas <brief>`: ensure/create THIS chat's canvas workspace, then turn
-    // Design Mode ON with the brief. No registered project is required, and no
-    // second session is started (decision 2/3) — this chat designs.
-    const ws = await ensureCanvasWorkspace(parsed.brief);
-    if (!ws) return null;
-    if (parsed.type) state.mode.type = parsed.type;
-    await toggleMode(true, parsed.type, parsed.brief);
-    return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), state.config?.url);
+  // `/canvas [<type>] [<brief>]`: ensure/create THIS chat's canvas workspace,
+  // then turn Design Mode ON (with the brief, when given). No registered
+  // project is required, and no second session is started (decision 2/3) —
+  // this chat designs.
+  //
+  // F3 — the 20 s budget: this resolve usually runs in a HIDDEN pane the host
+  // mounts only for the resolve and unmounts the moment it answers. So it
+  // awaits ONLY the fast half — the scaffold's file write and the `ws/` save —
+  // and hands npm install, the dev-server boot and the Chrome open to the
+  // status row (`canvas-open/<sessionId>`, consumed by `beginOpenHandoff`).
+  const ws = await prepareCanvasWorkspace(parsed.brief, state.sessionId, modeScaffoldChoice(parsed.type), { notify: false });
+  if ('error' in ws) throw new Error(ws.error); // F2/F3: the host shows a thrown message verbatim
+  await armDesignModeForRow(ws, parsed.type, parsed.brief || undefined);
+  const url = (await readWorkspaceUrl(ws.record.dir)) ?? ws.url ?? undefined;
+  return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), url);
+}
+
+/**
+ * The workspace's config url for the mode chip — one quick `/config` read
+ * (a file read service-side; never a boot). Null when the service cannot say.
+ */
+async function readWorkspaceUrl(dir: string): Promise<string | null> {
+  const cached = currentConfig()?.url?.trim();
+  if (cached) return cached;
+  try {
+    const read = await getConfig(dir);
+    if (state.workspace?.dir === dir) {
+      state.config = read.config;
+      state.configPath = read.path;
+      state.configDir = dir;
+    }
+    return read.config?.url?.trim() || null;
+  } catch {
+    return null;
   }
-  await toggleMode(true, parsed.type, parsed.brief || undefined);
-  return buildModeChip(state.sessionId, state.mode, state.workspace, currentScreens(), state.config?.url);
+}
+
+// ---- the resolve → row open handoff (F3) ----
+//
+// The `/canvas` resolver must answer fast and usually runs in a pane that dies
+// with its answer, while the status row stays mounted and already polls. So
+// the resolver records WHAT to open in `canvas-open/<sessionId>` and turns the
+// mode ON; the row's poll finds the record, waits out the install/boot job (if
+// the resolve scaffolded one), and opens the canvas window. The record is
+// written BEFORE `mode/` flips ON: a row reading ON must already find the
+// handoff, or its `/state` mirror would read "ON, no window" as the user
+// closing it and turn the mode straight back OFF.
+
+/** A pending open the row owes a resolve (F3). */
+type OpenHandoff = { dir: string; jobId: string | null; at: number };
+
+/** A handoff older than this is not acted on — opening Chrome long after `/canvas` would be a surprise. */
+const OPEN_HANDOFF_MAX_AGE_MS = 5 * 60_000;
+/**
+ * A fresh handoff seen while `mode/` still reads OFF is LEFT for the next tick
+ * this long: the resolver writes `mode/` right after the handoff, and the row
+ * may have read between the two writes.
+ */
+const OPEN_HANDOFF_SETTLE_MS = 5_000;
+
+export function openHandoffKey(sessionId: string | null): string | null {
+  return sessionId ? `canvas-open/${sessionId}` : null;
+}
+
+function isOpenHandoff(value: unknown): value is OpenHandoff {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Partial<OpenHandoff>;
+  return typeof record.dir === 'string' && record.dir.trim() !== ''
+    && (record.jobId === null || typeof record.jobId === 'string')
+    && typeof record.at === 'number' && Number.isFinite(record.at);
+}
+
+/**
+ * Write a FRESH `canvas-open/<sessionId>` record (F3/F9). Always stamped now:
+ * the row ignores a record older than `OPEN_HANDOFF_MAX_AGE_MS`. Callers write
+ * it BEFORE the `mode/` ON it explains.
+ */
+async function writeOpenHandoff(sessionId: string | null, dir: string, jobId: string | null): Promise<void> {
+  const key = openHandoffKey(sessionId);
+  if (!key) return;
+  const handoff: OpenHandoff = { dir, jobId, at: Date.now() };
+  try {
+    await host.storage.set(key, handoff);
+  } catch {
+    /* without the record the row cannot open; Start/the toggle still can */
+  }
+}
+
+/**
+ * Turn Design Mode ON for the row to act on (F3): the handoff record first,
+ * then `mode/`, then the one-time design marker. No window work happens here.
+ */
+async function armDesignModeForRow(
+  ws: { record: WorkspaceRecord; jobId: string | null },
+  type: DesignType | null | undefined,
+  brief: string | undefined,
+): Promise<void> {
+  await writeOpenHandoff(state.sessionId, ws.record.dir, ws.jobId);
+  state.mode.on = true;
+  if (type) state.mode.type = type;
+  if (brief !== undefined && brief !== '') state.mode.brief = brief;
+  await saveMode();
+  // The marker is written once, ever. A hidden resolve pane may answer before
+  // its own `loadMode` lands, so "was it off?" is asked of the marker itself.
+  const markerKey = designMarkerKey(state.sessionId);
+  let marked = false;
+  if (markerKey) {
+    try {
+      marked = isDesignMarker(await host.storage.get(markerKey));
+    } catch {
+      marked = false;
+    }
+  }
+  if (!marked) await writeDesignMarker();
+  renderModeUi();
+}
+
+/** True while a handoff open is in progress (one at a time per row). */
+let handoffInFlight = false;
+let handoffTask: Promise<'opened' | 'skipped' | 'failed'> | null = null;
+
+/**
+ * Phase 1 of the row's handoff (awaited by the poll BEFORE it applies `/state`):
+ * read `canvas-open/<sessionId>`, and when it is actionable claim it — hold the
+ * pending-open guard, delete the record (one row, one open) — and start phase 2
+ * in the background. Returns that task WRAPPED (`{ task }`): an async function
+ * returning a bare promise would flatten it, and the poll would then sit on the
+ * whole install instead of only on the claim. Null when there is nothing to do.
+ */
+async function beginOpenHandoff(timing: { pollMs?: number; maxMs?: number } = {}): Promise<{ task: Promise<'opened' | 'skipped' | 'failed'> } | null> {
+  // Safety net: the hidden resolve pane may never claim (it would delete the
+  // record and then die mid-install) nor open Chrome on its own. The row and
+  // a real rail tab are unaffected, so any future headless poll is harmless.
+  if (isHiddenResolvePane()) return null;
+  if (handoffInFlight) return handoffTask ? { task: handoffTask } : null;
+  const key = openHandoffKey(state.sessionId);
+  if (!key) return null;
+  let handoff: unknown;
+  try {
+    handoff = await host.storage.get(key);
+  } catch {
+    return null;
+  }
+  if (handoffInFlight) return handoffTask ? { task: handoffTask } : null;
+  if (!isOpenHandoff(handoff)) return null;
+  const pending: OpenHandoff = handoff;
+  const age = Date.now() - pending.at;
+  if (!state.mode.on) await syncModeFromStorage();
+  if (!state.mode.on && age >= 0 && age < OPEN_HANDOFF_SETTLE_MS) return null; // mode/ not written yet — next tick
+  handoffInFlight = true;
+  const hold = ++pendingOpenHoldSeq;
+  state.pendingOpen = true;
+  try {
+    await host.storage.delete(key);
+  } catch {
+    /* the in-flight flag still stops this row from running it twice */
+  }
+  const sessionId = state.sessionId;
+  handoffTask = (async (): Promise<'opened' | 'skipped' | 'failed'> => {
+    try {
+      if (!state.mode.on || age > OPEN_HANDOFF_MAX_AGE_MS) return 'skipped';
+      // Bind the workspace the resolve created; the row may not have read it yet.
+      if (!state.workspace || !sameDirPath(state.workspace.dir, pending.dir)) {
+        const stored = await readStoredWorkspace(sessionId);
+        if (stored && sameDirPath(stored.dir, pending.dir)) bindWorkspace(stored);
+      }
+      if (!state.workspace || !sameDirPath(state.workspace.dir, pending.dir)) return 'failed';
+      if (pending.jobId) {
+        const job = await runScaffoldJob(pending.jobId, pending.dir, timing);
+        if (job !== 'done') return 'failed'; // the job's own toast said why; `ws/` stays — Start retries
+      }
+      // The user may have switched it OFF (or the session) while the job ran.
+      if (!state.mode.on || state.sessionId !== sessionId) return 'skipped';
+      if (state.windowOpen) {
+        try {
+          await focusLive();
+        } catch (error) {
+          setStatus(copy.focusFailed(copy.reason(error)), 'error');
+        }
+      } else {
+        await openCanvasWindow(false);
+      }
+      return 'opened';
+    } finally {
+      handoffInFlight = false;
+      if (hold === pendingOpenHoldSeq) state.pendingOpen = false;
+    }
+  })();
+  return { task: handoffTask };
+}
+
+/** Run the row's handoff to completion (test seam; the poll only awaits the claim). */
+export async function runOpenHandoff(timing: { pollMs?: number; maxMs?: number } = {}): Promise<'none' | 'opened' | 'skipped' | 'failed'> {
+  const claimed = await beginOpenHandoff(timing);
+  return claimed ? await claimed.task : 'none';
+}
+
+/** Bind a workspace record to this frame (the same reset `loadWorkspace` does). */
+function bindWorkspace(record: WorkspaceRecord): void {
+  state.workspace = record;
+  state.configDir = null;
+  state.config = null;
+  renderRow();
+  rerender();
+  void loadStudioConfig();
+}
+
+/**
+ * The row's per-tick storage sync (F3/F5): adopt a `ws/<sessionId>` another
+ * frame created ("No canvas workspace yet" no longer sticks after a hidden-pane
+ * `/canvas`), adopt `mode/<sessionId>`, and claim a pending open handoff. All of
+ * it is awaited BEFORE the tick applies `/state`, so an ON adopted here is
+ * already guarded when the closed window is read.
+ */
+export async function syncRowFromStorage(): Promise<void> {
+  const sessionId = state.sessionId;
+  if (!sessionId) return;
+  const record = await readStoredWorkspace(sessionId);
+  if (record && sessionId === state.sessionId && !(state.workspace && sameDirPath(state.workspace.dir, record.dir))) {
+    bindWorkspace(record);
+  }
+  const wasOn = state.mode.on;
+  // While memory says OFF, hold the guard across the gap between adopting ON
+  // and claiming the handoff; released below when there is no handoff (the
+  // plain "ON but no window" case keeps its old meaning: the window was
+  // closed, the mode follows it OFF). Memory already ON needs no hold — its
+  // own transition owns the guard.
+  const hold = wasOn ? 0 : ++pendingOpenHoldSeq;
+  if (hold) state.pendingOpen = true;
+  try {
+    await syncModeFromStorage();
+    if (state.mode.on && !wasOn) renderRow();
+    await beginOpenHandoff();
+  } finally {
+    if (hold && hold === pendingOpenHoldSeq) state.pendingOpen = false;
+  }
 }
 
 // ---- /canvas export & critique (SPEC-V3-P2-SCOPE.md D4/D7-B/D7-C) ----
@@ -757,7 +1231,7 @@ async function resolveCanvasCommand(args: string): Promise<null | Awaited<Return
 const EXPORT_POLL_MS = 700;
 const EXPORT_POLL_MAX_MS = 60_000;
 
-const EXPORT_STILL_RUNNING_MESSAGE = 'Export is still running — files land in the workspace exports folder as each screen finishes.';
+const EXPORT_STILL_RUNNING_MESSAGE = copy.EXPORT_STILL_RUNNING;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -778,11 +1252,11 @@ export async function runCanvasExport(
   try {
     start = await exportJob(dir, formats);
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Export failed: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.exportFailedToStart(copy.reason(error))));
     return;
   }
   if (!start.ok) {
-    await host.toast({ kind: 'error', message: start.error || 'Export failed.' });
+    await host.toast(copy.errorToast(copy.exportFailedToStart(start.error || 'the service gave no reason')));
     return;
   }
   const job = start.jobId;
@@ -792,69 +1266,84 @@ export async function runCanvasExport(
     try {
       status = await exportStatus(dir, job);
     } catch (error) {
-      await host.toast({ kind: 'error', message: `Could not read the export status: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(copy.errorToast(copy.exportStatusUnreadable(copy.reason(error))));
       return;
     }
     if (status.state === 'done') {
-      const lines = exportJobSummary(status);
-      const text = lines.join('\n');
-      // GUEST_TOAST_MAX (500) bounds every toast; truncate honestly rather
-      // than let the host silently cut a path mid-character.
-      await host.toast({ kind: 'success', message: text.length > 480 ? `${text.slice(0, 480)}…` : text });
+      // The summary names file paths: Copy carries them whole, the toast
+      // shortens them and stays under GUEST_TOAST_MAX.
+      await host.toast(copy.successToast(exportJobSummary(status).join(' · '), { copy: true }));
       return;
     }
     if (status.state === 'failed') {
-      const text = exportFailureSummary(status);
-      await host.toast({ kind: 'error', message: text.length > 480 ? `${text.slice(0, 480)}…` : text });
+      await host.toast(copy.errorToast(copy.exportFailedSummary(exportFailureSummary(status))));
       return;
     }
     if (Date.now() >= deadline) {
-      await host.toast({ kind: 'info', message: EXPORT_STILL_RUNNING_MESSAGE });
+      await host.toast(copy.infoToast(EXPORT_STILL_RUNNING_MESSAGE));
       return;
     }
     await sleep(timing.pollMs);
   }
 }
 
-/** `/canvas export [png|pdf]`: the workspace's screens → files under <dir>/exports. */
-export async function canvasExportCommand(raw: string): Promise<void> {
-  const parsed = parseCanvasExportArgs(raw);
-  if ('error' in parsed) {
-    await host.toast({ kind: 'error', message: parsed.error });
-    return;
-  }
-  const ws = state.workspace;
-  if (!ws || ws.dir.trim() === '') {
-    await host.toast({ kind: 'error', message: 'No canvas workspace yet — /canvas <brief> creates one, then export again.' });
-    return;
-  }
-  await runCanvasExport(ws.dir, 'formats' in parsed ? parsed.formats : undefined);
+/**
+ * The export/critique job this pane kicked last (#6), or null. The resolve has
+ * already answered; this is what toasts or attaches the outcome. Test seam.
+ */
+let canvasJobTask: Promise<void> | null = null;
+
+export function getCanvasJobTask(): Promise<void> | null {
+  return canvasJobTask;
 }
 
 /**
- * `/canvas critique`: POST /critique for the workspace and compose the bounded
- * gate digest into the chat as a REVIEW REQUEST (D7-C) — the agent writes the
- * prose; the service guarantees the gate-backed part. The chip text is capped
- * at GUEST_COMPOSE_TEXT_MAX by critiqueReviewChip.
+ * `/canvas export [png|pdf]` (#6): refuse a bad format or a missing workspace
+ * as a thrown, shown failure; otherwise kick POST /export + the status poll in
+ * THIS pane and answer with the info chip at once. The job survives the pane
+ * service-side; the outcome is toasted once, when the poll settles.
  */
-export async function canvasCritiqueCommand(): Promise<null | Awaited<ReturnType<typeof buildModeChip>>> {
+function startCanvasExportCommand(raw: string): ReturnType<typeof buildModeChip> {
+  const parsed = parseCanvasExportArgs(raw);
+  if ('error' in parsed) throw new Error(parsed.error);
   const ws = state.workspace;
-  if (!ws || ws.dir.trim() === '') {
-    await host.toast({ kind: 'error', message: 'No canvas workspace yet — /canvas <brief> creates one, then critique again.' });
-    return null;
-  }
+  if (!ws || ws.dir.trim() === '') throw new Error(copy.NO_CANVAS_FOR_EXPORT);
+  canvasJobTask = runCanvasExport(ws.dir, 'formats' in parsed ? parsed.formats : undefined).catch(() => undefined);
+  return canvasJobStartedChip('export', state.sessionId, currentConfig()?.url, copy.EXPORT_STARTED);
+}
+
+/**
+ * `/canvas critique` (#6): POST /critique for the workspace in THIS pane and
+ * answer with the info chip at once; the bounded gate digest is attached as a
+ * REVIEW REQUEST (D7-C) when it lands — same chip id, so it replaces the info
+ * chip. The agent writes the prose; the service guarantees the gate-backed
+ * part. The chip text is capped at GUEST_COMPOSE_TEXT_MAX by critiqueReviewChip.
+ */
+function startCanvasCritiqueCommand(): ReturnType<typeof buildModeChip> {
+  const ws = state.workspace;
+  if (!ws || ws.dir.trim() === '') throw new Error(copy.NO_CANVAS_FOR_CRITIQUE);
+  const sessionId = state.sessionId;
+  canvasJobTask = runCanvasCritique(ws.dir, sessionId).catch(() => undefined);
+  return canvasJobStartedChip('critique', sessionId, currentConfig()?.url, copy.CRITIQUE_STARTED);
+}
+
+async function runCanvasCritique(dir: string, sessionId: string | null): Promise<void> {
   let digest: Awaited<ReturnType<typeof critiqueWorkspace>>;
   try {
-    digest = await critiqueWorkspace(ws.dir);
+    digest = await critiqueWorkspace(dir);
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Critique failed: ${error instanceof Error ? error.message : String(error)}` });
-    return null;
+    await host.toast(copy.errorToast(copy.critiqueFailed(copy.reason(error))));
+    return;
   }
   if (!digest.ok) {
-    await host.toast({ kind: 'error', message: digest.error || 'Critique failed.' });
-    return null;
+    await host.toast(copy.errorToast(copy.critiqueFailed(digest.error || 'the service gave no reason')));
+    return;
   }
-  return critiqueReviewChip(state.sessionId, state.config?.url, digest);
+  try {
+    await host.attach(critiqueReviewChip(sessionId, state.config?.url, digest));
+  } catch (error) {
+    await host.toast(copy.errorToast(copy.critiqueFailed(copy.reason(error))));
+  }
 }
 
 // ---- canvas sessions ----
@@ -908,7 +1397,8 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
         ? 'The design brief was not sent. Choose a model in OpenChamber, then try again. Your draft is unchanged.'
         : `The design brief was not sent (${result.sent}${failure ? `: ${failure}` : ''}). Your draft is unchanged; try again.`;
       state.pageError = message;
-      await host.toast({ kind: 'error', message });
+      await recordDiagnosticError('start-session', message);
+      await host.toast(copy.errorToast(message));
       return false;
     }
     // Delivery consumes this draft before ancillary work can fail.
@@ -918,8 +1408,16 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
       state.prompt = '';
       attachPathDraft = '';
       referenceError = '';
+    } else if (state.surface === 'panel') {
+      state.prompt = ''; // the rail's brief box has no references, only the text
     }
     try {
+      // F9: the new session is born with Design Mode ON, so its row would read
+      // "ON, no window" as the user closing the canvas and flip it OFF. The
+      // same handoff `/canvas` leaves (fresh, BEFORE `mode/`) makes that row
+      // open the window instead. The page waited out the install job already,
+      // hence no jobId.
+      if (spec.workspace) await writeOpenHandoff(result.sessionId, spec.workspace.dir, null);
       await host.storage.set(modeStorageKey(result.sessionId)!, seedModeValue(spec.type, spec.brief));
       // A newly started design session is a design chat from birth.
       await host.storage.set(designMarkerKey(result.sessionId)!, designMarkerValue());
@@ -931,11 +1429,11 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
       /* the session's own data chip still marks it; the widget shows defaults */
     }
     try {
-      await host.toast({ kind: 'success', message: 'Design session started — its controls are in Work Status.' });
+      await host.toast(copy.successToast(copy.DESIGN_STARTED));
     } catch {
       /* Notification transport is not session-delivery failure. */
     }
-    if (state.surface === 'page') void loadDesignHome();
+    if (canLoadDesignWork()) void loadDesignHome();
     try {
       await host.openSession(result.sessionId);
     } catch (error) {
@@ -945,7 +1443,8 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     state.pageError = message;
-    await host.toast({ kind: 'error', message: `Could not start session: ${message}` });
+    await recordDiagnosticError('start-session', message);
+    await host.toast(copy.errorToast(copy.startSessionFailed(message)));
     return false;
   } finally {
     state.pageBusy = false;
@@ -959,7 +1458,12 @@ async function startDesignSession(spec: DesignSessionSpec): Promise<boolean> {
 type CanvasPrep =
   | { kind: 'workspace'; workspace: WorkspaceRecord; url: string; projectId?: string }
   | { kind: 'new'; workspace: WorkspaceRecord; url: string }
-  | { kind: 'failed'; error: string };
+  /**
+   * `workspace` (F4): set when the scaffold POST created the folder and only
+   * the install/boot job failed — the dir is REAL, so the session's prompt and
+   * its `ws/` record must point at it instead of orphaning it.
+   */
+  | { kind: 'failed'; error: string; workspace?: WorkspaceRecord };
 
 /**
  * Make sure a canvas workspace exists for the composer's brief, scaffolding one
@@ -984,18 +1488,66 @@ async function scaffoldCurrentProject(spec: DesignBriefSpec): Promise<CanvasPrep
     const projectId = target.kind === 'workspace' ? target.projectId : undefined;
     return { kind: 'workspace', workspace: state.workspace, url, projectId };
   }
-  const outcome = await scaffoldCanvasWorkspace(spec.brief, `new-design:${Date.now()}`, spec.designSystemId ?? null);
+  // F8: the page's OWN selections (type / direction / fidelity / design
+  // system / devices / project) shape the scaffold — never the session row's `state.mode`.
+  const outcome = await scaffoldCanvasWorkspace(spec.brief, `new-design:${Date.now()}`, {
+    type: spec.type,
+    direction: spec.direction,
+    fidelity: spec.fidelity,
+    designSystemId: spec.designSystemId ?? null,
+    devices: spec.devices,
+    projectDir: spec.projectDir,
+  }, { notify: false });
   if (!outcome.ok) {
-    await host.toast({ kind: 'error', message: outcome.error });
+    await recordDiagnosticError('scaffold', outcome.error);
+    await host.toast(copy.errorToast(copy.scaffoldFailed(outcome.error)));
     return { kind: 'failed', error: outcome.error };
   }
   // The session starts once the workspace is REAL (installed and booted), not
   // half-written; the progress toasts tell the user where it is.
-  const job = await runScaffoldJob(outcome.jobId);
+  const job = await runScaffoldJob(outcome.jobId, outcome.record.dir);
   if (job !== 'done') {
-    return { kind: 'failed', error: job.error };
+    return { kind: 'failed', error: job.error, workspace: outcome.record };
   }
   return { kind: 'new', workspace: outcome.record, url: outcome.url };
+}
+
+/** The Look the page uses: a stored choice that still applies, else the default. */
+function effectiveLookKind(): LookKind {
+  const kind = state.pageLookKind;
+  if (kind === 'project' && state.directory) return 'project';
+  if (kind === 'preset' && findDesignSystem(state.pageDesignSystemId)) return 'preset';
+  if (kind === 'direction') return 'direction';
+  return state.directory ? 'project' : 'direction';
+}
+
+/** The page's selections as the session/scaffold spec. Fidelity follows the type. */
+function pageBriefSpec(): DesignBriefSpec {
+  const kind = effectiveLookKind();
+  const look: DesignLook = kind === 'project' ? 'project' : kind === 'preset' ? 'preset' : 'new';
+  return {
+    type: state.pageType,
+    direction: kind === 'direction' ? state.pageDirection : 'auto',
+    fidelity: FIDELITY_FOR_TYPE[state.pageType],
+    brief: state.prompt.trim(),
+    designSystemId: kind === 'preset' ? state.pageDesignSystemId : null,
+    projectDir: state.directory,
+    questions: state.pageQuestions,
+    options: state.pageOptions,
+    ...(state.pageDevices.length ? { devices: [...state.pageDevices] } : {}),
+    look,
+  };
+}
+
+/**
+ * A short session title from the brief: the first 40 characters of its first
+ * clause, with a leading `Goal:` label dropped (the starters seed one).
+ */
+export function briefTitle(brief: string): string {
+  const line = brief.split('\n').map((text) => text.trim()).find(Boolean) ?? '';
+  const clause = line.replace(/^goal:\s*/i, '').split(/[.,;!?—–]|\s-\s/)[0] ?? '';
+  const title = clause.trim().slice(0, 40).trim();
+  return title.charAt(0).toUpperCase() + title.slice(1);
 }
 
 /**
@@ -1012,46 +1564,46 @@ async function startNewDesign(): Promise<void> {
   // create a second session, and the first action owns this draft snapshot.
   state.pageBusy = true;
   state.pageError = '';
-  const spec: DesignBriefSpec = {
-    type: state.pageType,
-    direction: state.pageDirection,
-    fidelity: state.pageFidelity,
-    brief: state.prompt.trim(),
-    designSystemId: state.pageDesignSystemId,
-  };
+  const spec = pageBriefSpec();
   const references = state.surface === 'page' ? [...state.references] : undefined;
+  const title = `Design · ${briefTitle(spec.brief) || PAGE_TYPE_LABELS[spec.type]}`;
   rerender();
   try {
     // An oversized brief fails loudly instead of letting the host silently
-    // clamp the draft (the compose cap the SDK enforces is
-    // GUEST_COMPOSE_TEXT_MAX — a clamped brief is data loss, never delivery).
-    if (spec.brief.length > GUEST_COMPOSE_TEXT_MAX) {
-      state.pageError = `The design brief is too long (${spec.brief.length} of ${GUEST_COMPOSE_TEXT_MAX} characters). Shorten it, then send again.`;
+    // clamp the draft (BRIEF_MAX keeps the session prompt inside its budget,
+    // well under the SDK's compose cap — a clamped brief is data loss).
+    const tooLong = briefLimitError(spec.brief);
+    if (tooLong) {
+      state.pageError = tooLong;
       rerender();
-      await host.toast({ kind: 'error', message: state.pageError });
+      await host.toast(copy.errorToast(state.pageError));
       return;
     }
     const prep = await scaffoldCurrentProject(spec);
     if (prep.kind === 'failed') {
-      // The session still starts in the agent-scaffolds fallback: the prompt
-      // carries the workspace once it exists (the flow below describes it).
+      // The session still starts in the agent-scaffolds fallback. F4: when the
+      // scaffold DID write the folder (only install/boot failed), the prompt
+      // names that real path and the new session's `ws/` binds to it — never
+      // "ask if the path is missing" next to a folder that exists on disk.
       state.pageError = prep.error;
       rerender();
+      const workspace = prep.workspace ?? state.workspace ?? undefined;
       await startDesignSession({
         id: `new-design:${Date.now()}`,
-        title: `New design · ${spec.type}`,
+        title,
         url: '',
         type: spec.type,
         brief: spec.brief,
-        dir: state.workspace?.dir ?? '',
-        text: designSessionPrompt(spec, state.workspace),
+        dir: workspace?.dir ?? '',
+        workspace,
+        text: designSessionPrompt(spec, workspace ?? null),
         references,
       });
       return;
     }
     await startDesignSession({
       id: `new-design:${Date.now()}`,
-      title: `New design · ${spec.type}`,
+      title,
       url: prep.url,
       type: spec.type,
       brief: spec.brief,
@@ -1062,8 +1614,9 @@ async function startNewDesign(): Promise<void> {
       references,
     });
   } catch (error) {
-    state.pageError = `Could not start session: ${error instanceof Error ? error.message : String(error)}`;
-    await host.toast({ kind: 'error', message: state.pageError });
+    state.pageError = `Could not start session: ${copy.reason(error)}`;
+    await recordDiagnosticError('start-session', state.pageError);
+    await host.toast(copy.errorToast(copy.startSessionFailed(copy.reason(error))));
   } finally {
     state.pageBusy = false;
     rerender();
@@ -1082,11 +1635,58 @@ async function startNewDesign(): Promise<void> {
  */
 async function addToChat(entry: QueuedPick): Promise<boolean> {
   try {
-    await host.attach(buildAttachPayload(entry));
+    await host.attach(buildAttachPayload(entry, pickContext(entry)));
     return true;
   } catch (error) {
-    setStatus(`Could not attach a canvas pick: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    setStatus(copy.attachPickFailed(copy.reason(error)), 'error');
     return false;
+  }
+}
+
+/**
+ * Where a pick lives on disk (F6): the pick's OWN canvas dir when the service
+ * stamped one (R2), else the bound workspace. The live screens describe the
+ * bound workspace only, so they ride along just when the dirs agree.
+ */
+function pickContext(pick?: QueuedPick): PickContext | null {
+  const bound = state.workspace?.dir?.trim();
+  const dir = pick?.dir?.trim() || bound;
+  if (!dir) return null;
+  return { workspaceDir: dir, screens: bound && sameDirPath(dir, bound) ? state.liveScreens : [] };
+}
+
+/** R2 (B4): whether a pick came from THIS chat's canvas (no dir = legacy, always ours). */
+function pickBelongsHere(pick: QueuedPick): boolean {
+  if (!pick.dir) return true;
+  const bound = state.workspace?.dir;
+  return Boolean(bound && sameDirPath(pick.dir, bound));
+}
+
+/** The live screens with ABSOLUTE files, for the compact mode chip (F7). */
+function currentScreenFiles(dir: string): Array<{ id: string; file: string; title: string }> {
+  return currentScreens().map((screen) => {
+    const live = state.liveScreens.find((candidate) => candidate.id === screen.id);
+    let file = screen.file;
+    try {
+      if (live) file = decodeURIComponent(new URL(live.url).pathname).replace(/^\/+/, '') || 'index.html';
+    } catch {
+      /* keep the basename */
+    }
+    return { ...screen, file: workspaceFilePath(dir, file) };
+  });
+}
+
+/**
+ * F7: attach the compact Design Mode chip ahead of a pick batch. Best-effort —
+ * a failure here never blocks or un-acks the picks themselves.
+ */
+async function attachCompactModeChip(): Promise<void> {
+  const ws = state.workspace;
+  if (!state.mode.on || !ws || ws.dir.trim() === '') return;
+  try {
+    await host.attach(buildCompactModeChip(state.sessionId, state.mode, ws, currentScreenFiles(ws.dir), currentConfig()?.url));
+  } catch {
+    /* the pick chips still carry Workspace:/File: lines (F6) */
   }
 }
 
@@ -1100,10 +1700,8 @@ async function addToChat(entry: QueuedPick): Promise<boolean> {
 // and a hidden window loses nothing — this loop has NO visibility guard, and the
 // persisted since-cursor catches up whatever queued while it could not read.
 // A request error/timeout falls back to `wait=0` short polls every 250 ms for
-// 30 s, then the long-poll retries. The `bridgeActive` semantics are unchanged:
-// a claimed bridge stands THIS row down (holding keeps every pick queued and
-// un-acked, so the claimant — or the row later — still delivers it). Design
-// Mode OFF likewise holds delivery: chips land only on an explicit gesture path,
+// 30 s, then the long-poll retries. Design Mode OFF holds delivery (every pick
+// stays queued and un-acked): chips land only on an explicit gesture path,
 // never automatically (fence §5), and turning ON re-runs the cursor catch-up.
 
 /** The long-poll window (the service accepts `wait` 0..12000). */
@@ -1112,10 +1710,10 @@ export const PICK_LONG_POLL_MS = 12_000;
 export const PICK_SHORT_POLL_MS = 250;
 /** …for up to 30 s, then back to the long-poll (spec V4-5). */
 export const PICK_SHORT_POLL_BUDGET_MS = 30_000;
-/** The idle check cadence while held (mode off / bridge claimed). */
+/** The idle check cadence while held (mode off). */
 const PICK_HELD_POLL_MS = 900;
 /** The pace after an idle long-poll round — pacing only; a real long-poll already waited. */
-const PICK_IDLE_POLL_MS = 1000;
+export const PICK_IDLE_POLL_MS = 150;
 
 /**
  * The highest seq this row has delivered-and-acked. Persists for the frame's
@@ -1137,19 +1735,49 @@ export function getPickCursor(): number {
  * AFTER its chip landed keeps the cursor advanced — the composer already has
  * the chip, and redelivering it would duplicate. The service's own unacked
  * watchdog raises the canvas-side warning when delivery truly stalls.
+ * R2 (B4): a pick from ANOTHER chat's canvas window (its `dir` is not this
+ * row's workspace) is passed over — the cursor moves past it, but it is never
+ * attached or acked here; the row of the chat it belongs to delivers it.
  */
 async function deliverPickBatch(picks: QueuedPick[]): Promise<boolean> {
   let lastDelivered: QueuedPick | null = null;
+  const delivered: QueuedPick[] = [];
+  let advanceTo = pickCursor;
+  let modeRechecked = false;
+  let modeChipSent = false;
   for (const entry of [...picks].sort((a, b) => a.seq - b.seq)) {
     if (entry.seq <= pickCursor) continue; // already delivered-and-acked (defensive)
-    if (!state.mode.on || state.bridgeActive) break; // held — the queue keeps it
+    if (!pickBelongsHere(entry)) {
+      advanceTo = entry.seq;
+      continue;
+    }
+    // F5: memory may say OFF only because another frame (the `/canvas` resolve
+    // pane) turned the mode ON in storage after this row loaded it. One cheap
+    // storage read per batch beats holding the pick for another long-poll.
+    if (!state.mode.on && !modeRechecked) {
+      modeRechecked = true;
+      await syncModeFromStorage();
+    }
+    if (!state.mode.on) break; // held — the queue keeps it
+    // F7: the FIRST deliverable pick of a batch carries the standing Design
+    // Mode instructions (workspace path + rule + screens) — at most once per
+    // batch, and under the mode chip's own id so it replaces, never stacks.
+    if (!modeChipSent) {
+      modeChipSent = true;
+      await attachCompactModeChip();
+    }
     if (!(await addToChat(entry))) break; // no ack past a failed attach; retry next poll
     lastDelivered = entry;
+    delivered.push(entry);
+    advanceTo = entry.seq;
   }
-  if (!lastDelivered) return false;
-  pickCursor = lastDelivered.seq;
+  if (advanceTo === pickCursor) return false;
+  pickCursor = advanceTo;
+  if (!lastDelivered) return true; // only foreign picks: passed over, never acked here
   try {
-    await ackPicks(lastDelivered.seq, pickAckLabel(lastDelivered));
+    // The row's bound dir keys the service's per-dir watermark, so this ack
+    // never floors another chat's held picks in the shared queue.
+    await ackPicks(lastDelivered.seq, batchAckLabel(delivered, lastDelivered), state.workspace?.dir ?? '');
   } catch {
     /* the chips are in the composer; the next ack covers these seqs as well */
   }
@@ -1190,8 +1818,11 @@ async function pollPicksOnce(waitMs: number): Promise<'progress' | 'idle' | 'err
  */
 export async function runPickLoop(stop: () => boolean): Promise<void> {
   while (!stop()) {
-    if (!state.mode.on || state.bridgeActive) {
+    if (!state.mode.on) {
       await sleep(PICK_HELD_POLL_MS);
+      // F5: a mode turned ON by another frame must release the hold without
+      // waiting for anything else to refresh this row's copy.
+      if (!state.mode.on) await syncModeFromStorage();
       continue;
     }
     const outcome = await pollPicksOnce(PICK_LONG_POLL_MS);
@@ -1204,7 +1835,7 @@ export async function runPickLoop(stop: () => boolean): Promise<void> {
     // long-poll retries (and the budget restarts if the service stays down).
     const backoffStart = Date.now();
     while (!stop() && Date.now() - backoffStart < PICK_SHORT_POLL_BUDGET_MS) {
-      if (!state.mode.on || state.bridgeActive) break;
+      if (!state.mode.on) break;
       await sleep(PICK_SHORT_POLL_MS);
       if ((await pollPicksOnce(0)) !== 'error') break;
     }
@@ -1229,12 +1860,10 @@ export function resetPickLoop(): void {
   pickCursor = 0;
 }
 
-// NOTE — the pick→chat bridge claim (`POST /bridge`) keeps its old meaning: a
-// hidden resolve frame CANNOT be a long-lived bridge (it is force-unmounted
-// after `GUEST_REQUEST_TIMEOUT_MS`, 20 s), which is exactly why delivery moved
-// from "the claiming frame attaches" to "the queue + the row attaches, and the
-// claim only stands the row down". Routing chips to another window still needs
-// a host-side persistent surface there (tracked upstream).
+// NOTE — a hidden resolve frame CANNOT be a long-lived pick bridge (it is
+// force-unmounted after `GUEST_REQUEST_TIMEOUT_MS`, 20 s), which is why the
+// queue + the row attaches. Routing chips to another window still needs a
+// host-side persistent surface there (tracked upstream).
 
 // ---- the canvas window ----
 
@@ -1264,6 +1893,13 @@ function openStatus(message: string, kind: 'info' | 'error' = 'info'): void {
  * `placeWindow` default stands. Needs a host API (e.g. a window-bounds read on
  * the bridge) — filed, not faked.
  */
+/**
+ * #9: how long a background open (`opening:true`) may take to show a window:
+ * the rest of ensureDevServer's 60 s boot past the service's 15 s answer, plus
+ * the Chrome launch.
+ */
+const BACKGROUND_OPEN_GRACE_MS = 60_000;
+
 async function openCanvasWindow(notify: boolean): Promise<void> {
   const ws = state.workspace;
   if (!ws) return;
@@ -1285,7 +1921,7 @@ async function openCanvasWindow(notify: boolean): Promise<void> {
     }
     const url = state.config?.url?.trim() ?? (await loadLastUrl(ws.dir)) ?? undefined;
     if (!url) {
-      if (notify) await host.toast({ kind: 'error', message: NO_PROJECT_URL_MESSAGE });
+      if (notify) await host.toast(copy.errorToast(NO_PROJECT_URL_MESSAGE));
       return;
     }
     openStatus(OPENING_STATUS);
@@ -1303,9 +1939,12 @@ async function openCanvasWindow(notify: boolean): Promise<void> {
     // Remember that THIS panel started the server, so Design Mode OFF may stop
     // it later (never a server we did not start).
     if (result.ok && result.started) markServerStartedByUs(ws.dir);
+    // #9: a slow boot answers before the window exists — success, but the
+    // window is still launching: hold off the "window closed → mode OFF" read.
+    if (result.ok && result.opening) state.backgroundOpenUntil = Date.now() + BACKGROUND_OPEN_GRACE_MS;
     openStatus(formatOpenStatus(result), result.ok ? 'info' : 'error');
   } catch (error) {
-    openStatus(`Could not open the canvas: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    openStatus(copy.openCanvasFailed(copy.reason(error)), 'error');
   } finally {
     state.pendingOpen = false;
   }
@@ -1335,10 +1974,8 @@ async function handleMissingWorkspace(dir: string, message?: string): Promise<vo
   }
   renderRow();
   rerender();
-  await host.toast({
-    kind: 'error',
-    message: `${message ?? `The canvas folder ${dir} no longer exists.`} Start creates a new canvas.`,
-  });
+  // Blocking: the canvas cannot open until the user creates a new one.
+  await host.toast(copy.errorToast(copy.missingWorkspace(message ?? `The canvas folder ${dir} no longer exists.`), { persistent: true }));
 }
 
 /**
@@ -1348,18 +1985,22 @@ async function handleMissingWorkspace(dir: string, message?: string): Promise<vo
  */
 async function previewWorkspace(row: WorkspaceRow): Promise<void> {
   if (!row.url?.trim()) {
-    await host.toast({ kind: 'error', message: NO_PROJECT_URL_MESSAGE });
+    await host.toast(copy.errorToast(NO_PROJECT_URL_MESSAGE));
     return;
   }
   try {
     const result = await openWorkspace({ dir: row.dir, focus: true });
     if (!result.ok) {
-      await host.toast({ kind: 'error', message: result.error ?? 'Could not open the canvas' });
+      await host.toast(copy.errorToast(copy.openCanvasFailed(result.error ?? 'the service gave no reason')));
       return;
     }
-    await host.toast({ kind: 'success', message: `Opened ${row.name} — its canvas window is live.` });
+    if (result.opening) {
+      await host.toast(copy.infoToast(copy.openingWorkspace(row.name)));
+      return;
+    }
+    await host.toast(copy.successToast(copy.openedWorkspace(row.name)));
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not open the canvas: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.openCanvasFailed(copy.reason(error))));
   }
 }
 
@@ -1482,7 +2123,7 @@ export async function requestDevServerStop(
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setStatus(`Could not stop the preview: ${message}`, 'error');
+      setStatus(copy.stopPreviewFailed(message), 'error');
       return { stopped: false, held: false, blocked: false, error: message };
     }
   }
@@ -1563,7 +2204,9 @@ export async function applySessionSnapshot(session: { id: string; busy: boolean 
   const wasBusy = state.sessionBusy;
   state.sessionId = session?.id ?? null;
   state.sessionBusy = session?.busy ?? false;
-  if (wasBusy !== state.sessionBusy) await reportAgentStatus(state.sessionBusy);
+  if (session?.busy) turnsStarted.add(session.id);
+  // The hidden resolve pane mirrors nothing to the canvas: the row owns it.
+  if (wasBusy !== state.sessionBusy && !isHiddenResolvePane()) await reportAgentStatus(state.sessionBusy);
   if (state.sessionBusy) {
     if (state.pendingStop) {
       state.pendingStop = null;
@@ -1574,8 +2217,17 @@ export async function applySessionSnapshot(session: { id: string; busy: boolean 
     const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
     reportHonouredStop(result, request.dir);
   }
-  if (changed) await loadWorkspace();
+  if (changed) {
+    // The rail tab outlives a session switch; `loadWorkspace` only binds a
+    // record that EXISTS, so drop the previous chat's canvas first or the
+    // rail would offer "Open canvas" for a chat that has none.
+    if (state.surface === 'panel') state.workspace = null;
+    await loadWorkspace();
+    renderRow(); // F2: the Start control's "send a message first" hint follows the session
+  }
   await loadMode();
+  // Only the rail: a page re-render here would rebuild the composer mid-typing.
+  if (state.surface === 'panel') renderRail();
 }
 
 /**
@@ -1583,15 +2235,326 @@ export async function applySessionSnapshot(session: { id: string; busy: boolean 
  * is honoured, if the session is now idle — and the moment the registry
  * backstop runs, because the agent's writes are all on disk (V4-4/V4-12).
  */
-export async function handleSessionLifecycle(event: { phase: 'started' | 'completed' | 'failure' }): Promise<void> {
+export async function handleSessionLifecycle(event: { sessionId?: string; phase: 'started' | 'completed' | 'failure' }): Promise<void> {
+  const lifecycleId = event.sessionId ?? state.sessionId;
+  if (event.phase === 'started' && lifecycleId) turnsStarted.add(lifecycleId);
   if (event.phase === 'completed') {
-    void syncRegistryBackstop();
+    if (!isHiddenResolvePane()) void syncRegistryBackstop();
     if (state.pendingStop && !state.sessionBusy) {
       const request = state.pendingStop;
       const result = await requestDevServerStop({ manual: request.manual, dir: request.dir });
       reportHonouredStop(result, request.dir);
     }
+    // The host replays a synthetic `completed` for an idle chat on every ready: only a turn WE saw start counts.
+    const sawTurn = lifecycleId ? turnsStarted.delete(lifecycleId) : false;
+    if (badgeTracking && sawTurn) await bumpRailBadge(lifecycleId);
   }
+}
+
+// ---- P5: the rail badge ----
+//
+// A design chat finishing a turn while the rail is closed puts a count on the
+// rail icon. The count lives in storage (`badge/count`), so every frame of this
+// extension agrees; the host clears the icon itself when the panel opens
+// (`setBadge` docs: "Opening the panel clears it too"), and a real rail pane
+// zeroes the stored count on mount so the two never drift apart.
+
+const BADGE_KEY = 'badge/count';
+/** The SDK's `GUEST_BADGE_MAX`. */
+const BADGE_MAX = 999;
+/** Two frames hearing the same turn count it once: a repeat within this window is dropped. */
+const BADGE_DEDUPE_MS = 2000;
+
+type BadgeRecord = { count: number; at: number; sessionId: string | null };
+
+/** Sessions whose turn this frame saw start (lifecycle `started` or a busy snapshot). */
+const turnsStarted = new Set<string>();
+
+/** Only frames that live while the rail is closed (the row, a real rail pane) count turns. */
+let badgeTracking = false;
+
+function readBadgeRecord(value: unknown): BadgeRecord {
+  if (!value || typeof value !== 'object') return { count: 0, at: 0, sessionId: null };
+  const record = value as Partial<BadgeRecord>;
+  return {
+    count: typeof record.count === 'number' && Number.isFinite(record.count) && record.count > 0 ? Math.min(Math.floor(record.count), BADGE_MAX) : 0,
+    at: typeof record.at === 'number' && Number.isFinite(record.at) ? record.at : 0,
+    sessionId: typeof record.sessionId === 'string' ? record.sessionId : null,
+  };
+}
+
+async function loadBadgeRecord(): Promise<BadgeRecord> {
+  try {
+    return readBadgeRecord(await host.storage.get(BADGE_KEY));
+  } catch {
+    return { count: 0, at: 0, sessionId: null };
+  }
+}
+
+/** Whether this session is a design chat: the permanent marker, or Design Mode ON right now. */
+async function sessionCarriesDesignMarker(sessionId: string): Promise<boolean> {
+  if (sessionId === state.sessionId && state.mode.on) return true;
+  const key = designMarkerKey(sessionId);
+  if (!key) return false;
+  try {
+    return isDesignMarker(await host.storage.get(key));
+  } catch {
+    return false;
+  }
+}
+
+/** A real rail pane the user is looking at needs no badge: they are already here. */
+function railIsBeingViewed(): boolean {
+  return state.surface === 'panel' && isRealPane() && document.visibilityState === 'visible';
+}
+
+/** One completed turn of `sessionId`: count it when it is a design chat and the rail is not on screen. */
+export async function bumpRailBadge(sessionId: string | null): Promise<void> {
+  if (!sessionId || railIsBeingViewed()) return;
+  if (!(await sessionCarriesDesignMarker(sessionId))) return;
+  const previous = await loadBadgeRecord();
+  const now = Date.now();
+  if (previous.sessionId === sessionId && now - previous.at < BADGE_DEDUPE_MS) return;
+  const next: BadgeRecord = { count: Math.min(previous.count + 1, BADGE_MAX), at: now, sessionId };
+  try {
+    await host.storage.set(BADGE_KEY, next);
+  } catch {
+    /* the badge still shows this frame's count */
+  }
+  try {
+    await host.setBadge(next.count);
+  } catch {
+    /* a frame that cannot paint the badge leaves it to the next one */
+  }
+}
+
+/** The rail was opened: clear the icon first, then zero the stored count. */
+export async function resetRailBadge(): Promise<void> {
+  try {
+    await host.setBadge(null);
+  } catch {
+    /* the host clears it on open anyway */
+  }
+  const stored = await loadBadgeRecord();
+  if (stored.count === 0) return;
+  try {
+    await host.storage.set(BADGE_KEY, { count: 0, at: Date.now(), sessionId: null } satisfies BadgeRecord);
+  } catch {
+    /* a stale count only brings the badge back at the next completed turn */
+  }
+}
+
+// ---- P5: the diagnostics ring buffer ----
+//
+// The newest 20 failures (service requests, scaffolds, start-session), newest
+// first, in `diag/errors` — what "Copy diagnostics" hands a bug report. Memory
+// is always current; storage is merged and written only by frames that loaded
+// it (a real pane), debounced so a poll against a dead service cannot hammer it.
+
+const DIAG_ERRORS_KEY = 'diag/errors';
+const DIAG_PERSIST_MS = 1000;
+let diagnosticErrors: DiagnosticError[] = [];
+let diagnosticsLoaded = false;
+let diagnosticsTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Record one failure. Memory only until `loadDiagnostics` ran in this frame. */
+function recordDiagnosticError(source: string, message: string): Promise<void> {
+  diagnosticErrors = addDiagnosticError(diagnosticErrors, source, message);
+  if (diagnosticsLoaded && !diagnosticsTimer) {
+    diagnosticsTimer = setTimeout(() => void flushDiagnostics(), DIAG_PERSIST_MS);
+    (diagnosticsTimer as { unref?: () => void }).unref?.();
+  }
+  return Promise.resolve();
+}
+
+/** Merge storage into memory and write the result back. Test seam and the debounce target. */
+export async function flushDiagnostics(): Promise<void> {
+  if (diagnosticsTimer) {
+    clearTimeout(diagnosticsTimer);
+    diagnosticsTimer = null;
+  }
+  if (!diagnosticsLoaded) return;
+  try {
+    const stored = sanitizeDiagnosticErrors(await host.storage.get(DIAG_ERRORS_KEY));
+    diagnosticErrors = mergeDiagnosticErrors(diagnosticErrors, stored);
+    await host.storage.set(DIAG_ERRORS_KEY, diagnosticErrors);
+  } catch {
+    /* diagnostics are best effort */
+  }
+}
+
+/** Adopt what other frames stored. A frame that never loads (the hidden pane) stays memory-only. */
+async function loadDiagnostics(): Promise<void> {
+  if (isHiddenResolvePane()) return;
+  try {
+    diagnosticErrors = mergeDiagnosticErrors(diagnosticErrors, sanitizeDiagnosticErrors(await host.storage.get(DIAG_ERRORS_KEY)));
+  } catch {
+    /* start from memory */
+  }
+  diagnosticsLoaded = true;
+}
+
+// ---- P5: the diagnostics popover (rail footer + page footer) ----
+
+/** The open popover's report, or null while closed. Module state, so a page redraw keeps it open. */
+let diagnosticsView: { text: string } | null = null;
+
+async function collectDiagnostics(): Promise<DiagnosticsSnapshot> {
+  let service: string;
+  try {
+    service = (await host.serviceStatus()).status;
+  } catch (error) {
+    service = `unreadable (${copy.reason(error)})`;
+  }
+  let settings: DiagnosticsSnapshot['settings'] = null;
+  try {
+    const read = await getSettings();
+    if (isDesignsSettings(read)) settings = { workspaceRoot: read.workspaceRoot, source: read.source, previousRoots: read.previousRoots.length };
+  } catch {
+    /* the report says "unreadable" */
+  }
+  const workspace = state.workspace?.dir ?? null;
+  let devServer: DiagnosticsSnapshot['devServer'] = null;
+  if (workspace) {
+    try {
+      const rows = await getWorkspaces();
+      devServer = rows.workspaces.find((row) => sameDirPath(row.dir, workspace))?.server ?? null;
+    } catch {
+      /* the report says "unknown" */
+    }
+  }
+  if (diagnosticsLoaded) await flushDiagnostics();
+  return { version: EXTENSION_VERSION, apiVersion: EXTENSION_API_VERSION, service, settings, workspace, devServer, errors: [...diagnosticErrors] };
+}
+
+/** Test seam: the report the popover would show right now. */
+export async function diagnosticsReport(): Promise<string> {
+  return formatDiagnostics(await collectDiagnostics());
+}
+
+async function copyDiagnostics(text: string): Promise<void> {
+  try {
+    await host.writeClipboard(text);
+    await host.toast(copy.successToast(copy.DIAGNOSTICS_COPIED));
+  } catch (error) {
+    await host.toast(copy.errorToast(copy.diagnosticsCopyFailed(copy.reason(error))));
+  }
+}
+
+/** Paint the Diagnostics control — closed (a text button) or open (the report) — into `container`. */
+function paintDiagnostics(container: HTMLElement): void {
+  container.dataset.diagState = diagnosticsView ? 'open' : 'closed';
+  if (!diagnosticsView) {
+    const open = q<HTMLButtonElement>('button', 'ds-link ds-diag-open', copy.DIAGNOSTICS_LABEL);
+    open.type = 'button';
+    open.setAttribute('aria-haspopup', 'dialog');
+    open.setAttribute('aria-expanded', 'false');
+    open.addEventListener('click', () => void openDiagnostics(container));
+    container.replaceChildren(open);
+    return;
+  }
+  const pop = q('div', 'ds-diag-pop');
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-label', copy.DIAGNOSTICS_LABEL);
+  const text = diagnosticsView.text;
+  const body = q('pre', 'ds-diag-text', text);
+  const actions = q('div', 'ds-diag-actions');
+  const copyBtn = q<HTMLButtonElement>('button', 'primary ds-diag-copy', copy.DIAGNOSTICS_COPY);
+  copyBtn.type = 'button';
+  copyBtn.addEventListener('click', () => void copyDiagnostics(text));
+  const close = q<HTMLButtonElement>('button', 'ds-diag-close', copy.DIAGNOSTICS_CLOSE);
+  close.type = 'button';
+  const closePop = (): void => {
+    diagnosticsView = null;
+    paintDiagnostics(container);
+    container.querySelector<HTMLElement>('.ds-diag-open')?.focus();
+  };
+  close.addEventListener('click', closePop);
+  pop.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    closePop();
+  });
+  actions.append(copyBtn, close);
+  pop.append(body, actions);
+  container.replaceChildren(pop);
+  queueMicrotask(() => copyBtn.focus());
+}
+
+async function openDiagnostics(container: HTMLElement): Promise<void> {
+  container.replaceChildren(q('div', 'ds-diag-note', 'Reading diagnostics…'));
+  diagnosticsView = { text: formatDiagnostics(await collectDiagnostics()) };
+  paintDiagnostics(container);
+}
+
+/**
+ * The footer's "Diagnostics" control. Real panes only: the hidden 1×1 resolve
+ * pane renders nothing here, and an unchanged container is left alone so an
+ * open report survives the redraws around it.
+ */
+export function renderDiagnosticsRow(container: HTMLElement): void {
+  container.classList.add('ds-diag');
+  if (isHiddenResolvePane() || (state.surface === 'panel' && !isRealPane())) {
+    container.replaceChildren();
+    container.hidden = true;
+    delete container.dataset.diagState;
+    return;
+  }
+  container.hidden = false;
+  const want = diagnosticsView ? 'open' : 'closed';
+  if (container.dataset.diagState === want) return;
+  paintDiagnostics(container);
+}
+
+// ---- P5: message and session actions ----
+//
+// `contributes.actions` opens this panel with `ready.item`: the message
+// ("Open in Design Canvas") or the session ("Turn on Design Mode") the user
+// acted on. Both act on THIS chat's canvas through the rail's own flows.
+
+/** Run one action's effect. Test seam; production reaches it through `host.onItem`. */
+export async function runItemAction(item: GuestMessageItem | GuestSessionItem): Promise<void> {
+  if (isHiddenResolvePane()) return;
+  if (!state.sessionId) state.sessionId = item.sessionId;
+  if (item.sessionId !== state.sessionId) {
+    await host.toast(copy.infoToast(copy.ACTION_OTHER_CHAT));
+    return;
+  }
+  await loadWorkspace();
+  await syncModeFromStorage();
+  if (item.action === 'turn-on-design-mode') {
+    if (state.mode.on && state.workspace) {
+      await host.toast(copy.infoToast(copy.ACTION_ALREADY_ON));
+      return;
+    }
+    await onRailPrimaryClick({ turnOn: true });
+    return;
+  }
+  await onRailPrimaryClick();
+}
+
+/** An action that arrived before the frame became a real rail pane waits here. */
+let pendingActionItem: GuestMessageItem | GuestSessionItem | null = null;
+let lastActionKey = '';
+let lastActionAt = 0;
+
+function onHostItem(item: unknown): void {
+  const candidate = item as Parameters<typeof isGuestMessageItem>[0];
+  if (!isGuestMessageItem(candidate) && !isGuestSessionItem(candidate)) return;
+  const action = candidate as GuestMessageItem | GuestSessionItem;
+  // The host may replay the same item on a re-ready; a real second click is seconds away.
+  const key = `${action.action}:${action.sessionId}:${action.kind === 'message' ? action.messageId : ''}`;
+  const now = Date.now();
+  if (key === lastActionKey && now - lastActionAt < 1500) return;
+  lastActionKey = key;
+  lastActionAt = now;
+  if (state.surface === 'panel' && !isRealPane()) {
+    pendingActionItem = action;
+    return;
+  }
+  if (state.surface !== 'panel') return;
+  void runItemAction(action);
 }
 
 // ---- preview-dev-server Start/Stop control ----
@@ -1660,7 +2623,8 @@ async function refreshServerStatus(): Promise<void> {
     if (status.error) {
       state.serverError = status.error;
     } else {
-      state.serverStatus = status.up;
+      // #9: still booting reads as "checking", never as stopped.
+      state.serverStatus = status.starting && !status.up ? null : status.up;
       state.serverError = null;
     }
     announceServerTransition(before);
@@ -1688,7 +2652,12 @@ function renderServerControl(): void {
     serverBtn.disabled = state.serverPending;
     serverBtn.classList.remove('is-stopped', 'is-running', 'is-loading', 'is-error');
     serverBtn.classList.add(state.serverPending ? 'is-loading' : 'is-stopped');
-    serverBtn.title = state.serverPending ? 'Working…' : 'Create canvas — start a Design Canvas workspace';
+    // F2: with no session yet the click can only explain itself — label it so.
+    serverBtn.title = state.serverPending
+      ? 'Working…'
+      : state.sessionId
+        ? 'Create canvas — start a Design Canvas workspace'
+        : `${NO_SESSION_HINT}, then press Start to create a canvas`;
     serverBtn.setAttribute('aria-label', serverBtn.title);
     const icon = q('span', 'ds-server-icon');
     serverBtn.replaceChildren(icon);
@@ -1746,14 +2715,32 @@ function currentConfig(): StudioConfig | null {
 async function onServerControlClick(): Promise<void> {
   if (state.serverPending) return;
   if (!state.workspace) {
-    // First use: Start creates the canvas workspace (spec §F), then turns
-    // Design Mode ON, which opens it.
-    const ws = await ensureCanvasWorkspace('');
-    if (!ws) {
-      announceServer('Could not create the canvas workspace.');
+    // F2: a new-chat draft has no session to key the workspace to — say so
+    // where the user is looking (the live region alone is screen-reader-only).
+    if (!state.sessionId) {
+      announceServer(NO_SESSION_MESSAGE);
+      await host.toast(copy.errorToast(NO_SESSION_MESSAGE));
       return;
     }
-    await toggleMode(true);
+    // First use: Start creates the canvas workspace (spec §F), then turns
+    // Design Mode ON, which opens it. The row is long-lived, so it may wait
+    // out the install/boot job here; `serverPending` keeps the button busy
+    // and swallows double clicks for the whole flow.
+    state.serverPending = true;
+    renderServerControl();
+    try {
+      const ws = await ensureCanvasWorkspace('');
+      if (!ws) {
+        // The scaffold / job paths toast their own cause; this names the outcome.
+        announceServer('Could not create the canvas workspace.');
+        await host.toast(copy.errorToast(copy.CANVAS_CREATE_FAILED));
+        return;
+      }
+      await toggleMode(true);
+    } finally {
+      state.serverPending = false;
+      renderServerControl();
+    }
     return;
   }
   const url = currentConfig()?.url?.trim();
@@ -1764,6 +2751,8 @@ async function onServerControlClick(): Promise<void> {
     await startCurrentServer();
   }
 }
+
+const SERVER_STARTING_MESSAGE = 'Preview dev server is starting…';
 
 /** Ask the service to start the workspace's dev server and mark it as ours. */
 async function startCurrentServer(): Promise<void> {
@@ -1778,11 +2767,14 @@ async function startCurrentServer(): Promise<void> {
   renderServerControl();
   try {
     const result: ServerStartResult = await startDevServer(dir, url);
-    if (result.ok && result.up && result.started) markServerStartedByUs(dir);
+    // #9: a slow boot answers `starting` — ours when this request spawned it.
+    if (result.ok && (result.up || result.starting) && result.started) markServerStartedByUs(dir);
     if (directoryMovedSince(dir, gen)) return;
-    state.serverStatus = result.up ?? null;
+    state.serverStatus = result.starting ? null : result.up ?? null;
     state.serverError = result.error ?? null;
-    if (result.ok && result.started) {
+    if (result.ok && result.starting) {
+      announceServer(SERVER_STARTING_MESSAGE);
+    } else if (result.ok && result.started) {
       announceServer('Preview dev server started.');
     } else if (result.ok && result.up) {
       announceServer('Preview dev server is running.');
@@ -1849,6 +2841,9 @@ async function stopCurrentServer(): Promise<void> {
 async function readStudioConfig(reportErrors: boolean): Promise<void> {
   const dir = workspaceDir();
   if (!dir) return;
+  // The hidden resolve pane renders no row to keep ready; the resolver reads
+  // the one url it needs itself (`readWorkspaceUrl`).
+  if (isHiddenResolvePane()) return;
   if (configReadInFlight) return;
   configReadInFlight = true;
   try {
@@ -1860,7 +2855,7 @@ async function readStudioConfig(reportErrors: boolean): Promise<void> {
     renderRow();
   } catch (error) {
     if (reportErrors) {
-      setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Config error: ${error instanceof Error ? error.message : String(error)}`, 'error');
+      setStatus(error instanceof ServiceUnavailable ? copy.serviceNotReady(error.message) : copy.configError(copy.reason(error)), 'error');
     }
   } finally {
     configReadInFlight = false;
@@ -1874,9 +2869,18 @@ export async function loadStudioConfig(): Promise<void> {
 
 // ---- the full-page creation home ----
 
-/** Re-render the mounted full-page surface. A no-op on the row surfaces. */
+/** Re-render the mounted home surface (the page, or the rail). A no-op on the row. */
 function rerender(): void {
   if (state.surface === 'page') renderPage();
+  else if (state.surface === 'panel') renderRail();
+}
+
+/**
+ * Whether this frame may read the "Your design work" list (storage scan +
+ * `GET /workspaces`): the page always, the rail only when it is the real tab.
+ */
+function canLoadDesignWork(): boolean {
+  return state.surface === 'page' || (state.surface === 'panel' && railWorkEl !== null && isRealPane());
 }
 
 /** Load the registered projects (decision 4c projectId detection only). */
@@ -1918,10 +2922,16 @@ async function readWorkspaceSessionMap(): Promise<Map<string, string>> {
   return map;
 }
 
-/** Read the workspaces list (decision 2: design work = workspaces on disk). */
-async function loadCanvasWorkspaces(): Promise<void> {
-  state.workspaces = { kind: 'loading' };
-  rerender();
+/**
+ * Read the workspaces list (decision 2: design work = workspaces on disk).
+ * `quiet` keeps a shown list on screen while it refreshes (after a row action),
+ * instead of flashing "Loading…".
+ */
+async function loadCanvasWorkspaces(options: { quiet?: boolean } = {}): Promise<void> {
+  if (!(options.quiet && state.workspaces?.kind === 'list')) {
+    state.workspaces = { kind: 'loading' };
+    rerender();
+  }
   wsSessionMap = await readWorkspaceSessionMap();
   let result: WorkspacesResult;
   try {
@@ -1932,6 +2942,10 @@ async function loadCanvasWorkspaces(): Promise<void> {
     return;
   }
   const rows = Array.isArray(result.workspaces) ? result.workspaces : [];
+  // R4-fix (F3): roots the service could not read (map root → why) are kept on
+  // `workspaceRootErrors` so the work list can say which designs are hidden,
+  // instead of letting them vanish silently.
+  workspaceRootErrors = result.rootError && Object.keys(result.rootError).length > 0 ? result.rootError : null;
   // The join NEVER drops a row: an unmapped workspace stays visible, sessionId null.
   state.workspaces = rows.length === 0
     ? { kind: 'empty' }
@@ -1986,40 +3000,20 @@ function svgIcon(paths: string, size = 18): SVGElement {
   return svg;
 }
 
-/** The abstract mini-preview on an idea card. `variant` is the card index modulo four. */
-function ideaThumb(variant: number): SVGElement {
-  const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.setAttribute('viewBox', '0 0 56 40');
-  svg.setAttribute('width', '56');
-  svg.setAttribute('height', '40');
-  svg.setAttribute('aria-hidden', 'true');
-  const add = (tag: string, attrs: Record<string, string | number>): void => {
-    const node = document.createElementNS(SVG_NS, tag);
-    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, String(value));
-    svg.append(node);
-  };
-  add('rect', { x: 0, y: 0, width: 56, height: 40, rx: 7, class: 'ds-thumb-bg' });
-  if (variant === 0) {
-    add('rect', { x: 8, y: 8, width: 22, height: 4, rx: 2, class: 'ds-thumb-accent' });
-    add('rect', { x: 8, y: 16, width: 40, height: 8, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 8, y: 28, width: 18, height: 5, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 30, y: 28, width: 18, height: 5, rx: 2, class: 'ds-thumb-line' });
-  } else if (variant === 1) {
-    add('rect', { x: 8, y: 7, width: 40, height: 5, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 8, y: 16, width: 19, height: 16, rx: 3, class: 'ds-thumb-accent' });
-    add('rect', { x: 29, y: 16, width: 19, height: 7, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 29, y: 25, width: 19, height: 7, rx: 2, class: 'ds-thumb-line' });
-  } else if (variant === 2) {
-    add('rect', { x: 8, y: 8, width: 12, height: 24, rx: 3, class: 'ds-thumb-accent' });
-    add('rect', { x: 24, y: 9, width: 24, height: 4, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 24, y: 17, width: 24, height: 4, rx: 2, class: 'ds-thumb-line' });
-    add('rect', { x: 24, y: 25, width: 16, height: 4, rx: 2, class: 'ds-thumb-line' });
-  } else {
-    add('rect', { x: 8, y: 12, width: 12, height: 16, rx: 3, class: 'ds-thumb-line' });
-    add('rect', { x: 22, y: 12, width: 12, height: 16, rx: 3, class: 'ds-thumb-accent' });
-    add('rect', { x: 36, y: 12, width: 12, height: 16, rx: 3, class: 'ds-thumb-line' });
-  }
-  return svg;
+/** The outline glyph on a starter card: a device or artboard drawn in strokes. */
+const GLYPH_PATHS: Record<StarterGlyph, string> = {
+  phone: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/>',
+  desktop: '<rect x="2.5" y="4" width="19" height="12.5" rx="1.5"/><path d="M9 20.5h6"/><path d="M12 16.5v4"/>',
+  slide: '<rect x="2.5" y="5" width="19" height="12" rx="1.5"/><path d="M6 9h7"/><path d="M6 12.5h4"/>',
+  square: '<rect x="4" y="4" width="16" height="16" rx="1.5"/><path d="M4 15l4.5-4 4 3.5 3-2.5L20 15"/>',
+  page: '<path d="M6.5 2.5h8l3.5 3.5v15.5h-11.5z"/><path d="M14.5 2.5v3.5H18"/><path d="M9 11h6"/><path d="M9 14.5h6"/>',
+};
+
+function starterGlyph(glyph: StarterGlyph): HTMLElement {
+  const span = q('span', `ds-glyph ds-glyph-${glyph}`);
+  span.setAttribute('aria-hidden', 'true');
+  span.append(svgIcon(GLYPH_PATHS[glyph], 22));
+  return span;
 }
 
 /** Whether the send action may run right now. */
@@ -2027,7 +3021,7 @@ function canSend(): boolean {
   return !state.pageBusy && !referencePending && state.prompt.trim() !== '';
 }
 
-/** Keep the send button and the accent progress line in sync with the prompt. */
+/** Keep the Start button and the character counter in sync with the prompt. */
 function updateComposerState(): void {
   const ready = canSend();
   if (sendEl) {
@@ -2037,14 +3031,19 @@ function updateComposerState(): void {
     sendEl.setAttribute('aria-busy', String(state.pageBusy));
     sendEl.title = state.pageBusy ? 'Starting the design session…' : referencePending ? 'Wait for the reference to finish checking' : 'Start the design session';
   }
-  if (accentFillEl) {
-    const progress = Math.min(1, state.prompt.trim().length / 140);
-    accentFillEl.style.width = `${6 + progress * 94}%`;
+  if (counterEl) {
+    const length = state.prompt.length;
+    counterEl.hidden = length < BRIEF_COUNTER_FROM;
+    counterEl.textContent = `${length} / ${BRIEF_MAX}`;
+    counterEl.classList.toggle('warn', length >= BRIEF_MAX * 0.9);
   }
 }
 
 /** The composer overlays, every one driven by the same toggle contract. */
-export type OverlayId = 'type' | 'ds' | 'attach';
+export type OverlayId = 'type' | 'look' | 'devices' | 'attach';
+
+/** The Look popover's tabs. */
+type LookTab = 'project' | 'presets' | 'directions';
 
 /**
  * The ONE decision behind every composer overlay trigger: clicking a trigger
@@ -2056,23 +3055,23 @@ export function nextOverlayState(current: OverlayId | null, triggerId: OverlayId
 
 /** The overlay currently open, or null. At most one is open at a time. */
 function currentOverlay(): OverlayId | null {
-  if (state.typeMenuOpen) return 'type';
-  if (state.attachMenuOpen) return 'attach';
-  if (state.dsMenuOpen) return 'ds';
-  return null;
+  return state.overlay;
 }
 
 /** The trigger to focus once the page is rebuilt — set whenever a close happens. */
 let refocusOverlayTrigger: OverlayId | null = null;
+/** The overlay that just opened: only its first paint animates, not every redraw. */
+let poppingOverlay: OverlayId | null = null;
 
 /** Toggle one composer overlay through the shared rule. */
 function toggleMenu(which: OverlayId): void {
   if (currentOverlay() === 'attach') cancelReferenceValidation();
   const next = nextOverlayState(currentOverlay(), which);
-  state.typeMenuOpen = next === 'type';
-  state.attachMenuOpen = next === 'attach';
-  state.dsMenuOpen = next === 'ds';
-  if (next === 'ds') {
+  state.overlay = next;
+  poppingOverlay = next;
+  if (next === 'look') {
+    const kind = effectiveLookKind();
+    state.lookTab = kind === 'project' ? 'project' : kind === 'preset' ? 'presets' : 'directions';
     dsQuery = '';
     dsHighlight = state.pageDesignSystemId;
   }
@@ -2085,9 +3084,7 @@ function closeMenus(refocus = false): void {
   const open = currentOverlay();
   if (!open) return;
   if (open === 'attach') cancelReferenceValidation();
-  state.typeMenuOpen = false;
-  state.attachMenuOpen = false;
-  state.dsMenuOpen = false;
+  state.overlay = null;
   refocusOverlayTrigger = refocus ? open : null;
   renderPage();
 }
@@ -2095,9 +3092,7 @@ function closeMenus(refocus = false): void {
 /** Close the active overlay after a selection and return focus to its trigger. */
 function closeActiveOverlay(id: OverlayId): void {
   if (id === 'attach') cancelReferenceValidation();
-  state.typeMenuOpen = false;
-  state.attachMenuOpen = false;
-  state.dsMenuOpen = false;
+  state.overlay = null;
   refocusOverlayTrigger = id;
   renderPage();
 }
@@ -2117,21 +3112,23 @@ function onPageKeydown(event: KeyboardEvent): void {
   closeMenus(true);
 }
 
-/** The centred page: hero, composer, workspace row and idea cards. */
+/** The page column: header, composer, context, starters, the work list and the footer. */
 function renderPage(): void {
   if (!pageBody || state.surface !== 'page') return;
   pageBody.replaceChildren();
   promptEl = null;
   sendEl = null;
-  accentFillEl = null;
+  counterEl = null;
   const shell = q('div', 'ds-home');
   if (pageEnter) {
     shell.classList.add('ds-enter');
     pageEnter = false;
   }
-  shell.append(renderHero(), renderComposer(), renderWorkspaceRow(), renderIdeas(), renderCanvasSection(), renderFooter());
+  const firstRun = renderFirstRun();
+  shell.append(renderHeader(), ...(firstRun ? [firstRun] : []), renderComposer(), renderContextRow(), renderStarters(), renderCanvasSection(), renderFooter());
   pageBody.append(shell);
   updateComposerState();
+  poppingOverlay = null;
   focusPendingTrigger();
   if (referenceFocusId) {
     const target = Array.from(pageBody.querySelectorAll<HTMLButtonElement>('.ds-reference-remove'))
@@ -2149,24 +3146,65 @@ function focusPendingTrigger(): void {
   pageBody?.querySelector<HTMLElement>(`[data-overlay-trigger="${id}"]`)?.focus();
 }
 
-function renderHero(): HTMLElement {
-  const hero = q('header', 'ds-hero');
-  const title = q('h1', 'ds-hero-title');
-  title.append(document.createTextNode("Let's create "));
-  title.append(q('span', 'ds-hero-type', PAGE_TYPE_LABELS[state.pageType]));
-  hero.append(title);
-  hero.append(q('p', 'ds-hero-sub', 'Good work starts here'));
+// ---- the first-run strip (`prefs/first-run`) ----
+
+const FIRST_RUN_KEY = 'prefs/first-run';
+
+/** Restore the dismissal. A storage error shows the strip: a missed hint costs more than a repeated one. */
+async function loadFirstRun(): Promise<void> {
+  if (state.surface !== 'page') return;
+  let dismissed = false;
+  try {
+    const stored = await host.storage.get(FIRST_RUN_KEY);
+    dismissed = Boolean(stored && typeof stored === 'object' && (stored as { dismissed?: unknown }).dismissed === true);
+  } catch {
+    dismissed = false;
+  }
+  state.firstRunDismissed = dismissed;
+  rerender();
+}
+
+async function dismissFirstRun(): Promise<void> {
+  state.firstRunDismissed = true;
+  rerender();
+  try {
+    await host.storage.set(FIRST_RUN_KEY, { dismissed: true, at: new Date().toISOString() });
+  } catch {
+    /* it stays dismissed for this page view */
+  }
+}
+
+/** The three-step strip above the composer; null once dismissed (and until storage answered). */
+function renderFirstRun(): HTMLElement | null {
+  if (state.firstRunDismissed !== false) return null;
+  const strip = q('div', 'ds-first-run');
+  strip.setAttribute('role', 'note');
+  strip.append(q('span', 'ds-first-run-text', copy.FIRST_RUN_TEXT));
+  const dismiss = q<HTMLButtonElement>('button', 'ds-link ds-first-run-dismiss', copy.FIRST_RUN_DISMISS);
+  dismiss.type = 'button';
+  dismiss.setAttribute('aria-label', 'Dismiss the getting-started steps');
+  dismiss.addEventListener('click', () => void dismissFirstRun());
+  strip.append(dismiss);
+  return strip;
+}
+
+/** The left-aligned header: eyebrow, title, one plain line on how it works. */
+function renderHeader(): HTMLElement {
+  const header = q('header', 'ds-header');
+  header.append(q('div', 'ds-eyebrow', 'Design Canvas'));
+  header.append(q('h1', 'ds-title', 'Design on a live canvas'));
+  header.append(q('p', 'ds-lede', 'Describe it. The agent reads your project, asks what it needs, shows options, then builds real screens you can click to edit.'));
   if (state.pageError) {
     const error = q('div', 'ds-home-warn', state.pageError);
     error.setAttribute('role', 'alert');
-    hero.append(error);
+    header.append(error);
   }
-  return hero;
+  return header;
 }
 
 /**
- * ONE anchored-popover pattern, shared by the composer overlays — the type
- * picker, the design-system picker and the `+` attach menu.
+ * ONE anchored-popover pattern, shared by the composer overlays — the type,
+ * Look and Devices pickers and the `+` attach menu.
  */
 function anchoredPopover(options: {
   open: boolean;
@@ -2175,13 +3213,18 @@ function anchoredPopover(options: {
   label: string;
   optionSelector: string;
   onClose: () => void;
+  /** Close on a click on the backdrop (surfaces without the page's window click handler). */
+  closeOnBackdrop?: boolean;
 }): HTMLElement {
   const anchor = q('div', 'ds-ds-anchor');
   anchor.append(options.trigger);
   if (!options.open) return anchor;
   options.panel.setAttribute('role', 'dialog');
   options.panel.setAttribute('aria-label', options.label);
-  anchor.append(q('div', 'ds-ds-backdrop'));
+  if (poppingOverlay && options.trigger.dataset.overlayTrigger === poppingOverlay) options.panel.classList.add('ds-pop');
+  const backdrop = q('div', 'ds-ds-backdrop');
+  if (options.closeOnBackdrop) backdrop.addEventListener('click', () => options.onClose());
+  anchor.append(backdrop);
   anchor.append(options.panel);
   options.panel.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
@@ -2202,12 +3245,61 @@ function anchoredPopover(options: {
   return anchor;
 }
 
+const CARET_ICON = '<path d="M6 9l6 6 6-6"/>';
+
+/** A composer chip that opens one overlay. */
+function overlayChip(id: OverlayId, label: string, ariaLabel: string): HTMLButtonElement {
+  const chip = q<HTMLButtonElement>('button', 'ds-chip ds-menu-trigger');
+  chip.type = 'button';
+  chip.dataset.overlayTrigger = id;
+  chip.append(q('span', 'ds-chip-label', label));
+  chip.append(svgIcon(CARET_ICON, 14));
+  chip.title = ariaLabel;
+  chip.setAttribute('aria-label', `${ariaLabel}: ${label}`);
+  chip.setAttribute('aria-expanded', String(state.overlay === id));
+  chip.disabled = state.pageBusy;
+  chip.addEventListener('click', () => toggleMenu(id));
+  return chip;
+}
+
+/** "Look: Match project" / "Look: <preset>" / "Look: <direction>" / "Look: Auto". */
+function lookChipLabel(): string {
+  const kind = effectiveLookKind();
+  if (kind === 'project') return 'Look: Match project';
+  if (kind === 'preset') return `Look: ${findDesignSystem(state.pageDesignSystemId)?.name ?? 'Preset'}`;
+  return `Look: ${state.pageDirection === 'auto' ? 'Auto' : DIRECTIONS[state.pageDirection].name}`;
+}
+
+const DEVICE_ORDER: DeviceId[] = ['phone', 'tablet', 'desktop'];
+
+function deviceName(id: DeviceId): string {
+  const label = DEVICE_PRESETS[id].label;
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+/** "Devices: Ask" or "Devices: Phone + Desktop". */
+function devicesChipLabel(): string {
+  const chosen = DEVICE_ORDER.filter((id) => state.pageDevices.includes(id));
+  return `Devices: ${chosen.length ? chosen.map(deviceName).join(' + ') : 'Ask'}`;
+}
+
+/** Replace the draft with the structured skeleton (a no-op on an already structured one). */
+function applyStructureBrief(): void {
+  if (state.pageBusy) return;
+  const next = structureBrief(state.prompt, { devices: state.pageDevices });
+  if (next === state.prompt) return;
+  state.prompt = next;
+  if (promptEl) promptEl.value = next;
+  updateComposerState();
+  promptEl?.focus();
+}
+
 function renderComposer(): HTMLElement {
   const box = q('div', 'ds-composer');
 
   const area = q<HTMLTextAreaElement>('textarea', 'ds-composer-input');
   area.rows = 3;
-  area.placeholder = 'Describe the design you want…';
+  area.placeholder = 'What are we designing? e.g. "Budget app onboarding — 3 screens, phone first"';
   area.value = state.prompt;
   area.setAttribute('aria-label', 'Design brief');
   area.disabled = state.pageBusy;
@@ -2227,15 +3319,16 @@ function renderComposer(): HTMLElement {
 
   // References belong to this page's draft, not the original host composer.
   const plus = q<HTMLButtonElement>('button', 'ds-plus ds-menu-trigger');
+  plus.type = 'button';
   plus.dataset.overlayTrigger = 'attach';
   plus.append(svgIcon('<path d="M12 5v14"/><path d="M5 12h14"/>'));
   plus.title = 'Add a reference';
   plus.setAttribute('aria-label', 'Add a reference');
   plus.disabled = state.pageBusy || referencePending;
-  plus.setAttribute('aria-expanded', String(state.attachMenuOpen));
+  plus.setAttribute('aria-expanded', String(state.overlay === 'attach'));
   plus.addEventListener('click', () => toggleMenu('attach'));
   const attachAnchor = anchoredPopover({
-    open: state.attachMenuOpen,
+    open: state.overlay === 'attach',
     trigger: plus,
     panel: renderAttachPanel(),
     label: 'Add a reference',
@@ -2243,67 +3336,114 @@ function renderComposer(): HTMLElement {
     onClose: () => closeMenus(true),
   });
 
-  // The design-system control, next to `+`.
-  const designSystem = q<HTMLButtonElement>('button', 'ds-chip ds-ds-trigger ds-menu-trigger');
-  designSystem.dataset.overlayTrigger = 'ds';
-  designSystem.append(designSystemIcon());
-  designSystem.append(q('span', 'ds-chip-label', designSystemLabel(state.pageDesignSystemId)));
-  designSystem.append(svgIcon('<path d="M6 9l6 6 6-6"/>', 14));
-  designSystem.title = 'Choose a design system';
-  designSystem.setAttribute('aria-label', `Design system: ${designSystemLabel(state.pageDesignSystemId)}`);
-  designSystem.disabled = state.pageBusy;
-  designSystem.addEventListener('click', () => toggleMenu('ds'));
-
-  const chip = q<HTMLButtonElement>('button', 'ds-chip ds-menu-trigger');
-  chip.dataset.overlayTrigger = 'type';
-  chip.append(q('span', 'ds-chip-label', PAGE_TYPE_LABELS[state.pageType]));
-  chip.append(svgIcon('<path d="M6 9l6 6 6-6"/>', 14));
-  chip.title = 'Choose the design type';
-  chip.setAttribute('aria-label', 'Choose the design type');
-  chip.disabled = state.pageBusy;
-  chip.addEventListener('click', () => toggleMenu('type'));
-
-  const spacer = q('div', 'ds-composer-spacer');
-
-  const send = q<HTMLButtonElement>('button', 'ds-send');
-  send.append(svgIcon('<path d="M5 12h14"/><path d="M13 6l6 6-6 6"/>', 20));
-  send.title = 'Start the design session';
-  send.setAttribute('aria-label', 'Start the design session');
-  send.addEventListener('click', () => {
-    if (canSend()) void startNewDesign();
-  });
-  sendEl = send;
-
-  const dsAnchor = anchoredPopover({
-    open: state.dsMenuOpen,
-    trigger: designSystem,
-    panel: renderDesignSystemPanel(),
-    label: 'Choose a design system',
-    optionSelector: '.ds-ds-item',
-    onClose: () => closeMenus(true),
-  });
   const typeAnchor = anchoredPopover({
-    open: state.typeMenuOpen,
-    trigger: chip,
+    open: state.overlay === 'type',
+    trigger: overlayChip('type', PAGE_TYPE_LABELS[state.pageType], 'Design type'),
     panel: renderTypeMenu(),
     label: 'Choose the design type',
     optionSelector: '.ds-menu-item',
     onClose: () => closeMenus(true),
   });
+  const lookAnchor = anchoredPopover({
+    open: state.overlay === 'look',
+    trigger: overlayChip('look', lookChipLabel(), 'Look'),
+    panel: renderLookPanel(),
+    label: 'Choose the look',
+    optionSelector: '.ds-look-option:not(:disabled), .ds-ds-item',
+    onClose: () => closeMenus(true),
+  });
+  const devicesAnchor = anchoredPopover({
+    open: state.overlay === 'devices',
+    trigger: overlayChip('devices', devicesChipLabel(), 'Devices'),
+    panel: renderDevicesPanel(),
+    label: 'Choose the devices',
+    optionSelector: '.ds-device-option input',
+    onClose: () => closeMenus(true),
+  });
 
-  const children: HTMLElement[] = [];
-  children.push(attachAnchor);
-  children.push(dsAnchor, typeAnchor, spacer, send);
-  bar.append(...children);
+  const spacer = q('div', 'ds-composer-spacer');
+
+  const structure = q<HTMLButtonElement>('button', 'ds-ghost ds-structure', 'Structure brief');
+  structure.type = 'button';
+  structure.title = 'Turn the draft into Goal, audience, screens, devices and the rest';
+  structure.disabled = state.pageBusy;
+  structure.addEventListener('click', () => applyStructureBrief());
+
+  const send = q<HTMLButtonElement>('button', 'ds-send');
+  send.type = 'button';
+  send.append(q('span', 'ds-send-label', 'Start design'));
+  send.append(svgIcon('<path d="M9 6l6 6-6 6"/>', 16));
+  send.title = 'Start the design session';
+  send.setAttribute('aria-label', 'Start design');
+  send.addEventListener('click', () => {
+    if (canSend()) void startNewDesign();
+  });
+  sendEl = send;
+
+  const actions = q('div', 'ds-composer-actions');
+  actions.append(structure, send);
+  bar.append(attachAnchor, typeAnchor, lookAnchor, devicesAnchor, spacer, actions);
   box.append(area, renderReferenceDraft(), bar);
-  box.classList.toggle('ds-overlay-open', state.attachMenuOpen || state.dsMenuOpen || state.typeMenuOpen);
+  box.classList.toggle('ds-overlay-open', state.overlay !== null);
 
-  const track = q('div', 'ds-composer-accent');
-  accentFillEl = q('div', 'ds-composer-accent-fill');
-  track.append(accentFillEl);
-  box.append(track);
+  const wrap = q('div', 'ds-composer-wrap');
+  wrap.append(box, renderToggles());
+  return wrap;
+}
 
-  return box;
+/** Under the composer: Questions first, how many options, and the character counter. */
+function renderToggles(): HTMLElement {
+  const row = q('div', 'ds-toggles');
+
+  const questions = q('div', 'ds-toggle');
+  const sw = q<HTMLButtonElement>('button', 'ds-switch');
+  sw.type = 'button';
+  sw.setAttribute('role', 'switch');
+  sw.setAttribute('aria-checked', String(state.pageQuestions));
+  sw.setAttribute('aria-labelledby', 'ds-questions-label');
+  sw.setAttribute('aria-describedby', 'ds-questions-hint');
+  sw.disabled = state.pageBusy;
+  sw.append(q('span', 'ds-switch-thumb'));
+  sw.addEventListener('click', () => {
+    setPagePref({ questions: !state.pageQuestions }, '.ds-switch');
+  });
+  const questionsText = q('div', 'ds-toggle-text');
+  const questionsLabel = q('span', 'ds-toggle-label', 'Ask me questions first');
+  questionsLabel.id = 'ds-questions-label';
+  const questionsHint = q('span', 'ds-toggle-hint', '3–6 questions, with my recommended answers');
+  questionsHint.id = 'ds-questions-hint';
+  questionsText.append(questionsLabel, questionsHint);
+  questions.append(sw, questionsText);
+
+  const options = q('div', 'ds-toggle');
+  const seg = q('div', 'ds-seg');
+  seg.setAttribute('role', 'radiogroup');
+  seg.setAttribute('aria-labelledby', 'ds-options-label');
+  const choices: Array<[OptionsChoice, string]> = [['ask', 'Ask'], [1, '1'], [2, '2'], [3, '3']];
+  for (const [value, label] of choices) {
+    const on = state.pageOptions === value;
+    const item = q<HTMLButtonElement>('button', `ds-seg-item${on ? ' on' : ''}`, label);
+    item.type = 'button';
+    item.setAttribute('role', 'radio');
+    item.setAttribute('aria-checked', String(on));
+    if (value !== 'ask') item.setAttribute('aria-label', `${label} option${value === 1 ? '' : 's'}`);
+    item.disabled = state.pageBusy;
+    item.dataset.option = String(value);
+    item.addEventListener('click', () => setPagePref({ options: value }, `.ds-seg-item[data-option="${value}"]`));
+    seg.append(item);
+  }
+  const optionsText = q('div', 'ds-toggle-text');
+  const optionsLabel = q('span', 'ds-toggle-label', 'Options');
+  optionsLabel.id = 'ds-options-label';
+  optionsText.append(optionsLabel, q('span', 'ds-toggle-hint', 'Side-by-side directions to pick from'));
+  options.append(optionsText, seg);
+
+  const counter = q('span', 'ds-counter');
+  counter.setAttribute('aria-live', 'polite');
+  counterEl = counter;
+
+  row.append(questions, options, counter);
+  return row;
 }
 
 /** Compact suffixes disambiguate equal basenames; disclosure exposes full paths. */
@@ -2358,7 +3498,7 @@ export function removePageReference(id: string): void {
   renderPage();
 }
 
-/** The type picker panel: DESIGN_TYPES plus Direction/Fidelity options. */
+/** The type picker panel: the five design types, each with its one-line hint. */
 function renderTypeMenu(): HTMLElement {
   const panel = q('div', 'ds-ds-panel ds-type-panel');
   const list = q('div', 'ds-ds-list ds-type-list');
@@ -2367,6 +3507,7 @@ function renderTypeMenu(): HTMLElement {
   for (const type of DESIGN_TYPES) {
     const on = type === state.pageType;
     const item = q<HTMLButtonElement>('button', `ds-menu-item${on ? ' on' : ''}`);
+    item.type = 'button';
     item.setAttribute('role', 'option');
     item.setAttribute('aria-selected', on ? 'true' : 'false');
     const main = q('span', 'ds-menu-main');
@@ -2380,37 +3521,9 @@ function renderTypeMenu(): HTMLElement {
     });
     list.append(item);
   }
-  panel.append(list, renderOptions());
-  if (state.typeMenuOpen) queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-menu-item')?.focus());
+  panel.append(list);
+  if (state.overlay === 'type') queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-menu-item')?.focus());
   return panel;
-}
-
-function renderOptions(): HTMLElement {
-  const row = q('div', 'ds-options');
-
-  const direction = q<HTMLSelectElement>('select');
-  direction.append(option('auto', 'Auto (infer from the brief)'));
-  for (const id of Object.keys(DIRECTIONS) as DirectionId[]) direction.append(option(id, DIRECTIONS[id].name));
-  direction.value = state.pageDirection;
-  direction.addEventListener('change', () => {
-    state.pageDirection = direction.value as 'auto' | DirectionId;
-  });
-
-  const fidelity = q<HTMLSelectElement>('select');
-  for (const [value, label] of FIDELITY_OPTIONS) fidelity.append(option(value, label));
-  fidelity.value = state.pageFidelity;
-  fidelity.addEventListener('change', () => {
-    state.pageFidelity = fidelity.value as Fidelity;
-  });
-
-  row.append(field('Direction', direction), field('Fidelity', fidelity));
-  return row;
-}
-
-function field(label: string, control: HTMLElement): HTMLElement {
-  const wrap = q('label', 'ds-field');
-  wrap.append(q('span', 'ds-field-label', label), control);
-  return wrap;
 }
 
 // ---- the `+` attach control (an anchored overlay above the composer) ----
@@ -2429,11 +3542,6 @@ function attachProject(): AttachProject {
   const name = ws?.name || (dir ? fileBaseName(dir) : 'Canvas');
   const projectId = allProjects.find((project) => dir !== '' && (sameDirPath(project.directory, dir) || pathContains(project.directory, dir)))?.id;
   return { dir, projectId, name, config };
-}
-
-/** The workspace directory resolved for pasted-path validation. */
-function referenceBaseDir(): string | null {
-  return attachProject().dir || null;
 }
 
 /**
@@ -2456,15 +3564,15 @@ export async function attachProjectReference(): Promise<void> {
   }
   const url = projectHttpUrl(project.config);
   if (!url) {
-    await host.toast({ kind: 'error', message: ATTACH_NEEDS_URL });
+    await host.toast(copy.errorToast(ATTACH_NEEDS_URL));
     return;
   }
   try {
     const chip = projectReferenceChip({ projectId: project.projectId, dir: project.dir, name: project.name, url });
     await host.attach(chip);
-    await host.toast({ kind: 'success', message: 'Workspace reference added to the composer.' });
+    await host.toast(copy.successToast(copy.WORKSPACE_REFERENCE_ADDED));
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.attachFailed('workspace', copy.reason(error))));
   }
 }
 
@@ -2528,15 +3636,15 @@ export async function attachProjectPath(path: string): Promise<void> {
   }
   const url = projectHttpUrl(project.config);
   if (!url) {
-    await host.toast({ kind: 'error', message: ATTACH_NEEDS_URL });
+    await host.toast(copy.errorToast(ATTACH_NEEDS_URL));
     return;
   }
   try {
     const chip = fileReferenceChip({ path, url });
     await host.attach(chip);
-    await host.toast({ kind: 'success', message: 'File reference added to the composer.' });
+    await host.toast(copy.successToast(copy.FILE_REFERENCE_ADDED));
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not attach: ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.attachFailed('file', copy.reason(error))));
   }
 }
 
@@ -2582,7 +3690,7 @@ export async function attachDroppedFiles(event: DragEvent): Promise<void> {
   const files = Array.from(event.dataTransfer?.files ?? []);
   if (files.length === 0) return;
   announceReference(DROP_PATH_MESSAGE);
-  await host.toast({ kind: 'info', message: DROP_PATH_MESSAGE });
+  await host.toast(copy.infoToast(DROP_PATH_MESSAGE));
 }
 
 // ---- references ----
@@ -2679,35 +3787,128 @@ function renderAttachPanel(): HTMLElement {
       feedback.prepend(spinner);
     }
     panel.append(feedback);
-    if (state.attachMenuOpen) queueMicrotask(() => input.focus());
+    if (state.overlay === 'attach') queueMicrotask(() => input.focus());
   } else {
     panel.append(q('div', 'ds-attach-note', projectHint));
   }
   return panel;
 }
 
-// ---- the design-system picker (an anchored overlay above the composer) ----
+// ---- the Look picker (an anchored overlay: Project · Presets · Directions) ----
 
-function designSystemIcon(): SVGElement {
-  return svgIcon(
-    '<circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>',
-    15,
-  );
+/** Commit a look and close the panel. A cleared preset falls back to the default look. */
+function applyLook(kind: LookKind | null, value?: { presetId?: string | null; direction?: 'auto' | DirectionId }): void {
+  state.pageLookKind = kind;
+  if (kind === 'preset') state.pageDesignSystemId = findDesignSystem(value?.presetId)?.id ?? null;
+  else state.pageDesignSystemId = null;
+  if (kind === 'preset' && !state.pageDesignSystemId) state.pageLookKind = null;
+  if (kind === 'direction' && value?.direction) state.pageDirection = value.direction;
+  void savePagePrefs();
+  closeActiveOverlay('look');
 }
 
-/** Commit a design-system choice (or clear it) and close the panel. */
-function applyDesignSystem(id: string | null): void {
-  state.pageDesignSystemId = findDesignSystem(id)?.id ?? null;
-  closeActiveOverlay('ds');
+function renderLookPanel(): HTMLElement {
+  const panel = q('div', 'ds-ds-panel ds-look-panel');
+  const tabs = q('div', 'ds-look-tabs');
+  tabs.setAttribute('role', 'tablist');
+  tabs.setAttribute('aria-label', 'Where the look comes from');
+  const entries: Array<[LookTab, string]> = [['project', 'Project'], ['presets', 'Presets'], ['directions', 'Directions']];
+  const tabEls: HTMLButtonElement[] = [];
+  for (const [id, label] of entries) {
+    const on = state.lookTab === id;
+    const tab = q<HTMLButtonElement>('button', 'ds-look-tab', label);
+    tab.type = 'button';
+    tab.id = `ds-look-tab-${id}`;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(on));
+    tab.setAttribute('aria-controls', 'ds-look-tabpanel');
+    tab.tabIndex = on ? 0 : -1;
+    tab.addEventListener('click', () => {
+      if (state.lookTab === id) return;
+      state.lookTab = id;
+      dsQuery = '';
+      renderPage();
+      queueMicrotask(() => pageBody?.querySelector<HTMLElement>(`#ds-look-tab-${id}`)?.focus());
+    });
+    tabEls.push(tab);
+    tabs.append(tab);
+  }
+  tabs.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const index = entries.findIndex(([id]) => id === state.lookTab);
+    tabEls[popoverStep(index, entries.length, event.key === 'ArrowRight' ? 1 : -1)]?.click();
+  });
+  const body = q('div', 'ds-look-body');
+  body.id = 'ds-look-tabpanel';
+  body.setAttribute('role', 'tabpanel');
+  body.setAttribute('aria-labelledby', `ds-look-tab-${state.lookTab}`);
+  if (state.lookTab === 'project') body.append(renderLookProject());
+  else if (state.lookTab === 'presets') body.append(renderDesignSystemPanel());
+  else body.append(renderLookDirections());
+  panel.append(tabs, body);
+  if (state.overlay === 'look' && state.lookTab !== 'presets') {
+    queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-look-option:not(:disabled)')?.focus());
+  }
+  return panel;
 }
 
-/** The detail pane for the highlighted entry. */
+/** One selectable row in the Look panel. */
+function lookOption(title: string, hint: string, on: boolean, disabled: boolean, onClick: () => void, extra?: HTMLElement): HTMLButtonElement {
+  const item = q<HTMLButtonElement>('button', `ds-menu-item ds-look-option${on ? ' on' : ''}`);
+  item.type = 'button';
+  item.setAttribute('aria-pressed', String(on));
+  item.disabled = disabled || state.pageBusy;
+  const main = q('span', 'ds-menu-main');
+  main.append(q('strong', undefined, title));
+  main.append(q('span', 'ds-menu-hint ds-look-hint', hint));
+  if (extra) main.append(extra);
+  item.append(main);
+  if (on) item.append(svgIcon('<path d="M20 6L9 17l-5-5"/>', 16));
+  if (!item.disabled) item.addEventListener('click', onClick);
+  return item;
+}
+
+function renderLookProject(): HTMLElement {
+  const list = q('div', 'ds-look-list');
+  const dir = state.directory;
+  const hint = dir
+    ? `Use its colors, type, radii and components. The agent reads ${fileBaseName(dir)} first.`
+    : 'Open a project in OpenChamber to use this';
+  list.append(lookOption('Match this project', hint, effectiveLookKind() === 'project', !dir, () => applyLook('project')));
+  return list;
+}
+
+/** A small strip of a direction's own colors. */
+function directionSwatches(id: DirectionId): HTMLElement {
+  const strip = q('span', 'ds-ds-swatches ds-look-swatches');
+  strip.setAttribute('aria-hidden', 'true');
+  for (const value of Object.values(DIRECTIONS[id].tokens).slice(0, 6)) {
+    const swatch = q('span', 'ds-ds-swatch');
+    swatch.style.background = value;
+    strip.append(swatch);
+  }
+  return strip;
+}
+
+function renderLookDirections(): HTMLElement {
+  const list = q('div', 'ds-look-list');
+  const current = effectiveLookKind() === 'direction' ? state.pageDirection : null;
+  list.append(lookOption('Auto', 'Infer from the brief', current === 'auto', false, () => applyLook('direction', { direction: 'auto' })));
+  for (const id of Object.keys(DIRECTIONS) as DirectionId[]) {
+    const direction = DIRECTIONS[id];
+    list.append(lookOption(direction.name, `For ${direction.when}`, current === id, false, () => applyLook('direction', { direction: id }), directionSwatches(id)));
+  }
+  return list;
+}
+
+/** The detail pane for the highlighted preset. */
 function renderDesignSystemDetail(detail: HTMLElement, id: string | null): void {
   detail.replaceChildren();
   const preset = findDesignSystem(id);
   if (!preset) {
-    detail.append(q('div', 'ds-ds-detail-name', NO_DESIGN_SYSTEM));
-    detail.append(q('p', 'ds-ds-detail-desc', 'Start from scratch — no preset. The design system comes out of the brief.'));
+    detail.append(q('div', 'ds-ds-detail-name', 'No preset'));
+    detail.append(q('p', 'ds-ds-detail-desc', 'Point at a preset to see its colors. Its tokens and DESIGN.md become the rules every screen follows.'));
     return;
   }
   detail.append(q('div', 'ds-ds-detail-name', preset.name));
@@ -2727,36 +3928,35 @@ function renderDesignSystemDetail(detail: HTMLElement, id: string | null): void 
   }
 }
 
+/** The Presets tab: search, the grouped preset list beside its detail, and "No preset". */
 function renderDesignSystemPanel(): HTMLElement {
-  const panel = q('div', 'ds-ds-panel');
+  const panel = q('div', 'ds-ds-presets');
 
   const toolbar = q('div', 'ds-ds-toolbar');
   const search = q<HTMLInputElement>('input', 'ds-ds-search');
   search.type = 'search';
-  search.placeholder = 'Search design systems';
-  search.setAttribute('aria-label', 'Search design systems');
+  search.placeholder = 'Search presets';
+  search.setAttribute('aria-label', 'Search design-system presets');
   search.value = dsQuery;
-  const create = q<HTMLButtonElement>('button', 'ds-ds-create', '+ Create');
-  create.title = 'Custom design systems are not available yet';
-  create.setAttribute('aria-label', 'Create a design system');
-  create.disabled = true;
-  toolbar.append(search, create);
+  toolbar.append(search);
 
   const body = q('div', 'ds-ds-body');
   const list = q('div', 'ds-ds-list');
   list.setAttribute('role', 'listbox');
-  list.setAttribute('aria-label', 'Design systems');
+  list.setAttribute('aria-label', 'Design-system presets');
   const detail = q('div', 'ds-ds-detail');
   body.append(list, detail);
 
   const actions = q('div', 'ds-ds-foot');
-  const clear = q<HTMLButtonElement>('button', 'ds-ds-clear', 'Clear');
-  clear.addEventListener('click', () => applyDesignSystem(null));
+  const clear = q<HTMLButtonElement>('button', 'ds-ds-clear', 'No preset');
+  clear.type = 'button';
+  clear.addEventListener('click', () => applyLook('preset', { presetId: null }));
   actions.append(clear);
 
   panel.append(toolbar, body, actions);
 
-  const itemRefs: Array<{ id: string | null; el: HTMLButtonElement }> = [];
+  const itemRefs: Array<{ id: string; el: HTMLButtonElement }> = [];
+  const chosen = effectiveLookKind() === 'preset' ? state.pageDesignSystemId : null;
 
   const setHighlight = (id: string | null): void => {
     if (dsHighlight === id) return;
@@ -2772,32 +3972,31 @@ function renderDesignSystemPanel(): HTMLElement {
   const buildList = (): void => {
     itemRefs.length = 0;
     list.replaceChildren();
-    const add = (preset: DesignSystemPreset | null): void => {
-      const id = preset?.id ?? null;
-      const on = dsHighlight === id;
-      const item = q<HTMLButtonElement>('button', `ds-ds-item${on ? ' on' : ''}`);
+    const add = (preset: DesignSystemPreset): void => {
+      const on = dsHighlight === preset.id;
+      const item = q<HTMLButtonElement>('button', `ds-ds-item${on ? ' on' : ''}${chosen === preset.id ? ' chosen' : ''}`);
+      item.type = 'button';
       item.setAttribute('role', 'option');
       item.setAttribute('aria-selected', on ? 'true' : 'false');
       const main = q('div', 'ds-ds-item-main');
-      main.append(q('span', 'ds-ds-item-name', preset ? preset.name : NO_DESIGN_SYSTEM));
-      if (preset) main.append(q('span', 'ds-ds-item-cat', preset.category));
+      main.append(q('span', 'ds-ds-item-name', preset.name));
+      main.append(q('span', 'ds-ds-item-cat', preset.category));
       item.append(main);
       const check = q('span', 'ds-ds-check');
       check.append(svgIcon('<path d="M20 6L9 17l-5-5"/>', 16));
       item.append(check);
-      item.addEventListener('click', () => applyDesignSystem(id));
-      item.addEventListener('mouseenter', () => setHighlight(id));
-      item.addEventListener('focus', () => setHighlight(id));
-      itemRefs.push({ id, el: item });
+      item.addEventListener('click', () => applyLook('preset', { presetId: preset.id }));
+      item.addEventListener('mouseenter', () => setHighlight(preset.id));
+      item.addEventListener('focus', () => setHighlight(preset.id));
+      itemRefs.push({ id: preset.id, el: item });
       list.append(item);
     };
-    add(null);
     const shown = filterDesignSystems(dsQuery);
     for (const group of designSystemGroups(shown)) {
       list.append(q('div', 'ds-ds-group', group.category));
       for (const preset of group.presets) add(preset);
     }
-    if (shown.length === 0) list.append(q('div', 'ds-ds-empty', 'No design systems match your search.'));
+    if (shown.length === 0) list.append(q('div', 'ds-ds-empty', 'No presets match your search.'));
   };
 
   buildList();
@@ -2813,60 +4012,178 @@ function renderDesignSystemPanel(): HTMLElement {
   });
 
   panel.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && event.target !== create) {
+    if (event.key === 'Enter' && event.target !== clear && dsHighlight) {
       event.preventDefault();
-      applyDesignSystem(dsHighlight);
+      applyLook('preset', { presetId: dsHighlight });
     }
   });
 
-  queueMicrotask(() => search.focus());
+  if (state.overlay === 'look') queueMicrotask(() => search.focus());
 
   return panel;
 }
 
-/** The one-line workspace context under the composer (no registered-project gate). */
-function renderWorkspaceRow(): HTMLElement {
-  const row = q('div', 'ds-dir');
-  const label = q('span', 'ds-dir-label', 'Canvas workspace');
-  const ws = state.workspace;
-  const value = q('span', 'ds-dir-value', ws
-    ? (ws.name.length > 38 ? `${ws.name.slice(0, 38)}…` : ws.name)
-    : 'Created on send — no project registration needed.');
-  value.title = ws ? ws.dir : NO_WORKSPACE_MESSAGE;
-  row.append(label, value);
-  return row;
+// ---- the Devices picker ----
+
+/** Toggle one device; `null` is "Ask me", which clears every device. */
+function toggleDevice(id: DeviceId | null): void {
+  if (id === null) setPagePref({ devices: [] });
+  else if (state.pageDevices.includes(id)) setPagePref({ devices: state.pageDevices.filter((device) => device !== id) });
+  else setPagePref({ devices: DEVICE_ORDER.filter((device) => device === id || state.pageDevices.includes(device)) });
 }
 
-function renderIdeas(): HTMLElement {
-  const wrap = q('div', 'ds-ideas');
-  wrap.append(q('div', 'ds-ideas-label', 'Ideas'));
-  const list = q('div', 'ds-idea-list');
-  IDEAS[state.pageType].forEach((idea, index) => {
-    const card = q<HTMLButtonElement>('button', 'ds-idea');
+function renderDevicesPanel(): HTMLElement {
+  const panel = q('div', 'ds-ds-panel ds-devices-panel');
+  const list = q('div', 'ds-device-list');
+  list.setAttribute('role', 'group');
+  list.setAttribute('aria-label', 'Devices to design for');
+  const row = (id: DeviceId | null, title: string, hint: string, checked: boolean): HTMLElement => {
+    const label = q('label', `ds-device-option${checked ? ' on' : ''}`);
+    const box = q<HTMLInputElement>('input');
+    box.type = 'checkbox';
+    box.checked = checked;
+    box.disabled = state.pageBusy;
+    box.addEventListener('change', () => {
+      toggleDevice(id);
+      queueMicrotask(() => pageBody?.querySelector<HTMLElement>(`[data-device="${id ?? 'ask'}"]`)?.focus());
+    });
+    box.dataset.device = id ?? 'ask';
+    const text = q('span', 'ds-menu-main');
+    text.append(q('strong', undefined, title), q('span', 'ds-menu-hint', hint));
+    label.append(box, text);
+    return label;
+  };
+  list.append(row(null, 'Ask me', 'Detect from the project', state.pageDevices.length === 0));
+  for (const id of DEVICE_ORDER) {
+    const preset = DEVICE_PRESETS[id];
+    list.append(row(id, deviceName(id), `${preset.width}×${preset.height}`, state.pageDevices.includes(id)));
+  }
+  panel.append(list);
+  if (state.overlay === 'devices') queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-device-option input')?.focus());
+  return panel;
+}
+
+// ---- the page preferences (`prefs/page`) ----
+
+function pagePrefs(): PagePrefs {
+  return {
+    questions: state.pageQuestions,
+    options: state.pageOptions,
+    devices: [...state.pageDevices],
+    look: { kind: state.pageLookKind, presetId: state.pageDesignSystemId, direction: state.pageDirection },
+  };
+}
+
+async function savePagePrefs(): Promise<void> {
+  try {
+    await host.storage.set(PAGE_PREFS_KEY, pagePrefs());
+  } catch {
+    /* the choice still applies to this page; it just is not remembered */
+  }
+}
+
+/** Change page preferences, remember them and redraw. */
+function setPagePref(change: Partial<Omit<PagePrefs, 'look'>>, refocus?: string): void {
+  if (change.questions !== undefined) state.pageQuestions = change.questions;
+  if (change.options !== undefined) state.pageOptions = change.options;
+  if (change.devices !== undefined) state.pageDevices = DEVICE_ORDER.filter((id) => change.devices!.includes(id));
+  void savePagePrefs();
+  rerender();
+  if (refocus) queueMicrotask(() => pageBody?.querySelector<HTMLElement>(refocus)?.focus());
+}
+
+function isOptionsChoice(value: unknown): value is OptionsChoice {
+  return value === 'ask' || value === 1 || value === 2 || value === 3;
+}
+
+/** Restore the remembered page preferences, ignoring anything malformed. Page surface only. */
+async function loadPagePrefs(): Promise<void> {
+  if (state.surface !== 'page') return;
+  let stored: unknown;
+  try {
+    stored = await host.storage.get(PAGE_PREFS_KEY);
+  } catch {
+    return;
+  }
+  if (!stored || typeof stored !== 'object') return;
+  const value = stored as Partial<Record<keyof PagePrefs, unknown>>;
+  if (typeof value.questions === 'boolean') state.pageQuestions = value.questions;
+  if (isOptionsChoice(value.options)) state.pageOptions = value.options;
+  if (Array.isArray(value.devices)) state.pageDevices = DEVICE_ORDER.filter((id) => (value.devices as unknown[]).includes(id));
+  const look = value.look as Partial<PagePrefs['look']> | undefined;
+  if (look && typeof look === 'object') {
+    if (look.kind === null || look.kind === 'project' || look.kind === 'preset' || look.kind === 'direction') state.pageLookKind = look.kind;
+    state.pageDesignSystemId = findDesignSystem(typeof look.presetId === 'string' ? look.presetId : null)?.id ?? null;
+    if (look.direction === 'auto' || (typeof look.direction === 'string' && Object.hasOwn(DIRECTIONS, look.direction))) {
+      state.pageDirection = look.direction as 'auto' | DirectionId;
+    }
+  }
+  rerender();
+}
+
+// ---- context, starters, footer ----
+
+/** What the agent reads before it designs, and where designs are saved. */
+function renderContextRow(): HTMLElement {
+  const context = q('div', 'ds-context');
+  const project = q('div', 'ds-context-item');
+  const dir = state.directory;
+  if (dir) {
+    project.append(q('span', 'ds-context-label', 'Project'));
+    const name = q('span', 'ds-context-value', fileBaseName(dir));
+    name.title = dir;
+    project.append(name, q('span', 'ds-context-note', ' · read for colors, fonts, components and breakpoints'));
+  } else {
+    project.append(q('span', 'ds-context-note', "No project open — you'll confirm a palette first"));
+  }
+  context.append(project);
+  if (!pageLocationEl) pageLocationEl = q('div', 'ds-context-item ds-context-location');
+  renderLocationRow(pageLocationEl);
+  context.append(pageLocationEl);
+  return context;
+}
+
+/** "Start from": three pre-structured briefs per type. A click seeds the composer. */
+function renderStarters(): HTMLElement {
+  const wrap = q('section', 'ds-starters');
+  wrap.append(q('div', 'ds-section-label', 'Start from'));
+  const grid = q('div', 'ds-starter-grid');
+  for (const starter of STARTERS) {
+    const card = q<HTMLButtonElement>('button', 'ds-starter');
+    card.type = 'button';
     card.disabled = state.pageBusy;
-    card.append(ideaThumb(index % 4));
-    const body = q('div', 'ds-idea-body');
-    body.append(q('strong', 'ds-idea-title', idea.title));
-    body.append(q('span', 'ds-idea-desc', idea.description));
+    card.setAttribute('aria-label', `${starter.title}: ${starter.description}. ${PAGE_TYPE_LABELS[starter.type]}.`);
+    card.append(starterGlyph(starter.glyph));
+    const body = q('span', 'ds-starter-body');
+    body.append(q('strong', 'ds-starter-title', starter.title));
+    body.append(q('span', 'ds-starter-desc', starter.description));
     card.append(body);
     card.addEventListener('click', () => {
       if (state.pageBusy) return;
-      state.prompt = idea.prompt;
-      if (promptEl) promptEl.value = idea.prompt;
+      state.prompt = starter.prompt;
+      state.pageType = starter.type;
+      renderPage();
       updateComposerState();
       promptEl?.focus();
     });
-    list.append(card);
-  });
-  wrap.append(list);
+    grid.append(card);
+  }
+  wrap.append(grid);
   return wrap;
 }
 
-/** The calm closing line under everything. */
+/** The closing line: the keys, and where else the canvas opens. */
 function renderFooter(): HTMLElement {
   const footer = q('footer', 'ds-footer');
-  footer.append(q('span', 'ds-footer-name', 'Design Canvas'));
-  footer.append(q('span', 'ds-footer-hint', 'Add references by clicking an element in the live canvas — edit mode turns every click into a chip.'));
+  const hints = q('p', 'ds-hints');
+  const kbd = (text: string): HTMLElement => q('kbd', undefined, text);
+  hints.append(kbd('Enter'), document.createTextNode(' to start · '));
+  hints.append(kbd('Shift'), document.createTextNode('+'), kbd('Enter'), document.createTextNode(' new line · '));
+  hints.append(kbd('/canvas'), document.createTextNode(' in any chat opens the canvas there'));
+  footer.append(hints);
+  const diagnostics = q('div', 'ds-footer-diag');
+  renderDiagnosticsRow(diagnostics);
+  footer.append(diagnostics);
   return footer;
 }
 
@@ -2896,13 +4213,20 @@ function listNote(message: string, kind: 'info' | 'error' = 'info'): HTMLElement
 }
 
 /** The workspaces list below the composer: one heading, one list. */
-function renderCanvasSection(): HTMLElement {
+export function renderCanvasSection(): HTMLElement {
   const section = q('section', 'ds-section');
   const head = q('div', 'ds-section-head');
   head.append(q('div', 'ds-section-label', 'Your design work'));
   section.append(head);
   const list = q('div', 'ds-list');
   const view = state.workspaces ?? { kind: 'loading' };
+  // R4-fix (F3): a root the service could not read means its designs are
+  // hidden — say which, as an error note, above whatever else is listed.
+  if (view.kind === 'list' || view.kind === 'empty') {
+    for (const [rootName, message] of Object.entries(workspaceRootErrors ?? {})) {
+      list.append(listNote(`Can't read ${rootName}: ${message} — its designs are hidden.`, 'error'));
+    }
+  }
   if (view.kind === 'loading') {
     list.append(listNote('Loading…'));
   } else if (view.kind === 'error') {
@@ -2910,8 +4234,20 @@ function renderCanvasSection(): HTMLElement {
   } else if (view.kind === 'empty') {
     list.append(listNote(NO_DESIGN_WORK_MESSAGE));
   } else {
-    for (const row of view.rows) {
+    const shown = state.workShowAll ? view.rows : view.rows.slice(0, WORK_LIST_CAP);
+    for (const row of shown) {
       list.append(renderWorkspaceListRow(row));
+    }
+    if (view.rows.length > WORK_LIST_CAP) {
+      const more = q<HTMLButtonElement>('button', 'ds-link ds-list-more', state.workShowAll ? 'Show fewer' : `Show all (${view.rows.length})`);
+      more.type = 'button';
+      more.setAttribute('aria-expanded', String(state.workShowAll));
+      more.addEventListener('click', () => {
+        state.workShowAll = !state.workShowAll;
+        rerender();
+      });
+      section.append(list, more);
+      return section;
     }
   }
   section.append(list);
@@ -2924,31 +4260,67 @@ function renderCanvasSection(): HTMLElement {
  * unmapped workspace opens via a NEW session titled with the workspace name
  * (carrying the open prompt); a mapped one reuses its session via
  * `host.openSession`.
+ *
+ * R5: the row also manages its workspace — a ⋯ menu (Rename…, Stop dev
+ * server, Copy folder path) and, while the service's recorded dev server is
+ * up, a "● Running" badge with an inline Stop button. The row's transient UI
+ * (menu, inline rename, stop confirm) lives in `rowUi`, keyed by dir, so a
+ * list refresh redraws it as it was; the row repaints itself in place.
  */
-function renderWorkspaceListRow(row: WorkspaceWorkRow): HTMLElement {
-  const ready = Boolean(row.url?.trim());
+export function renderWorkspaceListRow(row: WorkspaceWorkRow): HTMLElement {
   const item = q('div', 'ds-list-row');
-  const open = q<HTMLButtonElement>('button', 'ds-list-open');
-  open.setAttribute('aria-label', row.sessionId ? `Open the canvas chat ${row.name}` : `Open ${row.name} (starts its design chat)`);
-  open.append(rowIcon(WORKSPACE_ROW_ICON));
-  const main = q('div', 'ds-list-main');
-  const titleLine = q('div', 'ds-list-title');
-  titleLine.append(q('span', 'ds-list-name', row.name || fileBaseName(row.dir)));
-  titleLine.append(q('span', `ds-badge${ready ? ' ready' : ''}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
-  main.append(titleLine);
-  main.append(q('div', 'ds-list-meta', workspaceMeta(row)));
-  open.append(main);
-  open.append(q('span', 'ds-list-go', row.sessionId ? 'Open' : 'Open chat'));
-  open.addEventListener('click', () => void openWorkspaceListRow(row));
-  item.append(open);
-  // Preview is offered only for a workspace with a url — it can do what it says.
-  if (ready) {
-    const preview = q<HTMLButtonElement>('button', 'ds-list-preview', 'Preview');
-    preview.title = `Open the ${row.name} preview`;
-    preview.setAttribute('aria-label', `Open the ${row.name} preview`);
-    preview.addEventListener('click', () => void previewWorkspace(row));
-    item.append(preview);
-  }
+  const key = normalizeDirPath(row.dir);
+  const paint = (): void => {
+    const ui = rowUiFor(row.dir);
+    const ready = Boolean(row.url?.trim());
+    const running = workspaceServerRunning(row);
+    const name = row.name || fileBaseName(row.dir);
+    item.classList.toggle('is-renaming', ui.renaming);
+    const parts: HTMLElement[] = [];
+    const main = q('div', 'ds-list-main');
+    const titleLine = q('div', 'ds-list-title');
+    if (ui.renaming) titleLine.append(renderRenameField(row, ui));
+    else titleLine.append(q('span', 'ds-list-name', name));
+    titleLine.append(q('span', `ds-badge${ready ? ' ready' : ''}`, ready ? DESIGN_READY_BADGE : NO_CONFIG_BADGE));
+    // R4: a workspace found under an earlier designs location. The badge sits
+    // beside the readiness badge; the row's meta already names its dir.
+    if (row.legacyRoot) titleLine.append(q('span', 'ds-badge legacy', 'Old location'));
+    if (running) titleLine.append(q('span', 'ds-badge running', '● Running'));
+    main.append(titleLine);
+    main.append(q('div', 'ds-list-meta', workspaceMeta(row)));
+    if (ui.renaming) {
+      // An <input> cannot live inside the open button: while renaming the
+      // row's body is a plain container, and the open action pauses.
+      const body = q('div', 'ds-list-open ds-list-body');
+      body.append(rowIcon(WORKSPACE_ROW_ICON), main);
+      parts.push(body);
+    } else {
+      const open = q<HTMLButtonElement>('button', 'ds-list-open');
+      open.setAttribute('aria-label', row.sessionId ? `Open the canvas chat ${name}` : `Open ${name} (starts its design chat)`);
+      open.append(rowIcon(WORKSPACE_ROW_ICON), main);
+      open.append(q('span', 'ds-list-go', row.sessionId ? 'Open' : 'Open chat'));
+      open.addEventListener('click', () => void openWorkspaceListRow(row));
+      parts.push(open);
+    }
+    // Preview is offered only for a workspace with a url — it can do what it says.
+    if (ready && !ui.renaming) {
+      const preview = q<HTMLButtonElement>('button', 'ds-list-preview', 'Preview');
+      preview.title = `Open the ${name} preview`;
+      preview.setAttribute('aria-label', `Open the ${name} preview`);
+      preview.addEventListener('click', () => void previewWorkspace(row));
+      parts.push(preview);
+    }
+    if (running || ui.stopBusy) parts.push(renderRowStopButton(row, ui, name));
+    if (!ui.renaming) parts.push(renderRowMenu(row, ui, name));
+    if (ui.message) {
+      const alert = q('div', 'ds-list-warn ds-list-alert', ui.message);
+      alert.setAttribute('role', 'alert');
+      parts.push(alert);
+    }
+    item.replaceChildren(...parts);
+  };
+  rowPainters.set(key, paint);
+  paint();
   return item;
 }
 
@@ -2962,7 +4334,7 @@ async function openWorkspaceListRow(row: WorkspaceWorkRow): Promise<void> {
     try {
       await host.openSession(row.sessionId);
     } catch (error) {
-      await host.toast({ kind: 'error', message: `Could not open the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
+      await host.toast(copy.errorToast(copy.openChatFailed(copy.reason(error))));
     }
     return;
   }
@@ -2980,12 +4352,14 @@ async function openWorkspaceListRow(row: WorkspaceWorkRow): Promise<void> {
       data: seedSessionData('hi-fi', '', record),
     });
   } catch (error) {
-    await host.toast({ kind: 'error', message: `Could not start the canvas chat: ${error instanceof Error ? error.message : String(error)}` });
+    await recordDiagnosticError('start-session', copy.reason(error));
+    await host.toast(copy.errorToast(copy.startChatFailed(copy.reason(error))));
     return;
   }
   if (!result.sessionId || result.sent !== 'sent') {
     const failure = 'failure' in result ? result.failure : undefined;
-    await host.toast({ kind: 'error', message: `The canvas chat could not be started (${result.sent}${failure ? `: ${failure}` : ''}).` });
+    await recordDiagnosticError('start-session', `not sent (${result.sent}${failure ? `: ${failure}` : ''})`);
+    await host.toast(copy.errorToast(copy.chatNotSent(result.sent, failure)));
     return;
   }
   try {
@@ -2996,8 +4370,536 @@ async function openWorkspaceListRow(row: WorkspaceWorkRow): Promise<void> {
   try {
     await host.openSession(result.sessionId);
   } catch (error) {
-    await host.toast({ kind: 'error', message: `The canvas chat could not open. Open it from Your design work. ${error instanceof Error ? error.message : String(error)}` });
+    await host.toast(copy.errorToast(copy.chatStartedNotOpened(copy.reason(error))));
   }
+}
+
+// ---- work-list row management (R5: rename, stop dev server, copy path) ----
+
+/** One row's transient UI, kept across list redraws (keyed by normalized dir). */
+type RowUi = {
+  menuOpen: boolean;
+  renaming: boolean;
+  renameDraft: string;
+  renameBusy: boolean;
+  /** True while the confirm check (canvas open? session busy?) runs. */
+  stopChecking: boolean;
+  stopBusy: boolean;
+  stopConfirm: boolean;
+  stopConfirmTimer: ReturnType<typeof setTimeout> | null;
+  /** The row's inline alert: a rename error or a stop refusal. */
+  message: string;
+  /** Focus the rename field on the next paint. */
+  focusRename: boolean;
+  /** Hand focus back to the ⋯ trigger on the next paint (an Escape close). */
+  focusMore: boolean;
+};
+
+/** How long the inline "Confirm stop" stays armed. */
+const STOP_CONFIRM_MS = 4000;
+
+const rowUi = new Map<string, RowUi>();
+/** The latest painter for each listed row — a redraw replaces it. */
+const rowPainters = new Map<string, () => void>();
+
+function rowUiFor(dir: string): RowUi {
+  const key = normalizeDirPath(dir);
+  let ui = rowUi.get(key);
+  if (!ui) {
+    ui = {
+      menuOpen: false, renaming: false, renameDraft: '', renameBusy: false,
+      stopChecking: false, stopBusy: false, stopConfirm: false, stopConfirmTimer: null,
+      message: '', focusRename: false, focusMore: false,
+    };
+    rowUi.set(key, ui);
+  }
+  return ui;
+}
+
+function repaintRow(dir: string): void {
+  rowPainters.get(normalizeDirPath(dir))?.();
+}
+
+const STOP_ICON = '<rect x="6" y="6" width="12" height="12" rx="1.5"/>';
+const MORE_ICON = '<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>';
+
+/** The inline rename field: Enter saves, Escape or leaving the field cancels. */
+function renderRenameField(row: WorkspaceWorkRow, ui: RowUi): HTMLElement {
+  const wrap = q('span', 'ds-list-rename');
+  const input = q<HTMLInputElement>('input', 'ds-list-rename-input');
+  input.type = 'text';
+  input.value = ui.renameDraft;
+  input.disabled = ui.renameBusy;
+  input.setAttribute('aria-label', `New name for ${row.name || fileBaseName(row.dir)}`);
+  input.setAttribute('aria-busy', String(ui.renameBusy));
+  input.addEventListener('input', () => { ui.renameDraft = input.value; });
+  input.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void saveRowRename(row);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation?.();
+      cancelRowRename(row);
+    }
+  });
+  input.addEventListener('blur', () => {
+    if (!ui.renameBusy && ui.renaming) cancelRowRename(row);
+  });
+  wrap.append(input);
+  if (ui.renameBusy) {
+    const spinner = svgIcon('<path d="M21 12a9 9 0 1 1-6.2-8.6"/>', 14);
+    spinner.classList.add('ds-reference-spinner');
+    wrap.append(spinner);
+  }
+  if (ui.focusRename) {
+    ui.focusRename = false;
+    queueMicrotask(() => {
+      input.focus();
+      input.select?.();
+    });
+  }
+  return wrap;
+}
+
+/** The inline Stop button: one click, or a two-step confirm when the stop would interrupt live work. */
+function renderRowStopButton(row: WorkspaceWorkRow, ui: RowUi, name: string): HTMLButtonElement {
+  const stop = q<HTMLButtonElement>('button', 'ds-list-stop');
+  stop.disabled = ui.stopBusy || ui.stopChecking;
+  stop.setAttribute('aria-busy', String(ui.stopBusy));
+  stop.classList.toggle('is-confirm', ui.stopConfirm);
+  if (ui.stopBusy) {
+    stop.textContent = 'Stopping…';
+    stop.title = `Stopping the ${name} dev server`;
+  } else if (ui.stopConfirm) {
+    stop.textContent = 'Confirm stop';
+    stop.title = `The ${name} canvas is in use — click again to stop its dev server`;
+  } else {
+    stop.append(svgIcon(STOP_ICON, 14));
+    stop.title = `Stop the ${name} dev server`;
+  }
+  stop.setAttribute('aria-label', stop.title);
+  stop.addEventListener('click', () => void stopRowServer(row));
+  return stop;
+}
+
+/** The row's ⋯ menu, on the shared anchored-popover pattern. */
+function renderRowMenu(row: WorkspaceWorkRow, ui: RowUi, name: string): HTMLElement {
+  const trigger = q<HTMLButtonElement>('button', 'ds-list-more');
+  trigger.append(svgIcon(MORE_ICON, 16));
+  trigger.title = `More actions for ${name}`;
+  trigger.setAttribute('aria-label', trigger.title);
+  trigger.setAttribute('aria-haspopup', 'menu');
+  trigger.setAttribute('aria-expanded', String(ui.menuOpen));
+  trigger.addEventListener('click', () => toggleRowMenu(row));
+  const panel = q('div', 'ds-ds-panel ds-row-menu');
+  const option = (label: string, onClick: () => void): void => {
+    const item = q<HTMLButtonElement>('button', 'ds-menu-item ds-row-menu-item', label);
+    item.addEventListener('click', onClick);
+    panel.append(item);
+  };
+  option('Rename…', () => startRowRename(row));
+  if (workspaceServerRunning(row)) option('Stop dev server', () => {
+    closeRowMenu(row);
+    void stopRowServer(row);
+  });
+  option('Copy folder path', () => {
+    closeRowMenu(row);
+    void copyRowPath(row);
+  });
+  if (ui.menuOpen) queueMicrotask(() => panel.querySelector<HTMLElement>('.ds-row-menu-item')?.focus());
+  if (ui.focusMore) {
+    ui.focusMore = false;
+    queueMicrotask(() => trigger.focus());
+  }
+  const anchor = anchoredPopover({
+    open: ui.menuOpen,
+    trigger,
+    panel,
+    label: `${name} actions`,
+    optionSelector: '.ds-row-menu-item',
+    onClose: () => closeRowMenu(row, true),
+    closeOnBackdrop: true,
+  });
+  anchor.classList.add('ds-row-more');
+  return anchor;
+}
+
+function toggleRowMenu(row: WorkspaceWorkRow): void {
+  const ui = rowUiFor(row.dir);
+  const next = !ui.menuOpen;
+  // One row menu open at a time.
+  for (const [key, other] of rowUi) {
+    if (other.menuOpen && other !== ui) {
+      other.menuOpen = false;
+      rowPainters.get(key)?.();
+    }
+  }
+  ui.menuOpen = next;
+  repaintRow(row.dir);
+}
+
+function closeRowMenu(row: WorkspaceWorkRow, refocus = false): void {
+  const ui = rowUiFor(row.dir);
+  if (!ui.menuOpen) return;
+  ui.menuOpen = false;
+  ui.focusMore = refocus;
+  repaintRow(row.dir);
+}
+
+function startRowRename(row: WorkspaceWorkRow): void {
+  const ui = rowUiFor(row.dir);
+  ui.menuOpen = false;
+  ui.renaming = true;
+  ui.renameBusy = false;
+  ui.renameDraft = row.name || fileBaseName(row.dir);
+  ui.message = '';
+  ui.focusRename = true;
+  repaintRow(row.dir);
+}
+
+function cancelRowRename(row: WorkspaceWorkRow): void {
+  const ui = rowUiFor(row.dir);
+  if (ui.renameBusy) return;
+  ui.renaming = false;
+  ui.renameDraft = '';
+  ui.message = '';
+  repaintRow(row.dir);
+}
+
+/**
+ * Save an inline rename: `POST /workspaces/rename`, then update the row in
+ * place, the bound workspace's name, and a `ws/<sid>` record that ALREADY
+ * maps this dir (never a new key) — and reload the list.
+ */
+async function saveRowRename(row: WorkspaceWorkRow): Promise<void> {
+  const ui = rowUiFor(row.dir);
+  if (ui.renameBusy || !ui.renaming) return;
+  const next = ui.renameDraft.trim();
+  if (next === '') {
+    ui.message = 'Enter a name for this design.';
+    ui.focusRename = true;
+    repaintRow(row.dir);
+    return;
+  }
+  if (next === (row.name || fileBaseName(row.dir))) {
+    cancelRowRename(row);
+    return;
+  }
+  ui.renameBusy = true;
+  ui.message = '';
+  repaintRow(row.dir);
+  let failure = '';
+  let saved = '';
+  try {
+    const result = await renameWorkspace(row.dir, next);
+    if (result.ok) saved = typeof result.name === 'string' && result.name.trim() !== '' ? result.name : next;
+    else failure = result.error ?? 'The design could not be renamed.';
+  } catch (error) {
+    failure = `The design could not be renamed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  ui.renameBusy = false;
+  if (failure) {
+    ui.message = failure;
+    ui.focusRename = true;
+    repaintRow(row.dir);
+    return;
+  }
+  ui.renaming = false;
+  ui.renameDraft = '';
+  row.name = saved;
+  repaintRow(row.dir);
+  await applyWorkspaceRename(row.dir, saved);
+  await loadCanvasWorkspaces({ quiet: true });
+}
+
+/** Carry a rename into this chat's binding and the mapped session's `ws/` record (only if it exists). */
+async function applyWorkspaceRename(dir: string, name: string): Promise<void> {
+  if (state.workspace && sameDirPath(state.workspace.dir, dir)) {
+    state.workspace = { ...state.workspace, name };
+    renderRow();
+    if (state.surface === 'panel') renderRailControls();
+  }
+  const sessionId = wsSessionMap.get(normalizeDirPath(dir));
+  const key = sessionId ? workspaceStorageKey(sessionId) : null;
+  if (!key) return;
+  try {
+    const record = await host.storage.get(key);
+    if (isWorkspaceRecord(record) && sameDirPath(record.dir, dir)) {
+      await host.storage.set(key, { ...record, name });
+    }
+  } catch {
+    /* the config carries the new name; the chat's record catches up on its next bind */
+  }
+}
+
+/**
+ * Whether a session is busy right now: the current one from its live
+ * snapshot, any other from the host's session lists. `null` = unknown.
+ */
+async function sessionBusyState(sessionId: string): Promise<boolean | null> {
+  if (sessionId === state.sessionId) return state.sessionBusy;
+  try {
+    const projects = await host.listProjects();
+    if (projects.state !== 'ready') return null;
+    for (const project of projects.projects) {
+      const sessions = await host.listSessions(project.id);
+      const found = sessions.sessions.find((candidate) => candidate.id === sessionId);
+      if (found) return found.activity !== 'idle';
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * A stop needs the two-step confirm when it would cut off live work: the
+ * workspace is the one open on the canvas, or its chat is busy. Anything that
+ * cannot be verified asks (fail closed).
+ */
+async function rowStopNeedsConfirm(row: WorkspaceWorkRow): Promise<boolean> {
+  try {
+    const live = await getState();
+    if (live.windowOpen === true && typeof live.dir === 'string' && sameDirPath(live.dir, row.dir)) return true;
+  } catch {
+    return true;
+  }
+  if (!row.sessionId) return false;
+  return (await sessionBusyState(row.sessionId)) !== false;
+}
+
+function disarmRowStop(ui: RowUi): void {
+  ui.stopConfirm = false;
+  if (ui.stopConfirmTimer) clearTimeout(ui.stopConfirmTimer);
+  ui.stopConfirmTimer = null;
+}
+
+/**
+ * Stop a listed workspace's dev server: `POST /server/stop {dir}` directly.
+ * A confirmed stop forgets the server and, for this chat's own workspace,
+ * flips the Work Status control; a refusal says why inline. The list reloads
+ * either way.
+ */
+async function stopRowServer(row: WorkspaceWorkRow): Promise<void> {
+  const ui = rowUiFor(row.dir);
+  if (ui.stopBusy || ui.stopChecking) return;
+  if (!ui.stopConfirm) {
+    ui.stopChecking = true;
+    let confirm: boolean;
+    try {
+      confirm = await rowStopNeedsConfirm(row);
+    } finally {
+      ui.stopChecking = false;
+    }
+    if (confirm) {
+      ui.stopConfirm = true;
+      ui.message = '';
+      ui.stopConfirmTimer = setTimeout(() => {
+        disarmRowStop(ui);
+        repaintRow(row.dir);
+      }, STOP_CONFIRM_MS);
+      repaintRow(row.dir);
+      return;
+    }
+  }
+  disarmRowStop(ui);
+  ui.stopBusy = true;
+  ui.message = '';
+  repaintRow(row.dir);
+  try {
+    const result = await stopWorkspaceServer(row.dir);
+    if (result.stopped) {
+      for (const started of [...state.startedServers]) {
+        if (sameDirPath(started, row.dir)) state.startedServers.delete(started);
+      }
+      if (state.workspace && sameDirPath(state.workspace.dir, row.dir)) {
+        state.serverStatus = false;
+        state.serverError = null;
+        renderServerControl();
+      }
+    } else {
+      ui.message = result.error ?? await manualStopRefusalMessage(row.dir);
+    }
+  } catch (error) {
+    ui.message = `Could not stop the dev server: ${error instanceof Error ? error.message : String(error)}`;
+  } finally {
+    ui.stopBusy = false;
+    repaintRow(row.dir);
+  }
+  await loadCanvasWorkspaces({ quiet: true });
+}
+
+/** Copy a row's folder path through the host clipboard. */
+async function copyRowPath(row: WorkspaceWorkRow): Promise<void> {
+  try {
+    await copyPath(row.dir);
+    await host.toast(copy.successToast(copy.FOLDER_PATH_COPIED));
+  } catch (error) {
+    await host.toast(copy.errorToast(copy.copyFolderFailed(copy.reason(error))));
+  }
+}
+
+// ---- the designs location (R5: rail footer line + a reusable editor) ----
+
+/** The last `GET /settings` answer, or null before it (or when it failed). */
+let designsSettings: DesignsSettings | null = null;
+let designsSettingsLoad: 'idle' | 'loading' | 'loaded' | 'error' = 'idle';
+/** True while an editor is open, so a background redraw never clobbers it. */
+let locationEditorOpen = false;
+
+/** Read the designs location. Never runs in the hidden 1×1 resolve pane. */
+async function loadDesignsSettings(): Promise<DesignsSettings | null> {
+  if (isHiddenResolvePane()) return designsSettings;
+  designsSettingsLoad = 'loading';
+  try {
+    const result = await getSettings();
+    designsSettings = isDesignsSettings(result) ? result : null;
+    designsSettingsLoad = designsSettings ? 'loaded' : 'error';
+  } catch {
+    designsSettingsLoad = 'error';
+  }
+  return designsSettings;
+}
+
+/** The read-only stand-in when the environment pins the location. */
+const ENV_OVERRIDE_LABEL = 'Set by DS_WORKSPACE_ROOT';
+
+/**
+ * Open the inline designs-location editor INSIDE `anchorEl` (its children are
+ * replaced): the current root prefilled, Save / Use default / Cancel, service
+ * refusals inline. With `DS_WORKSPACE_ROOT` set it shows the path read-only.
+ * `onDone(changed)` runs when it closes — the caller redraws its own line.
+ * After a change the list reloads, so new designs land under the new root.
+ */
+export async function openLocationEditor(anchorEl: HTMLElement, onDone: (changed: boolean) => void): Promise<void> {
+  if (isHiddenResolvePane()) return;
+  locationEditorOpen = true;
+  const close = (changed: boolean): void => {
+    locationEditorOpen = false;
+    onDone(changed);
+  };
+  anchorEl.replaceChildren(q('div', 'ds-location-note', 'Loading the designs folder…'));
+  const settings = await loadDesignsSettings();
+  const editor = q('div', 'ds-location-editor');
+  editor.setAttribute('role', 'group');
+  editor.setAttribute('aria-label', 'Designs folder');
+  const cancel = q<HTMLButtonElement>('button', 'ds-location-cancel', settings?.envOverride || !settings ? 'Close' : 'Cancel');
+  cancel.addEventListener('click', () => close(false));
+  if (!settings) {
+    const error = q('div', 'ds-home-warn ds-location-error', 'Could not read the designs folder from the local service.');
+    error.setAttribute('role', 'alert');
+    editor.append(error, cancel);
+    anchorEl.replaceChildren(editor);
+    return;
+  }
+  if (settings.envOverride) {
+    editor.append(q('div', 'ds-location-path', settings.workspaceRoot));
+    editor.append(q('div', 'ds-location-readonly', ENV_OVERRIDE_LABEL));
+    editor.append(cancel);
+    anchorEl.replaceChildren(editor);
+    return;
+  }
+  const input = q<HTMLInputElement>('input', 'ds-location-input');
+  input.type = 'text';
+  input.value = settings.workspaceRoot;
+  input.setAttribute('aria-label', 'Designs folder path');
+  const error = q('div', 'ds-home-warn ds-location-error');
+  error.setAttribute('role', 'alert');
+  error.hidden = true;
+  const save = q<HTMLButtonElement>('button', 'primary ds-location-save', 'Save');
+  const reset = q<HTMLButtonElement>('button', 'ds-location-default', 'Use default');
+  reset.title = `Use the default folder: ${settings.defaultRoot}`;
+  const actions = q('div', 'ds-location-actions');
+  actions.append(save, reset, cancel);
+  let busy = false;
+  const setBusy = (on: boolean): void => {
+    busy = on;
+    input.disabled = on;
+    save.disabled = on;
+    reset.disabled = on;
+    cancel.disabled = on;
+    save.textContent = on ? 'Saving…' : 'Save';
+    editor.setAttribute('aria-busy', String(on));
+  };
+  const submit = async (value: string | null): Promise<void> => {
+    if (busy) return;
+    if (value !== null && value.trim() === '') {
+      error.textContent = 'Enter a full folder path, or choose Use default.';
+      error.hidden = false;
+      return;
+    }
+    setBusy(true);
+    error.hidden = true;
+    let failure = '';
+    try {
+      const result = await putSettings(value === null ? null : value.trim());
+      if (!result.ok) failure = result.error || 'The designs folder could not be changed.';
+    } catch (caught) {
+      failure = `The designs folder could not be changed: ${caught instanceof Error ? caught.message : String(caught)}`;
+    }
+    if (failure) {
+      setBusy(false);
+      error.textContent = failure;
+      error.hidden = false;
+      input.focus();
+      return;
+    }
+    await loadDesignsSettings();
+    if (canLoadDesignWork()) await loadCanvasWorkspaces({ quiet: true });
+    close(true);
+  };
+  save.addEventListener('click', () => void submit(input.value));
+  reset.addEventListener('click', () => void submit(null));
+  input.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void submit(input.value);
+    } else if (event.key === 'Escape' && !busy) {
+      event.preventDefault();
+      close(false);
+    }
+  });
+  editor.append(input, actions, error);
+  anchorEl.replaceChildren(editor);
+  queueMicrotask(() => input.focus());
+}
+
+/**
+ * The one-line designs location — "Designs: <path> · Change" — rendered into
+ * `container`, for the rail footer and the page. Reads `GET /settings` once on
+ * first use; renders nothing in the hidden 1×1 resolve pane.
+ */
+export function renderLocationRow(container: HTMLElement): void {
+  container.classList.add('ds-location');
+  if (isHiddenResolvePane() || (state.surface === 'panel' && !isRealPane())) {
+    container.replaceChildren();
+    container.hidden = true;
+    return;
+  }
+  if (locationEditorOpen) return;
+  const settings = designsSettings;
+  if (!settings) {
+    container.replaceChildren();
+    container.hidden = true;
+    if (designsSettingsLoad === 'idle') void loadDesignsSettings().then(() => renderLocationRow(container));
+    return;
+  }
+  container.hidden = false;
+  const line = q('div', 'ds-location-line');
+  line.append(q('span', 'ds-location-label', 'Designs: '));
+  const path = q('span', 'ds-location-path', middleTruncatePath(settings.workspaceRoot));
+  path.title = settings.workspaceRoot;
+  line.append(path, q('span', 'ds-location-sep', ' · '));
+  if (settings.envOverride) {
+    line.append(q('span', 'ds-location-readonly', ENV_OVERRIDE_LABEL));
+  } else {
+    const change = q<HTMLButtonElement>('button', 'ds-link ds-location-change', 'Change');
+    change.setAttribute('aria-label', 'Change the designs folder');
+    change.addEventListener('click', () => void openLocationEditor(container, () => renderLocationRow(container)));
+    line.append(change);
+  }
+  container.replaceChildren(line);
 }
 
 // ---- live window state ----
@@ -3021,7 +4923,8 @@ function renderSessionStatus(): void {
   if (!sessionLineEl) return;
   const ws = state.workspace;
   if (!ws) {
-    sessionLineEl.textContent = NO_WORKSPACE_MESSAGE;
+    // F2: the visible hint for a draft chat — Start cannot work until it exists.
+    sessionLineEl.textContent = state.sessionId ? NO_WORKSPACE_MESSAGE : `${NO_SESSION_HINT}, then press Start.`;
     sessionLineEl.classList.add('off');
     return;
   }
@@ -3082,7 +4985,7 @@ async function onPlayToggleClick(): Promise<void> {
       await saveMode();
     }
   } catch (error) {
-    setStatus(`Could not switch the canvas mode: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    setStatus(copy.switchModeFailed(copy.reason(error)), 'error');
   }
   renderCanvasControls();
 }
@@ -3100,7 +5003,7 @@ async function onScreenSelectChange(): Promise<void> {
     await openWorkspace({ dir: ws.dir, screen: id, focus: false });
     state.activeScreen = id;
   } catch (error) {
-    setStatus(`Could not switch screens: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    setStatus(copy.switchScreenFailed(copy.reason(error)), 'error');
   }
   renderCanvasControls();
 }
@@ -3133,8 +5036,6 @@ export async function applyState(stateData: LiveState): Promise<void> {
   state.url = stateData.url;
   state.title = stateData.title;
   state.windowOpen = stateData.windowOpen;
-  // V4-5: the bridge claim stands the row's pick loop down (semantics unchanged).
-  state.bridgeActive = stateData.bridgeActive === true;
   if (stateData.mode === 'edit' || stateData.mode === 'play') state.liveMode = stateData.mode;
   if (stateData.screens !== undefined) state.liveScreens = stateData.screens.map((screen) => ({ ...screen }));
   state.activeScreen = stateData.activeScreen ?? null;
@@ -3145,15 +5046,18 @@ export async function applyState(stateData: LiveState): Promise<void> {
   const registry = shouldToastRegistryError(state.registryErrorNotified, stateData.registryError ?? null);
   state.registryErrorNotified = registry.key;
   if (registry.toast) {
-    await host.toast({ kind: 'error', message: registryErrorToastMessage(stateData.registryError as string) });
+    await host.toast(copy.errorToast(registryErrorToastMessage(stateData.registryError as string)));
   }
   // Picks are NOT read here anymore (V4-5): they arrive through `GET /picks`
   // in `runPickLoop`; `/state` keeps serving window/mode/screens/registryError.
   renderWindowStatus();
   // The user closed the live window by hand: that IS Design Mode going off. Flip
   // the mode (persist it) and reflect it in the widget — never auto-reopen. The
-  // `pendingOpen` guard keeps our own opening window from being read as a close.
-  if (!state.windowOpen && state.mode.on && !state.pendingOpen) {
+  // `pendingOpen` guard keeps our own opening window from being read as a close;
+  // so does a background open the service is still launching (#9).
+  if (state.windowOpen) state.backgroundOpenUntil = 0;
+  const backgroundOpening = state.backgroundOpenUntil > Date.now();
+  if (!state.windowOpen && state.mode.on && !state.pendingOpen && !backgroundOpening) {
     await turnModeOffByWindowClose();
   }
 }
@@ -3173,6 +5077,14 @@ async function turnModeOffByWindowClose(): Promise<void> {
 }
 
 async function poll(): Promise<void> {
+  // F3: adopt what another frame wrote (`ws/`, `mode/`) and claim a pending
+  // `/canvas` open BEFORE anything else — and before the visibility guard: a
+  // collapsed sidebar must not strand a `/canvas` the user just ran.
+  try {
+    await syncRowFromStorage();
+  } catch {
+    /* storage is a convenience; the tick still reads /state */
+  }
   if (document.visibilityState !== 'visible') return;
   // Re-detect `.design-studio.json` on every tick so the agent scaffolding one
   // mid-session flips the row to ready without a reload. Silent (mount reports
@@ -3181,7 +5093,7 @@ async function poll(): Promise<void> {
   try {
     await applyState(await getState());
   } catch (error) {
-    setStatus(error instanceof ServiceUnavailable ? `Local service not ready: ${error.message}` : `Live canvas error: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    setStatus(error instanceof ServiceUnavailable ? copy.serviceNotReady(error.message) : copy.liveCanvasError(copy.reason(error)), 'error');
   }
   // Keep the server Start/Stop icon honest without blocking the next poll tick.
   void refreshServerStatus();
@@ -3197,14 +5109,15 @@ function renderModeUi(): void {
     modeToggleBtn.classList.toggle('on', state.mode.on);
   }
   renderSessionStatus();
+  renderRailControls();
 }
 
 /** What kind of surface a host surface name maps to. Pure. */
-export type SurfaceKind = 'row' | 'note' | 'page' | 'none';
+export type SurfaceKind = 'row' | 'rail' | 'page' | 'none';
 
 export function surfaceKind(surface: string): SurfaceKind {
   if (surface === 'status') return 'row';
-  if (surface === 'panel') return 'note';
+  if (surface === 'panel') return 'rail';
   if (surface === 'page') return 'page';
   return 'none';
 }
@@ -3318,6 +5231,9 @@ function buildPage(root: HTMLElement): void {
   window.addEventListener('dragover', onPageWindowDragOver);
   window.addEventListener('drop', onPageWindowDrop);
   renderPage();
+  void loadPagePrefs();
+  void loadFirstRun();
+  void loadDiagnostics();
   void loadDesignHome();
 }
 
@@ -3340,8 +5256,8 @@ function build(root: HTMLElement): void {
     buildRow(root);
     return;
   }
-  if (kind === 'note') {
-    buildPanelNote(root);
+  if (kind === 'rail') {
+    buildRail(root);
     return;
   }
   if (kind === 'page') {
@@ -3349,11 +5265,382 @@ function build(root: HTMLElement): void {
   }
 }
 
-/** The rail panel surface: one calm line, nothing else. */
-function buildPanelNote(root: HTMLElement): void {
-  const wrap = q('div', 'ds ds-panel-note');
-  wrap.append(q('p', 'ds-panel-note-line', PANEL_SIDEBAR_HINT));
+// ---- the rail tab (surface "panel") ----
+//
+// One calm column for the chat the rail is showing: its canvas status, one
+// Open/Create canvas button, a short brief box that starts a NEW design chat
+// (the page's `startNewDesign`, minus the hero, ideas and references), and
+// "Your design work". The rail is a second frame next to the chat's status
+// row, so it never mirrors the window into Design Mode and never turns the
+// mode ON by itself opening Chrome: the row would read "ON, no window" during
+// the open and flip it straight back OFF. It hands the open to the row
+// through the same `canvas-open/<sessionId>` record `/canvas` uses, and only
+// claims that record itself when no row took it (the chat is not on screen).
+//
+// The same build also runs in the hidden 1×1 resolve pane: there it renders
+// the static shell and nothing else — no list, no interval, no service call.
+
+/** The rail's light refresh cadence (reads only: `ws/`, `mode/`, `/state`). */
+const RAIL_POLL_MS = 2000;
+/**
+ * How long a rail-written handoff waits for a row to claim it before the rail
+ * claims it itself. A mounted row polls every `POLL_MS` (even hidden), so this
+ * is several of its ticks; past it, no row is going to open the canvas.
+ */
+const RAIL_CLAIM_DELAY_MS = 4000;
+let railClaimDelayMs = RAIL_CLAIM_DELAY_MS;
+/** The rail's Diagnostics control, under the footer hint. */
+let railDiagEl: HTMLElement | null = null;
+const RAIL_FOOTER_HINT = 'Full home: Design Canvas in the sidebar.';
+
+let railStatusEl: HTMLElement | null = null;
+let railPrimaryBtn: HTMLButtonElement | null = null;
+let railPrimaryHintEl: HTMLElement | null = null;
+let railPromptEl: HTMLTextAreaElement | null = null;
+let railStartBtn: HTMLButtonElement | null = null;
+let railErrorEl: HTMLElement | null = null;
+let railWorkEl: HTMLElement | null = null;
+/** R5: the "Designs: <path> · Change" line above the footer (real pane only). */
+let railLocationEl: HTMLElement | null = null;
+/** True while the primary button's flow runs (swallows double clicks). */
+let railBusy = false;
+/** The refresh interval is running (started once, and only in a real pane). */
+let railLive = false;
+/** "Your design work" has been asked for at least once (real pane only). */
+let railWorkLoaded = false;
+
+/** The static rail shell. Building it never opens a window or calls the service. */
+export function buildRail(root: HTMLElement): void {
+  const wrap = q('div', 'ds ds-rail');
+  railStatusEl = q('div', 'ds-rail-status');
+  railStatusEl.setAttribute('role', 'status');
+  railPrimaryBtn = q<HTMLButtonElement>('button', 'primary ds-rail-primary');
+  railPrimaryBtn.addEventListener('click', () => void onRailPrimaryClick());
+  railPrimaryHintEl = q('div', 'ds-rail-hint');
+  const brief = q('div', 'ds-rail-brief');
+  railPromptEl = q<HTMLTextAreaElement>('textarea', 'ds-rail-input');
+  railPromptEl.rows = 3;
+  railPromptEl.placeholder = 'Describe a new design…';
+  railPromptEl.setAttribute('aria-label', 'Design brief');
+  railPromptEl.value = state.prompt;
+  railPromptEl.addEventListener('input', () => {
+    state.prompt = railPromptEl?.value ?? '';
+    renderRailControls();
+  });
+  railPromptEl.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      void onRailStartDesign();
+    }
+  });
+  railStartBtn = q<HTMLButtonElement>('button', 'ds-rail-start', 'Start design');
+  railStartBtn.title = 'Start a new design chat with this brief';
+  railStartBtn.addEventListener('click', () => void onRailStartDesign());
+  railErrorEl = q('div', 'ds-home-warn ds-rail-error');
+  railErrorEl.setAttribute('role', 'alert');
+  brief.append(railPromptEl, railStartBtn, railErrorEl);
+  railWorkEl = q('div', 'ds-rail-work');
+  railLocationEl = q('div', 'ds-rail-location');
+  railLocationEl.hidden = true;
+  const footer = q('div', 'ds-rail-footer', RAIL_FOOTER_HINT);
+  railDiagEl = q('div', 'ds-rail-diag');
+  railDiagEl.hidden = true;
+  wrap.append(railStatusEl, railPrimaryBtn, railPrimaryHintEl, brief, railWorkEl, railLocationEl, footer, railDiagEl);
   root.append(wrap);
+  // A tab mounted while collapsed (or behind another tab) grows into a real
+  // pane later; these wake it then. The hidden resolve pane never resizes.
+  window.addEventListener('resize', onRailWake);
+  window.addEventListener('focus', onRailWake);
+  document.addEventListener('visibilitychange', onRailWake);
+  renderRail();
+}
+
+/** The rail's one status line for this chat. */
+function railStatusText(): string {
+  if (!state.sessionId) return 'This chat has not started yet.';
+  const ws = state.workspace;
+  if (!ws) return 'No canvas for this chat yet.';
+  return canvasSessionStatus({ modeOn: state.mode.on, workspaceDir: ws.dir, wsReady: projectReady(currentConfig()) });
+}
+
+/** Cheap in-place update of the rail's text and buttons (never touches the textarea's caret). */
+function renderRailControls(): void {
+  if (!railPrimaryBtn) return;
+  if (railStatusEl) {
+    railStatusEl.textContent = railStatusText();
+    railStatusEl.classList.toggle('off', !state.workspace || !state.mode.on);
+  }
+  const working = railBusy || state.serverPending;
+  railPrimaryBtn.textContent = working ? 'Working…' : state.workspace ? 'Open canvas' : 'Create canvas';
+  // F2: a new-chat draft has no session to key a workspace to.
+  railPrimaryBtn.disabled = working || !state.sessionId;
+  railPrimaryBtn.title = !state.sessionId
+    ? NO_SESSION_HINT
+    : state.workspace
+      ? state.windowOpen ? 'Raise the live canvas window' : 'Open the live canvas for this chat'
+      : 'Create a Design Canvas workspace for this chat';
+  if (railPrimaryHintEl) {
+    railPrimaryHintEl.textContent = state.sessionId ? '' : NO_SESSION_HINT;
+    railPrimaryHintEl.hidden = Boolean(state.sessionId);
+  }
+  if (railPromptEl) {
+    if (railPromptEl.value !== state.prompt) railPromptEl.value = state.prompt;
+    railPromptEl.disabled = state.pageBusy;
+  }
+  if (railStartBtn) {
+    const ready = canSend();
+    railStartBtn.disabled = !ready;
+    railStartBtn.textContent = state.pageBusy ? 'Starting…' : 'Start design';
+    railStartBtn.setAttribute('aria-busy', String(state.pageBusy));
+  }
+  if (railErrorEl) {
+    railErrorEl.textContent = state.pageError;
+    railErrorEl.hidden = state.pageError === '';
+  }
+}
+
+/** "Your design work" — only in a real pane, and only once it has been asked for. */
+function renderRailWork(): void {
+  if (!railWorkEl) return;
+  if (!isRealPane() || !railWorkLoaded) {
+    railWorkEl.replaceChildren();
+    return;
+  }
+  railWorkEl.replaceChildren(renderCanvasSection());
+}
+
+/** The designs-location line: only in a real pane, and only once the rail went live. */
+function renderRailLocation(): void {
+  if (!railLocationEl) return;
+  if (!isRealPane() || !railWorkLoaded) {
+    railLocationEl.replaceChildren();
+    railLocationEl.hidden = true;
+    return;
+  }
+  renderLocationRow(railLocationEl);
+}
+
+function renderRail(): void {
+  renderRailControls();
+  renderRailWork();
+  renderRailLocation();
+  if (railDiagEl) renderDiagnosticsRow(railDiagEl);
+}
+
+/**
+ * The primary button. No workspace: create one (the fast half — files + `ws/`)
+ * and hand install/boot/open to the row. A workspace with its window open:
+ * raise it. A workspace without one: hand the open to the row.
+ */
+async function onRailPrimaryClick(options: { turnOn?: boolean } = {}): Promise<void> {
+  if (railBusy || state.serverPending || !isRealPane()) return;
+  if (!state.sessionId) {
+    await host.toast(copy.errorToast(NO_SESSION_MESSAGE));
+    return;
+  }
+  railBusy = true;
+  renderRailControls();
+  try {
+    if (state.workspace) {
+      if (state.windowOpen && !options.turnOn) {
+        try {
+          await focusLive();
+        } catch (error) {
+          setStatus(copy.focusFailed(copy.reason(error)), 'error');
+        }
+        return;
+      }
+      await handRailOpenToRow({ record: state.workspace, jobId: null });
+      return;
+    }
+    const prepared = await prepareCanvasWorkspace('', state.sessionId, modeScaffoldChoice());
+    if ('error' in prepared) {
+      // The scaffold paths toast their own cause; F2 is the one they do not.
+      if (prepared.noSession) await host.toast(copy.errorToast(NO_SESSION_MESSAGE));
+      return;
+    }
+    await handRailOpenToRow(prepared);
+  } finally {
+    railBusy = false;
+    renderRail();
+  }
+}
+
+/**
+ * Turn Design Mode ON with a fresh handoff (exactly what `/canvas` leaves), so
+ * the chat's row opens the window — and holds its pending-open guard while it
+ * does. If no row claims it within `railClaimDelayMs`, the chat is not on
+ * screen: the rail claims it itself (it is a real, long-lived pane).
+ */
+async function handRailOpenToRow(ws: { record: WorkspaceRecord; jobId: string | null }): Promise<void> {
+  const sessionId = state.sessionId;
+  await armDesignModeForRow(ws, null, undefined);
+  renderRailControls();
+  await sleep(railClaimDelayMs);
+  if (!isRealPane() || state.sessionId !== sessionId) return;
+  const claimed = await beginOpenHandoff();
+  if (claimed) await claimed.task;
+}
+
+/** Start design: the page's `startNewDesign` with the rail's brief (no references). */
+async function onRailStartDesign(): Promise<void> {
+  if (!canSend()) return;
+  await startNewDesign();
+  renderRail();
+}
+
+/**
+ * The rail's refresh, READ-ONLY by design: adopt `ws/` and `mode/` other
+ * frames wrote and read `/state.windowOpen` for Open vs Focus. It does not
+ * run `poll()`: `applyState` would mirror a closed window into Design Mode
+ * OFF from a second frame and race the row's own handoff guard.
+ */
+async function refreshRail(): Promise<void> {
+  if (!isRealPane() || document.visibilityState !== 'visible') return;
+  const sessionId = state.sessionId;
+  if (sessionId) {
+    const record = await readStoredWorkspace(sessionId);
+    if (sessionId === state.sessionId) {
+      if (record && !(state.workspace && sameDirPath(state.workspace.dir, record.dir))) bindWorkspace(record);
+      else if (!record && state.workspace && !railBusy) state.workspace = null; // the row unbound a missing folder (V4-15)
+    }
+    await syncModeFromStorage();
+  }
+  try {
+    state.windowOpen = (await getState()).windowOpen === true;
+  } catch {
+    /* the service is not up yet; keep the last answer */
+  }
+  // A row that counted a turn while this rail was open leaves a stale badge: clear it.
+  if ((await loadBadgeRecord()).count > 0) await resetRailBadge();
+  renderRailControls();
+}
+
+/** Ask for "Your design work" (storage scan + `GET /workspaces`). */
+async function loadRailWork(): Promise<void> {
+  if (!isRealPane()) return;
+  railWorkLoaded = true;
+  await Promise.all([loadDesignHome(), loadDesignsSettings()]);
+  renderRailLocation();
+}
+
+/** The stale-key prune ran (or was skipped) for this mount — at most once (#11). */
+let staleKeyPruneStarted = false;
+
+/**
+ * Every session id the host knows right now (archived ones included), or null
+ * when that CANNOT be said completely: a list that failed, is still loading,
+ * or covers a directory only partly. A prune must never act on a partial set.
+ */
+async function readLiveSessionIds(): Promise<Set<string> | null> {
+  try {
+    const projects = await host.listProjects();
+    if (projects.state !== 'ready') return null;
+    const live = new Set<string>();
+    for (const project of projects.projects) {
+      const snapshot = await host.listSessions(project.id);
+      if (snapshot.state !== 'ready') return null;
+      if ((snapshot.coverage ?? []).some((entry) => entry.state !== 'ready')) return null;
+      for (const session of snapshot.sessions) live.add(session.id);
+    }
+    return live;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #11: drop `ws/`, `mode/` and `canvas-open/` keys of sessions that no longer
+ * exist, so storage does not grow forever. Real panes only, once per mount;
+ * `design/<id>` is never touched (permanent marker). Any doubt — the session
+ * list failed or came back empty, keys() failed — prunes nothing.
+ */
+export async function pruneStaleSessionKeys(): Promise<string[]> {
+  if (staleKeyPruneStarted || !isRealPane()) return [];
+  staleKeyPruneStarted = true;
+  const live = await readLiveSessionIds();
+  if (!live || live.size === 0) return [];
+  if (state.sessionId) live.add(state.sessionId);
+  let keys: string[];
+  try {
+    keys = await host.storage.keys();
+  } catch {
+    return [];
+  }
+  const stale = staleSessionKeys(keys, live);
+  const pruned: string[] = [];
+  for (const key of stale) {
+    try {
+      await host.storage.delete(key);
+      pruned.push(key);
+    } catch {
+      /* the next mount tries again */
+    }
+  }
+  return pruned;
+}
+
+/** Test seam: let the next `pruneStaleSessionKeys` run, as a fresh mount would. */
+export function resetStaleKeyPrune(): void {
+  staleKeyPruneStarted = false;
+}
+
+/** Start the rail's refresh — once, and only when the frame is a real pane. */
+function startRailLive(): void {
+  if (railLive || state.surface !== 'panel' || !isRealPane()) return;
+  railLive = true;
+  void pruneStaleSessionKeys();
+  // The panel is open: clear the icon, zero the count, and count turns again only once it closes.
+  badgeTracking = true;
+  void resetRailBadge();
+  void loadDiagnostics().then(() => {
+    if (railDiagEl) renderDiagnosticsRow(railDiagEl);
+  });
+  void refreshRail();
+  void loadRailWork();
+  setInterval(() => void refreshRail(), RAIL_POLL_MS);
+  const waiting = pendingActionItem;
+  pendingActionItem = null;
+  if (waiting) void runItemAction(waiting);
+}
+
+/** Focus / visibility / resize: start the rail if it just became real, else refresh it. */
+function onRailWake(): void {
+  if (!isRealPane()) return;
+  if (!railLive) {
+    startRailLive();
+    return;
+  }
+  if (document.visibilityState !== 'visible') return;
+  void refreshRail();
+  void loadRailWork();
+}
+
+/**
+ * What a mount does after the shell is built. The row keeps its live state
+ * fresh; the rail refreshes only when it is the real tab; the page does not
+ * poll. In the hidden resolve pane every effect here is a storage READ.
+ */
+function mountSurface(root: HTMLElement): void {
+  build(root);
+  setStatus('Loading…');
+  void loadMode();
+  void loadWorkspace();
+  void loadStudioConfig();
+  const kind = surfaceKind(state.surface);
+  if (kind === 'row') {
+    badgeTracking = true;
+    void loadDiagnostics();
+    void poll();
+    setInterval(() => void poll(), POLL_MS);
+    // V4-5: the pick-queue long-poll runs on the row surface only. It has no
+    // visibility guard — picks queue and land whenever this frame can read them.
+    startPickLoop();
+  } else if (kind === 'rail') {
+    startRailLive(); // a no-op in the 1×1 resolve pane
+  } else if (kind === 'page') {
+    void pruneStaleSessionKeys();
+  }
 }
 
 async function main(): Promise<void> {
@@ -3363,6 +5650,10 @@ async function main(): Promise<void> {
   // The `/canvas` resolver: valid on the panel and page surfaces (the ones that
   // carry `commands`). Registered once, before the host asks.
   host.onResolve((request) => resolveCanvasCommand(request.args));
+  // `contributes.actions` (open mode): the message/session the user acted on.
+  host.onItem(onHostItem);
+  // Every failed service call lands in the diagnostics ring buffer.
+  setServiceErrorSink((source, message) => void recordDiagnosticError(source, message));
 
   let started = false;
   host.onReady((context: HostReadyContext) => {
@@ -3373,20 +5664,7 @@ async function main(): Promise<void> {
     state.resolveAllowed = context.surface === 'panel' || context.surface === 'page';
     if (started) return;
     started = true;
-    build(root);
-    setStatus('Loading…');
-    void loadMode();
-    void loadWorkspace();
-    void loadStudioConfig();
-    // The row surfaces keep their live state fresh; the page does not poll.
-    const kind = surfaceKind(state.surface);
-    if (kind === 'row') {
-      void poll();
-      setInterval(() => void poll(), POLL_MS);
-      // V4-5: the pick-queue long-poll runs on the row surface only. It has no
-      // visibility guard — picks queue and land whenever this frame can read them.
-      startPickLoop();
-    }
+    mountSurface(root);
   });
 
   // The current session's live snapshot keeps `sessionBusy` fresh and re-binds
@@ -3455,7 +5733,7 @@ export function resetReferenceDraft(): void {
   referenceError = '';
 }
 
-export { renderComposer, renderReferenceDraft };
+export { renderComposer };
 
 /** Test seam: pretend the host reported this session, so storage writes can target it. */
 export function setSessionId(id: string | null): void {
@@ -3472,10 +5750,46 @@ export function getPendingOpen(): boolean {
   return state.pendingOpen;
 }
 
-/** Test seam: set the chosen design-system preset id without replaying a page render. */
-export function setDesignSystem(id: string | null): void {
-  state.pageDesignSystemId = id;
+/** Test seam: the page's creation selections, without replaying the pickers. */
+export function setPageChoice(choice: { type?: DesignType; direction?: 'auto' | DirectionId; look?: LookKind | null; presetId?: string | null }): void {
+  if (choice.type) state.pageType = choice.type;
+  if (choice.direction) state.pageDirection = choice.direction;
+  if (choice.look !== undefined) state.pageLookKind = choice.look;
+  if (choice.presetId !== undefined) state.pageDesignSystemId = choice.presetId;
 }
+
+/** Test seam: the page's current type and the session spec its selections build. */
+export function getPageChoice(): { type: DesignType; spec: DesignBriefSpec } {
+  return { type: state.pageType, spec: pageBriefSpec() };
+}
+
+/** Test seam: the remembered page preferences as they stand. */
+export function getPagePrefs(): PagePrefs {
+  return pagePrefs();
+}
+
+/** Test seam: change the page preferences as the controls do (and remember them). */
+export async function setPagePrefs(change: Partial<Omit<PagePrefs, 'look'>> & { look?: PagePrefs['look'] }): Promise<void> {
+  if (change.look) {
+    state.pageLookKind = change.look.kind;
+    state.pageDesignSystemId = change.look.presetId;
+    state.pageDirection = change.look.direction;
+  }
+  setPagePref(change);
+  await savePagePrefs();
+}
+
+/** Test seam: forget the page preferences in memory, as a fresh mount starts. */
+export function resetPagePrefs(): void {
+  state.pageQuestions = true;
+  state.pageOptions = 'ask';
+  state.pageDevices = [];
+  state.pageLookKind = null;
+  state.pageDesignSystemId = null;
+  state.pageDirection = 'auto';
+}
+
+export { loadPagePrefs, renderStarters, applyStructureBrief };
 
 /** Test seam: allow the `/canvas` resolver without replaying an `onReady` context. */
 export function allowResolve(value: boolean): void {
@@ -3484,11 +5798,6 @@ export function allowResolve(value: boolean): void {
 
 /** Test seam: run the New-design flow directly. */
 export { startNewDesign, resolveCanvasCommand, loadProjects, loadCanvasWorkspaces };
-
-/** Test seam: the registered projects the last load recorded (decision 4c). */
-export function getAllProjects(): RegisteredProject[] {
-  return [...allProjects];
-}
 
 /** Test seam: set the current session's busy flag without a host snapshot. */
 export function setSessionBusy(busy: boolean): void {
@@ -3546,5 +5855,42 @@ export { refreshServerStatus };
 
 /** Test seam: the Start/Stop icon button's click handler, without a mounted row. */
 export { onServerControlClick as clickServerControl };
+
+/** Test seams: the rail's actions and refresh, without a host. */
+export { onRailPrimaryClick as clickRailPrimary, onRailStartDesign as clickRailStartDesign, refreshRail };
+
+/** Test seam: forget the cached designs location (and any open editor). */
+export function resetDesignsSettings(): void {
+  designsSettings = null;
+  designsSettingsLoad = 'idle';
+  locationEditorOpen = false;
+}
+
+/** Test seams for the P5 surfaces. */
+export function getFirstRunDismissed(): boolean | null {
+  return state.firstRunDismissed;
+}
+export function resetFirstRun(): void {
+  state.firstRunDismissed = null;
+}
+export function getDiagnosticErrors(): DiagnosticError[] {
+  return [...diagnosticErrors];
+}
+export function resetDiagnostics(): void {
+  diagnosticErrors = [];
+  diagnosticsLoaded = false;
+  diagnosticsView = null;
+  if (diagnosticsTimer) clearTimeout(diagnosticsTimer);
+  diagnosticsTimer = null;
+}
+export function setBadgeTracking(on: boolean): void {
+  badgeTracking = on;
+}
+export { loadDiagnostics, loadFirstRun, dismissFirstRun, renderFirstRun, canvasHelpChip };
+
+/** Test seam: shorten how long a rail handoff waits for a row before claiming it. */
+export function setRailClaimDelay(ms: number | null): void {
+  railClaimDelayMs = ms ?? RAIL_CLAIM_DELAY_MS;
+}
 
 void main();

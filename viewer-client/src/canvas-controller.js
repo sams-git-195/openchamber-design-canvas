@@ -15,6 +15,9 @@ export function initCanvas(initialConfig) {
   // compact tier (below this zoom the card shows only the styled Retry
   // button), and the F2 menu viewport margin.
   const HEADER_COMPACT_W=140, ERROR_COMPACT_SCALE=.5, MENU_EDGE=8;
+  // B1 watchdog: a board still 'loading' after this long offers its Retry.
+  const LOADING_STALL_MS=20000;
+  const EDIT_HINT='Edit mode: click an element to select it. Shift-click adds to the selection. Reference in chat sends it to the composer.';
   const SCREEN_ID=/^[a-z0-9][a-z0-9-]{0,30}$/;
   const BOARD_COPY={loading:'Loading this screen.',ready:'',error:'Dev server unreachable — Reload to restart it.'};
   const EMBED_HINT='If it is running, check CSP / X-Frame-Options embedding permissions.';
@@ -23,7 +26,7 @@ export function initCanvas(initialConfig) {
   // action strings are the frozen §3 screen-menu union, verbatim, plus FIX-3's
   // F17 'stop-server' (the in-canvas escape hatch for the documented
   // dev-servers-outlive-the-window policy), alone in its own group before Rename.
-  const SCREEN_MENU=[[['send-to-chat','Send to chat']],[['zoom','Zoom to screen'],['reload','Reload screen']],[['reset-position','Reset position'],['export-png','Export PNG'],['export-pdf','Export PDF'],['copy-path','Copy file path']],[['stop-server','Stop dev server']],[['rename','Rename…']]];
+  const SCREEN_MENU=[[['send-to-chat','Send to chat']],[['zoom','Zoom to screen'],['reload','Reload screen']],[['reset-position','Reset position'],['export-png','Export PNG'],['export-pdf','Export PDF'],['copy-path','Copy file path'],['fit-viewport','Fit to device viewport']],[['stop-server','Stop dev server']],[['rename','Rename…']]];
   const bootConfig=initialConfig||{};
   let pages = [], currentUrl = '', currentTitle = 'Preview';
   let screens = [], active = '', shellMode = 'edit', cellCenters = new Map();
@@ -49,8 +52,19 @@ export function initCanvas(initialConfig) {
   let modePending = null, modeTimer = null;
   let contextMenu = null, renaming = null;
   const hover = {screen:'',x:NaN,y:NaN,pending:null,raf:0};
+  // R3 (B3): artboards are device viewports. An edit-mode wheel over one is
+  // relayed as screen-scroll (deltas summed per rAF); screenMeta carries the
+  // service's scroll cue (setScreenMeta) and survives setScreens.
+  const scroll = {pending:null,raf:0};
+  const screenMeta = new Map();
   const newPulseTimers = new Map();
   let hadScreens = false;
+  // R2 (B4): the selection the service mirrors from the artboards (it pushes
+  // setSelection); the shell only renders it and asks for send/clear.
+  const NO_SELECTION=Object.freeze({count:0,screens:Object.freeze([]),screen:'',label:''});
+  // selectMore (R2-fix m13): the pill's "Select more" toggle — while on, a
+  // plain click (or touch tap) adds like shift-click does.
+  let selection = NO_SELECTION, pillEl = null, pillSend = null, pillMore = null, pillReason = null, selectMore = false;
   // Geometry constants from the original camera, not toolbar/theme tokens.
   const numToken = name => name === '--s7' ? 48 : name === '--pan-step' ? 32 : parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
   const finite = n => typeof n === 'number' && Number.isFinite(n);
@@ -63,7 +77,7 @@ export function initCanvas(initialConfig) {
     const oldScreens=snapshot?.screens;
     const sameScreens=!!oldScreens&&oldScreens.length===screens.length&&screens.every((s,i)=>oldScreens[i].id===s.id&&oldScreens[i].url===s.url&&oldScreens[i].title===s.title&&oldScreens[i].width===s.width&&oldScreens[i].height===s.height&&oldScreens[i].state===s.state);
     const activeScreen=screens.find(s=>s.id===active);
-    const next={ready:view.ready,statusState,message,pages:samePages?oldPages:Object.freeze(pages.map(p=>Object.freeze({...p}))),currentUrl,currentTitle,screens:sameScreens?oldScreens:Object.freeze(screens.map(s=>Object.freeze({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:s.state}))),active,mode:shellMode,preset:view.preset,width:activeScreen?activeScreen.width:view.width,height:activeScreen?activeScreen.height:view.height,layoutMode:view.layoutMode,reason:view.reason,zoomMode:view.mode,scale:view.scale,pan:view.pan,capturing:!!captureState,openMenu,notices,toast,agentBusy,agentLabel,modePending};
+    const next={ready:view.ready,statusState,message,pages:samePages?oldPages:Object.freeze(pages.map(p=>Object.freeze({...p}))),currentUrl,currentTitle,screens:sameScreens?oldScreens:Object.freeze(screens.map(s=>Object.freeze({id:s.id,url:s.url,width:s.width,height:s.height,title:s.title,state:s.state}))),active,mode:shellMode,preset:view.preset,width:activeScreen?activeScreen.width:view.width,height:activeScreen?activeScreen.height:view.height,layoutMode:view.layoutMode,reason:view.reason,zoomMode:view.mode,scale:view.scale,pan:view.pan,capturing:!!captureState,openMenu,notices,toast,agentBusy,agentLabel,modePending,agentInput:view.agentInput,selectionCount:selection.count,selectionScreen:selection.screen,selectionLabel:selection.label};
     if(snapshot&&Object.keys(next).every(key=>next[key]===snapshot[key]))return;
     snapshot=Object.freeze(next);for(const listener of [...listeners])listener();
   }
@@ -138,6 +152,19 @@ export function initCanvas(initialConfig) {
       if(b.detail){b.detail.textContent='';b.detail.hidden=true;}
     }
     b.action.hidden=s.state!=='error';
+    // B1 watchdog: a board stuck 'loading' for LOADING_STALL_MS shows the
+    // existing Retry (same retry message) as "Still loading — Retry".
+    if(s.state!=='loading'){clearTimeout(b.stallTimer);b.stallTimer=null;b.stalled=false;}
+    else if(b.stalled){b.action.hidden=false;}
+    else if(!b.stallTimer){
+      b.stallTimer=setTimeout(()=>{
+        b.stallTimer=null;
+        const live=screens.find(x=>x.id===s.id);
+        if(!live||live.state!=='loading'||boards.get(s.id)!==b)return;
+        b.stalled=true;b.action.hidden=false;b.action.textContent='Still loading — Retry';
+      },LOADING_STALL_MS);
+    }
+    if(!b.stalled&&b.action.textContent!=='Retry')b.action.textContent='Retry';
   }
   function menuButtonFor(section){
     let menu=section.querySelector('.ds-ab-menu');
@@ -237,6 +264,14 @@ export function initCanvas(initialConfig) {
     wireBoard(id,board);
     return board;
   }
+  function sizeLabel(s){const meta=screenMeta.get(s.id);return s.width+'×'+s.height+(meta&&meta.scrollable?' ↕':'');}
+  function setScreenMetaCore(id,info){
+    if(typeof id!=='string'||!SCREEN_ID.test(id)||!info||typeof info!=='object'||typeof info.scrollable!=='boolean')return false;
+    screenMeta.set(id,{scrollable:info.scrollable});
+    const s=screens.find(v=>v.id===id),b=boards.get(id);
+    if(s&&b){b.size.textContent=sizeLabel(s);b.section.dataset.scrollable=info.scrollable?'true':'false';}
+    return true;
+  }
   function relayout(){
     const layout=placeScreens(screens);
     view.width=clampExtent(layout.width);view.height=clampExtent(layout.height);
@@ -267,7 +302,7 @@ export function initCanvas(initialConfig) {
       // N1 (FIX-3): header text goes to the inner label span (the flex button
       // itself cannot ellipsis); fall back for boards adopted without one.
       if(b.label)b.label.textContent=(i+1)+' · '+s.title;else b.title.textContent=(i+1)+' · '+s.title;
-      b.size.textContent=s.width+'×'+s.height;
+      b.size.textContent=sizeLabel(s);
       if(s.url&&s.src!==s.url){
         // If the frame already shows s.url (in-frame navigation synced through
         // the load hook) only the bookkeeping needs to move -- never rewrite
@@ -277,7 +312,9 @@ export function initCanvas(initialConfig) {
         else{b.frame.src=s.url;s.src=s.url;}
       }
       renderBoardState(b,s);
+      const meta=screenMeta.get(s.id);b.section.dataset.scrollable=meta&&meta.scrollable?'true':'false';
     });
+    for(const id of [...screenMeta.keys()])if(!live.has(id))screenMeta.delete(id);
     view.ready=screens.length>0;
   }
   function paint(){
@@ -308,6 +345,7 @@ export function initCanvas(initialConfig) {
     canvas.style.backgroundPosition=x+'px '+y+'px';
     canvas.style.backgroundImage=view.scale<DOT_MIN_SCALE?'none':'';
     $('pan-layer').hidden=!(view.ready&&(view.pan||view.space));
+    renderPill();
     scheduleCameraChanged();
     publish();
   }
@@ -384,6 +422,87 @@ export function initCanvas(initialConfig) {
     }
     publish();return true;
   }
+  // R2 (B4) shell half: a click selects (the service draws the outlines in the
+  // frame and pushes the mirrored count here); referencing is explicit — the
+  // toolbar button, the floating pill under the selected artboard, or Enter.
+  function setSelectionCore(info){
+    if(!info||typeof info!=='object'||!Number.isInteger(info.count)||info.count<0||info.count>MAX_SCREENS*10||!Array.isArray(info.screens)||info.screens.length>MAX_SCREENS)return false;
+    const list=[];
+    for(const item of info.screens){
+      if(!item||typeof item.id!=='string'||!SCREEN_ID.test(item.id)||!Number.isInteger(item.count)||item.count<0)return false;
+      list.push(Object.freeze({id:item.id,count:item.count}));
+    }
+    const named=typeof info.screen==='string'&&list.some(item=>item.id===info.screen)?info.screen:'';
+    const anchor=named||(list.length?list[list.length-1].id:'');
+    const label=typeof info.label==='string'?info.label.slice(0,120):'';
+    const had=selection.count;
+    selection=info.count?Object.freeze({count:info.count,screens:Object.freeze(list),screen:anchor,label}):NO_SELECTION;
+    if(!selection.count)selectMore=false;
+    // A service notice (selection full, a partial send, nothing left to
+    // reference) is always read out; otherwise only a COUNT change is, so a
+    // re-push (setScreens, a shell re-sync) never re-announces.
+    const notice=typeof info.notice==='string'?info.notice.trim().slice(0,NOTICE_TEXT_MAX):'';
+    if(notice)announce(notice);
+    else if(had&&!selection.count)announce('Nothing selected');
+    else if(selection.count&&selection.count!==had)announce(selectionCopy(selection.count));
+    renderPill();publish();return true;
+  }
+  function selectionCopy(count){
+    return count===1?'1 element selected. With the canvas focused, press Enter to reference it in chat or Escape to clear.':count+' elements selected. With the canvas focused, press Enter to reference them in chat or Escape to clear.';
+  }
+  function dropLocalSelection(){if(!selection.count)return;selection=NO_SELECTION;selectMore=false;renderPill();}
+  function referenceSelection(){
+    if(captureState||view.agentInput||!selection.count)return false;
+    dropLocalSelection();
+    send({type:'selection-send',sentAt:Date.now()});
+    publish();return true;
+  }
+  function clearSelection(){
+    if(captureState||!selection.count)return false;
+    dropLocalSelection();
+    send({type:'selection-clear'});
+    announce('Nothing selected');
+    publish();return true;
+  }
+  // The pill is pure shell geometry: bottom-centre of the anchor artboard in
+  // canvas px (the same camera transform paint applies), clamped into view.
+  function renderPill(){
+    if(!pillEl&&!selection.count)return;
+    if(!pillEl){
+      // Distinct group name from the toolbar's "Selection actions" (m11).
+      pillEl=document.createElement('div');pillEl.className='ds-selection-pill';pillEl.setAttribute('role','group');pillEl.setAttribute('aria-label','Selected elements');
+      pillSend=document.createElement('button');pillSend.type='button';pillSend.className='ds-pill-send';pillSend.textContent='Reference in chat';
+      // Never natively disabled: aria-disabled keeps it focusable, and the
+      // reason is read through aria-describedby (referenceSelection refuses).
+      pillSend.onclick=()=>transaction(()=>referenceSelection());
+      pillMore=document.createElement('button');pillMore.type='button';pillMore.className='ds-pill-more';pillMore.textContent='Select more';pillMore.setAttribute('aria-pressed','false');
+      pillMore.title='While on, a click or tap adds to the selection (like shift-click)';
+      pillMore.onclick=()=>transaction(()=>{selectMore=!selectMore;renderPill();announce(selectMore?'Select more on: clicks add to the selection.':'Select more off.');});
+      const clear=document.createElement('button');clear.type='button';clear.className='ds-pill-clear';clear.textContent='×';clear.setAttribute('aria-label','Clear selection');
+      clear.onclick=()=>transaction(()=>clearSelection());
+      pillReason=document.createElement('span');pillReason.id='ds-pill-reason';pillReason.className='ds-sr-only';
+      pillEl.appendChild(pillSend);pillEl.appendChild(pillMore);pillEl.appendChild(clear);pillEl.appendChild(pillReason);canvas.appendChild(pillEl);
+    }
+    const s=selection.count?screens.find(v=>v.id===selection.screen):null,cell=s&&lastPositions.get(s.id);
+    if(!s||!cell||captureState||!view.ready){pillEl.style.display='none';return;}
+    const box=canvas.getBoundingClientRect();
+    const tx=(box.width-view.width*view.scale)/2+view.panX;
+    const ty=(view.mode==='fit-all'?(box.height-view.height*view.scale)/2:numToken('--s7'))+view.panY;
+    const x=tx+(cell.x+s.width/2)*view.scale,y=ty+(cell.y+s.height)*view.scale+8;
+    const w=finite(box.width)?box.width:0,h=finite(box.height)?box.height:0;
+    pillEl.style.display='';
+    pillEl.style.left=Math.round(w?Math.max(96,Math.min(w-96,x)):x)+'px';
+    pillEl.style.top=Math.round(h?Math.max(8,Math.min(h-48,y)):y)+'px';
+    pillEl.dataset.count=String(selection.count);
+    pillSend.textContent='Reference in chat ('+selection.count+')';
+    const reason=view.agentInput?'The agent is using the canvas. Reference in chat is available when it finishes.':'';
+    if(reason){pillSend.setAttribute('aria-disabled','true');pillSend.setAttribute('aria-describedby','ds-pill-reason');}
+    else{pillSend.removeAttribute('aria-disabled');pillSend.removeAttribute('aria-describedby');}
+    pillReason.textContent=reason;
+    // One send references up to 20 elements; the rest stay selected.
+    pillSend.title=reason||(selection.count===1?'Reference 1 element in chat (Enter with the canvas focused)':'Reference '+selection.count+' elements in chat (Enter with the canvas focused) · up to 20 per send, the rest stay selected');
+    pillMore.setAttribute('aria-pressed',selectMore?'true':'false');
+  }
   // V4-12 shell half: the toolbar chip reads agentBusy/agentLabel; on the
   // busy→idle flip an Updated toast lands only if some artboard reloaded during
   // the turn (frame load events while busy).
@@ -412,7 +531,7 @@ export function initCanvas(initialConfig) {
       view.agentInput=false;delete canvas.dataset.agentInput;
       lastCameraSent={mode:view.mode,scale:view.scale,panX:view.panX,panY:view.panY};
     }
-    publish();return true;
+    renderPill();publish();return true;
   }
   // V4-7: pan the minimum needed to bring the artboard fully into view (no
   // zoom change; its top-left when it is larger than the viewport). Service
@@ -475,6 +594,28 @@ export function initCanvas(initialConfig) {
     if(!p){emitHoverEnd();return;}
     hover.pending=p;
     if(!hover.raf)hover.raf=requestAnimationFrame(flushHover);
+  }
+  // R3 (B3): the scroll relay. Coordinates are unscaled artboard px (the same
+  // framePoint mapping as hover/pick); deltas are page px and stay unscaled
+  // (a native wheel inside a zoomed frame scrolls page px too). A screen
+  // change flushes the old screen's sum first.
+  function flushScroll(){
+    scroll.raf=0;
+    const p=scroll.pending;scroll.pending=null;
+    if(!p||(!p.deltaX&&!p.deltaY)||captureState||view.agentInput)return;
+    const clamp=n=>Math.max(-8192,Math.min(8192,Math.round(n)));
+    send({type:'screen-scroll',screen:p.screen,x:p.x,y:p.y,deltaX:clamp(p.deltaX),deltaY:clamp(p.deltaY)});
+  }
+  function queueScroll(section,e){
+    const p=framePoint(section,e);if(!p)return false;
+    const s=screens.find(v=>v.id===p.screen);
+    const unit=e.deltaMode===1?40:e.deltaMode===2?(s?s.height:800):1;
+    const dx=(Number(e.deltaX)||0)*unit,dy=(Number(e.deltaY)||0)*unit;
+    if(scroll.pending&&scroll.pending.screen!==p.screen)flushScroll();
+    if(scroll.pending){scroll.pending.deltaX+=dx;scroll.pending.deltaY+=dy;scroll.pending.x=p.x;scroll.pending.y=p.y;}
+    else scroll.pending={screen:p.screen,x:p.x,y:p.y,deltaX:dx,deltaY:dy};
+    if(!scroll.raf){scroll.raf=-1;const id=requestAnimationFrame(flushScroll);if(scroll.raf===-1)scroll.raf=id;}
+    return true;
   }
   // V4-10 shell half: a vanilla role=menu popover the controller builds itself
   // (fixed coords, so it is never clipped by the canvas). Actions map onto the
@@ -716,12 +857,15 @@ export function initCanvas(initialConfig) {
   }
   function setModeCore(mode){
     if(captureState||!['edit','play'].includes(mode))return false;
+    // R2 (B4): a mode flip drops the selection (the service clears the frames
+    // and confirms with setSelection; the shell stops showing it at once).
+    if(mode!==shellMode)dropLocalSelection();
     shellMode=mode;canvas.dataset.mode=mode;
     // A service push is the truth: the toolbar's pending segment resolves.
     clearTimeout(modeTimer);modeTimer=null;modePending=null;
     emitHoverEnd();
     paint();
-    announce(mode==='edit'?'Edit mode: clicking a screen picks that element for the chat.':'Play mode: screens accept real interaction.');
+    announce(mode==='edit'?EDIT_HINT:'Play mode: screens accept real interaction. Ctrl or Cmd click selects an element.');
     return true;
   }
   function setScreenStateCore(id,info){
@@ -783,6 +927,7 @@ export function initCanvas(initialConfig) {
     const statusArea=$('toolbar-status-area');
     if(statusArea){captureState.styles.push([statusArea,statusArea.style.cssText]);statusArea.style.display='none';}
     if(toastEl){captureState.styles.push([toastEl,toastEl.style.cssText]);toastEl.style.display='none';}
+    if(pillEl){captureState.styles.push([pillEl,pillEl.style.cssText]);pillEl.style.display='none';}
     window.__dsCaptureActive=true;document.body.style.pointerEvents='none';publish();return captureState.token;
   }
   async function normalizeCapture(token){
@@ -822,6 +967,12 @@ export function initCanvas(initialConfig) {
     // Stock DropdownMenu owns all menu keyboard/focus and dismissal handling.
     if(openMenu)return;
     if(e.key==='Escape'&&(view.pan||view.space)){e.preventDefault();setPan(false);$('pan')?.focus();return;}
+    // R2 (B4): with the canvas focused, Esc clears the selection and Enter
+    // (or Ctrl/Cmd+Enter) references it in chat.
+    if(document.activeElement===canvas&&selection.count&&!captureState){
+      if(e.key==='Escape'){e.preventDefault();transaction(()=>clearSelection());return;}
+      if(e.key==='Enter'){e.preventDefault();transaction(()=>referenceSelection());return;}
+    }
     if(document.activeElement!==canvas||!view.ready||view.layoutMode==='fit')return;
     if(e.key===' '){e.preventDefault();view.space=true;paint();}else if(e.key.toLowerCase()==='h'){e.preventDefault();setPan(!view.pan);}else if(e.key==='+'||e.key==='='){e.preventDefault();zoomTo(view.scale*1.25);}else if(e.key==='-'){e.preventDefault();zoomTo(view.scale/1.25);}else if(e.shiftKey&&(e.code==='Digit1'||e.key==='!')){e.preventDefault();transaction(()=>fitAll());}else if(e.shiftKey&&(e.code==='Digit0'||e.key===')')){e.preventDefault();zoomTo(1);}else if(e.key.startsWith('Arrow')){e.preventDefault();moveCamera(e.key.slice(5).toLowerCase(),e.shiftKey?3:1);}
   });
@@ -830,7 +981,7 @@ export function initCanvas(initialConfig) {
   // F2: a window resize re-clamps the open context menu into the new viewport.
   window.addEventListener('resize',()=>{if(contextMenu)positionMenu(contextMenu.menu,contextMenu.x,contextMenu.y);});
   canvas.addEventListener('pointerdown',e=>{
-    if(!view.ready||view.layoutMode==='fit'||view.agentInput||e.button!==0||e.target.closest('.state')||e.target.closest('.ds-ab-title')||e.target.closest('.ds-ab-menu')||e.target.closest('.ds-ab-rename')||e.target.closest('.ds-ab-state'))return;
+    if(!view.ready||view.layoutMode==='fit'||view.agentInput||e.button!==0||e.target.closest('.state')||e.target.closest('.ds-ab-title')||e.target.closest('.ds-ab-menu')||e.target.closest('.ds-ab-rename')||e.target.closest('.ds-ab-state')||e.target.closest('.ds-selection-pill'))return;
     // F16b (FIX-3): tag the pointer-originated focus BEFORE focusing so the
     // CSS never draws the keyboard :focus-visible ring for it (programmatic
     // focus can match :focus-visible — the white post-click ring finding).
@@ -863,7 +1014,9 @@ export function initCanvas(initialConfig) {
     const moved=drag.moved,section=drag.section;drag=null;lastTap=moved?null:lastTap;
     canvas.classList.remove('dragging');
     if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);
-    if(moved||shellMode!=='edit'||!section)return;
+    if(moved||shellMode!=='edit')return;
+    // R2 (B4): a click on the empty canvas (no drag) clears the selection.
+    if(!section){if(selection.count)transaction(()=>clearSelection());return;}
     const id=section.dataset.screen;
     if(!screens.some(s=>s.id===id))return;
     if(lastTap&&lastTap.id===id&&Date.now()-lastTap.at<350){lastTap=null;transaction(()=>{if(applyActive(id,true))focusScreen(id);});return;}
@@ -898,10 +1051,13 @@ export function initCanvas(initialConfig) {
   window.addEventListener('pointercancel',()=>finishBoardDrag(true));
   function pickAt(section,e){
     const p=framePoint(section,e);if(!p)return;
-    const command={type:'screen-pick',screen:p.screen,x:p.x,y:p.y};
-    // V4-5: Shift-click marks the pick as additive (the agent text says
-    // "also"); the flag is reserved, both paths still land a chip.
-    if(e&&e.shiftKey)command.additive=true;
+    // R2 (B4): the click SELECTS (the service runs __dsSelectAt in the frame);
+    // clickAt stamps the shell clock for the click→selected timing log.
+    const command={type:'screen-pick',screen:p.screen,x:p.x,y:p.y,clickAt:Date.now()};
+    // Shift-click toggles the element in or out of the selection; so does any
+    // click while the pill's "Select more" is on (touch has no shift key).
+    // Play-mode taps belong to the page: touch multi-select is edit-only.
+    if((e&&e.shiftKey)||(selectMore&&selection.count))command.additive=true;
     send(command);
   }
   function wheelInput(deltaX,deltaY,x,y,zoom){if(!view.ready||captureState||view.layoutMode==='fit'||![deltaX,deltaY,x,y].every(finite))return false;if(zoom)zoomTo(view.scale*Math.exp(-deltaY*.005),{x,y});else{view.mode='manual';view.panX-=deltaX;view.panY-=deltaY;paint();}return true;}
@@ -909,7 +1065,16 @@ export function initCanvas(initialConfig) {
     if(e.defaultPrevented||view.agentInput)return;
     const b=canvas.getBoundingClientRect();
     if(e.ctrlKey||e.metaKey){e.preventDefault();e.stopPropagation();zoomCamera({action:'wheel',deltaY:e.deltaY,x:e.clientX-b.left,y:e.clientY-b.top});return;}
-    if(!view.ready||view.layoutMode==='fit'||e.target.closest('.state'))return;e.preventDefault();wheelInput(e.deltaX,e.deltaY,e.clientX-b.left,e.clientY-b.top,false);
+    if(!view.ready||view.layoutMode==='fit'||e.target.closest('.state'))return;e.preventDefault();
+    // R3 (B3): over an artboard's body in edit mode the wheel scrolls THAT
+    // frame, never the camera (and never chains into a pan at the page end).
+    // Pan stays on empty canvas, background drag, Space/H, arrows; the legacy
+    // single-frame launch (workspace:false) keeps its wheel byte-identical.
+    if(bootConfig.workspace!==false&&shellMode==='edit'&&!view.pan&&!view.space&&!captureState){
+      const section=e.target.closest('.ds-artboard');
+      if(section&&!e.target.closest('.ds-ab-title')&&!e.target.closest('.ds-ab-menu')&&!e.target.closest('.ds-ab-size')&&!e.target.closest('.ds-ab-state')&&!e.target.closest('.ds-ab-rename')&&queueScroll(section,e))return;
+    }
+    wheelInput(e.deltaX,e.deltaY,e.clientX-b.left,e.clientY-b.top,false);
   },{passive:false});
   document.addEventListener('wheel',e=>{if(e.defaultPrevented||!(e.ctrlKey||e.metaKey)||view.agentInput)return;e.preventDefault();e.stopPropagation();const b=canvas.getBoundingClientRect();zoomCamera({action:'wheel',deltaY:e.deltaY,x:e.clientX-b.left,y:e.clientY-b.top});},{passive:false});
   // The observer keeps the camera/grid repainted on window resize. V4-1 killed
@@ -922,7 +1087,7 @@ export function initCanvas(initialConfig) {
   // BOTH guards: the flag, and pinWorkspaceLayout keeping layoutMode off 'fit'.
   new ResizeObserver(()=>{paint();if(bootConfig.workspace===false&&view.layoutMode==='fit'&&!captureState&&!fitSizeQueued){fitSizeQueued=true;requestAnimationFrame(()=>{fitSizeQueued=false;if(bootConfig.workspace===false&&view.layoutMode==='fit'&&!captureState)send({type:'fit-size',screen:active});});}}).observe(canvas);
   function retry(){if(captureState)return;setStatus({state:'loading'});const command={type:'retry'};if(active)command.screen=active;send(command);}
-  function retryScreen(id){if(captureState||!boards.get(id))return;setScreenStateCore(id,{state:'loading'});send({type:'retry',screen:id});}
+  function retryScreen(id){const b=boards.get(id);if(captureState||!b)return;clearTimeout(b.stallTimer);b.stallTimer=null;b.stalled=false;setScreenStateCore(id,{state:'loading'});send({type:'retry',screen:id});}
   $('state-action').onclick=()=>transaction(retry);
   window.__dsCanvas = {
     setViewport:(...args)=>transaction(()=>setViewport(...args)),setScreens:list=>transaction(()=>setScreensCore(list)),setMode:mode=>transaction(()=>setModeCore(mode)),setActive:id=>transaction(()=>applyActive(id,false)),getActive:()=>active,getMode:()=>shellMode,
@@ -932,6 +1097,8 @@ export function initCanvas(initialConfig) {
     setNotice:info=>transaction(()=>setNoticeCore(info)),showToast:info=>transaction(()=>showToastCore(info)),
     setAgentStatus:info=>transaction(()=>setAgentStatusCore(info)),setAgentInput:on=>transaction(()=>setAgentInputCore(on)),
     revealScreen:id=>transaction(()=>revealScreenCore(id)),
+    setSelection:info=>transaction(()=>setSelectionCore(info)),
+    setScreenMeta:(id,info)=>setScreenMetaCore(id,info),
     getCamera:()=>({mode:view.mode,scale:view.scale,panX:view.panX,panY:view.panY,width:screens.find(s=>s.id===active)?.width??view.width,height:screens.find(s=>s.id===active)?.height??view.height,preset:view.preset,layoutMode:view.layoutMode,nominalHeight:view.nominalHeight,reason:view.reason,gridWidth:view.width,gridHeight:view.height}),
     // width/height round-trip the ACTIVE screen size (like the old single frame);
     // the grid extent is derived from the screens list and never restored.
@@ -971,7 +1138,9 @@ export function initCanvas(initialConfig) {
     }),
     activateScreen:id=>transaction(()=>applyActive(id,true)),
     fitAll:()=>transaction(()=>{fitAll();}),
-    focusScreen:id=>transaction(()=>focusScreen(id))
+    focusScreen:id=>transaction(()=>focusScreen(id)),
+    referenceSelection:()=>transaction(()=>{referenceSelection();}),
+    clearSelection:()=>transaction(()=>{clearSelection();})
   };
   // Main's layout effect calls this only after stock semantic hooks are mounted.
   let readySent=false;

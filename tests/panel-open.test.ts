@@ -9,7 +9,11 @@ import { readFile } from 'node:fs/promises';
 
 type ServiceRequest = { method: string; path: string; query?: Record<string, string>; body?: string };
 
+// A real-sized frame (the rail tab / the row): the hidden 1×1 `/canvas`
+// resolve pane is exercised on its own in rail.test.ts.
 const shim = {
+  innerWidth: 1024,
+  innerHeight: 768,
   addEventListener: () => undefined,
   removeEventListener: () => undefined,
   parent: { postMessage: () => undefined },
@@ -24,14 +28,14 @@ const api = await import('../panel/api.ts');
 const main = await import('../panel/main.ts');
 const {
   ATTACH_NEEDS_URL, DESIGN_READY_BADGE, NO_CONFIG_BADGE, NO_DESIGN_WORK_MESSAGE, NO_PROJECT_URL_MESSAGE,
-  NO_WORKSPACE_MESSAGE, PANEL_SIDEBAR_HINT, PICK_HINT, WORKSPACE_SLUG_LIMIT,
+  NO_WORKSPACE_MESSAGE, PICK_HINT, WORKSPACE_SLUG_LIMIT,
   ackPicks, allProjectsFromSnapshot, canvasSessionStatus, canvasSlug, closeLive, contrastRatio, countOtherActiveDesignSessions,
-  focusLive, formatOpenStatus, formatWindowStatus, getPicks, getScreens, getScaffoldStatus, getState, getWorkspaces,
+  focusLive, formatOpenStatus, getPicks, getScreens, getScaffoldStatus, getState, getWorkspaces,
   isLoopbackUrl, isModeChipData, isWorkspaceRecord, joinWorkspaceDir, joinWorkspaceSessions, normalizeDirPath,
-  openWorkspace, pathContains, pickAckLabel, pickHintActive, postAgentStatus, projectReady, putScreens,
+  openWorkspace, pathContains, pickAckLabel, pickHintActive, postAgentStatus, projectReady,
   referenceText, registryErrorToastMessage, resolveCanvasTarget, sameDirPath, scaffoldProgressText, scaffoldProject,
   screenUrl, sessionShowsDesignMode, setMode, ServiceUnavailable, shouldStopDevServer, shouldToastRegistryError, startDevServer,
-  syncScreens, tokenNameFor, uniqueCanvasSlug, workspaceMeta, WORKSPACE_MISSING_CODE, wsSessionIdFromKey,
+  syncScreens, uniqueCanvasSlug, workspaceMeta, WORKSPACE_MISSING_CODE, wsSessionIdFromKey,
 } = api;
 const { loadStudioConfig, setProjectDirectory, setWorkspace, surfaceKind, nextOverlayState } = main;
 const { workspaceStorageKey } = await import('../panel/mode.ts');
@@ -64,16 +68,6 @@ test('getScreens reads GET /screens?dir= and returns the normalized registry', a
   assert.deepEqual(result, body);
   assert.equal(calls[0]!.method, 'GET');
   assert.deepEqual(calls[0]!.query, { dir: '/p/site' });
-});
-
-test('putScreens PUTs the full registry and answers with its path', async () => {
-  const calls = stubService(() => ({ status: 200, body: JSON.stringify({ path: '/p/site/screens.json' }) }));
-  const result = await putScreens('/p/site', { version: 1, screens: [] });
-  assert.deepEqual(result, { path: '/p/site/screens.json' });
-  assert.equal(calls[0]!.method, 'PUT');
-  assert.equal(calls[0]!.path, '/screens');
-  assert.deepEqual(calls[0]!.query, { dir: '/p/site' });
-  assert.deepEqual(JSON.parse(calls[0]!.body ?? ''), { version: 1, screens: [] });
 });
 
 test('setMode posts POST /mode {mode} and echoes the held mode', async () => {
@@ -130,11 +124,15 @@ test('scaffoldProject posts {dir, type, …, async:true} and the design system t
   assert.deepEqual(JSON.parse(calls[1]!.body ?? ''), { dir: '/root/slug', type: 'hi-fi', designSystemId: 'apple', async: true });
 });
 
-test('getScaffoldStatus polls GET /scaffold/status?job= — the async job state (V4-11)', async () => {
+test('getScaffoldStatus polls GET /scaffold/status?job=&dir= — the async job state (V4-11, F1)', async () => {
   const calls = stubService(() => ({ status: 200, body: JSON.stringify({ state: 'installing', elapsedMs: 4400 }) }));
-  const status = await getScaffoldStatus('job-1');
+  const status = await getScaffoldStatus('job-1', 'C:\\Docs\\Design Canvas\\landing-1');
   assert.deepEqual(status, { state: 'installing', elapsedMs: 4400 });
-  assert.deepEqual(calls[0], { method: 'GET', path: '/scaffold/status', query: { job: 'job-1' }, body: undefined });
+  assert.deepEqual(
+    calls[0],
+    { method: 'GET', path: '/scaffold/status', query: { job: 'job-1', dir: 'C:\\Docs\\Design Canvas\\landing-1' }, body: undefined },
+    'F1: the service route requires dir next to job (job alone answers 400) — the real round trip is pinned in scaffold-contract.test.ts',
+  );
 });
 
 test('scaffoldProgressText words each async-scaffold state for the progress toast (V4-11)', () => {
@@ -346,9 +344,8 @@ test('the list copy is fixed', () => {
   assert.equal(DESIGN_READY_BADGE, 'Canvas ready');
   assert.equal(NO_CONFIG_BADGE, 'No dev server yet');
   assert.equal(NO_DESIGN_WORK_MESSAGE, 'No canvas workspaces yet — /canvas creates one.');
-  assert.equal(PANEL_SIDEBAR_HINT, 'Design Canvas opens from the sidebar.');
   assert.equal(NO_WORKSPACE_MESSAGE, 'No canvas workspace yet — Start creates one.');
-  assert.match(PICK_HINT, /^Click an element in edit mode to add a reference$/, 'V4: edit-mode click is the pick gesture (no ⌘ needed with hover outlines, V4-6)');
+  assert.equal(PICK_HINT, 'Click an element in the canvas, then Reference in chat.', 'R2/R5: a click selects; Reference in chat sends');
   assert.match(ATTACH_NEEDS_URL, /http\(s\)/);
   assert.match(NO_PROJECT_URL_MESSAGE, /No \.design-studio\.json url/);
 });
@@ -373,15 +370,6 @@ test('pickHintActive is active only while the window is open', () => {
   assert.equal(pickHintActive({ windowOpen: false }), false);
 });
 
-test('formatWindowStatus reports open/closed with url and title', () => {
-  assert.equal(formatWindowStatus({ windowOpen: false, url: '', title: '' }), 'Window closed');
-  assert.equal(formatWindowStatus({ windowOpen: true, url: 'about:blank', title: '' }), 'Window open · no page open');
-  assert.equal(
-    formatWindowStatus({ windowOpen: true, url: 'http://localhost:5173/', title: 'App' }),
-    'Window open · http://localhost:5173/ — App',
-  );
-});
-
 test('formatOpenStatus summarizes the open result', () => {
   assert.equal(formatOpenStatus({ ok: true, url: 'u', title: '', settled: true }), 'Window open');
   assert.equal(
@@ -391,6 +379,19 @@ test('formatOpenStatus summarizes the open result', () => {
   assert.equal(formatOpenStatus({ ok: false, url: '', title: '', settled: false }), 'Could not open the window');
   const failure = 'the dev server is not running and .design-studio.json has no "command" to start it';
   assert.equal(formatOpenStatus({ ok: false, url: '', title: '', settled: false, error: failure }), failure);
+  // #9: a slow boot answered early is a success — the window is on its way.
+  assert.equal(
+    formatOpenStatus({ ok: true, url: 'u', title: '', settled: false, started: true, opening: true, serverStarting: true }),
+    'Opening the canvas · dev server still starting…',
+  );
+});
+
+test('#11: staleSessionKeys picks ws/ mode/ canvas-open/ of gone sessions and never design/', async () => {
+  const { staleSessionKeys, PRUNABLE_SESSION_KEY_PREFIXES } = await import('../panel/mode.ts');
+  assert.deepEqual([...PRUNABLE_SESSION_KEY_PREFIXES], ['ws/', 'mode/', 'canvas-open/']);
+  const keys = ['ws/a', 'mode/a', 'canvas-open/a', 'design/a', 'ws/b', 'mode/b', 'design/b', 'prefs/page', 'badge/count', 'ws/', 'mode/x/y'];
+  assert.deepEqual(staleSessionKeys(keys, new Set(['b'])), ['ws/a', 'mode/a', 'canvas-open/a']);
+  assert.deepEqual(staleSessionKeys(keys, new Set(['a', 'b'])), []);
 });
 
 test('projectReady is true only for a config with a non-empty url', () => {
@@ -447,15 +448,11 @@ test('session detection: the mode chip data boundary is read loosely', () => {
   assert.equal(sessionShowsDesignMode({ items: [] }), false);
 });
 
-test('contrastRatio and tokenNameFor are pure colour helpers', () => {
+test('contrastRatio is a pure colour helper', () => {
   assert.equal(contrastRatio('#000000', '#ffffff'), 21);
   assert.equal(contrastRatio('#ffffff', '#ffffff'), 1);
   assert.equal(contrastRatio('rgb(255,255,255)', '#000'), 21);
   assert.equal(contrastRatio('oklch(0.5 0.1 10)', '#fff'), null, 'a colour it cannot parse is null, not a guess');
-  assert.equal(tokenNameFor({ backgroundColor: '#fff' }), '--color-surface');
-  assert.equal(tokenNameFor({ color: '#111' }), '--color-text');
-  assert.equal(tokenNameFor({ borderColor: '#333' }), '--color-border');
-  assert.equal(tokenNameFor({ fontSize: '16px' }), null);
 });
 
 test('referenceText builds a canvas reference chip and stamps Screen + Screen URL when given one', () => {
@@ -496,11 +493,11 @@ test('referenceText stamps the local pick time when given a date', () => {
   assert.equal((text.match(/Picked at/g) ?? []).length, 1, 'the moment line appears once');
 });
 
-// ---- surface dispatch + panel note ----
+// ---- surface dispatch + the rail ----
 
-test('surfaceKind maps status to the row, panel to its note, page to the home', () => {
+test('surfaceKind maps status to the row, panel to the rail, page to the home', () => {
   assert.equal(surfaceKind('status'), 'row');
-  assert.equal(surfaceKind('panel'), 'note');
+  assert.equal(surfaceKind('panel'), 'rail');
   assert.equal(surfaceKind('background'), 'none');
   assert.equal(surfaceKind('dialog'), 'none');
   assert.equal(surfaceKind('popover'), 'none');
@@ -508,11 +505,19 @@ test('surfaceKind maps status to the row, panel to its note, page to the home', 
   assert.equal(surfaceKind(''), 'none');
 });
 
-test('the rail panel surface renders only its one-line pointer', async () => {
+test('the rail panel surface builds the rail: primary button, brief box, work list, sidebar pointer', async () => {
   const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
-  assert.match(text, /function buildPanelNote\(/, 'a dedicated panel-note builder');
-  assert.match(text, /q\('p', 'ds-panel-note-line', PANEL_SIDEBAR_HINT\)/, 'the one line is the whole panel surface');
-  assert.match(text, /kind === 'note'[\s\S]*buildPanelNote\(root\)/, 'the panel surface draws the note');
+  assert.doesNotMatch(text, /buildPanelNote|PANEL_SIDEBAR_HINT|ds-panel-note/, 'the note-only panel is gone');
+  assert.match(text, /kind === 'rail'[\s\S]*buildRail\(root\)/, 'the panel surface draws the rail');
+  const rail = text.slice(text.indexOf('export function buildRail('), text.indexOf("/** The rail's one status line"));
+  assert.match(rail, /railPrimaryBtn = q<HTMLButtonElement>\('button', 'primary ds-rail-primary'\)/, 'one full-width primary action');
+  assert.match(rail, /railPromptEl = q<HTMLTextAreaElement>\('textarea', 'ds-rail-input'\)/, 'a compact brief box');
+  assert.match(rail, /railPromptEl\.rows = 3/);
+  assert.match(rail, /railWorkEl = q\('div', 'ds-rail-work'\)/, 'the work list container');
+  assert.match(text, /const RAIL_FOOTER_HINT = 'Full home: Design Canvas in the sidebar\.'/, 'a text hint, not a button (openSurface cannot open the sidebar page)');
+  const css = await readFile(new URL('../panel/styles.css', import.meta.url), 'utf8');
+  assert.match(css, /\.ds-rail \{/, 'the rail has its own styles');
+  assert.doesNotMatch(css, /\.ds-panel-note/, 'the dead note styles are gone');
 });
 
 test('the row surfaces share one builder, the page has its own, and no mount opens a window', async () => {
@@ -531,6 +536,17 @@ test('the row surfaces share one builder, the page has its own, and no mount ope
     assert.doesNotMatch(region, /openWorkspace\(/, 'no service open in a builder');
     assert.doesNotMatch(region, /openCanvasWindow\(/, 'no window open in a builder');
   }
+  // The rail is the panel surface — the same one the hidden 1×1 resolve pane
+  // mounts. Its builder opens nothing either; the behavioral proof (a 1×1
+  // frame mounts with ZERO service calls, storage writes or opens) is the
+  // real-mount test in rail.test.ts.
+  assert.match(dispatch, /kind === 'rail'[\s\S]*buildRail\(root\)/, 'the panel surface draws the rail');
+  const railBuilder = source.slice(source.indexOf('export function buildRail('), source.indexOf("/** The rail's one status line"));
+  assert.doesNotMatch(railBuilder, /openWorkspace\(|openCanvasWindow\(|focusLive\(|beginOpenHandoff\(|setInterval\(/, 'the rail shell opens, claims and schedules nothing');
+  const mount = source.slice(source.indexOf('function mountSurface('), mainStart);
+  assert.match(mount, /kind === 'rail'\) \{\s*startRailLive\(\)/, 'the rail goes live only through startRailLive');
+  const live = source.slice(source.indexOf('function startRailLive('), source.indexOf('function onRailWake('));
+  assert.match(live, /!isRealPane\(\)\) return/, 'startRailLive refuses a 1×1 frame');
 });
 
 // ---- the canvas row (spec §F: Start/Stop + play/edit + screen dropdown + Focus) ----
@@ -616,21 +632,63 @@ test('a workspace row opens its session when mapped, else starts a new one carry
 test('the page builds the creation home: no registered-project gate anywhere', async () => {
   const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
   assert.match(text, /function renderPage\(/, 'the page has its own renderer');
-  assert.match(text, /function renderHero\(/, 'the hero is built');
-  assert.match(text, /Let's create /, 'the headline reads "Let\'s create"');
+  assert.match(text, /function renderHeader\(/, 'the header is built');
+  assert.match(text, /'Design on a live canvas'/, 'the title says what it is');
   assert.match(text, /function renderComposer\(/, 'the composer is built');
-  assert.match(text, /function renderWorkspaceRow\(/, 'the workspace context row is built');
-  assert.match(text, /function renderIdeas\(/, 'the idea cards are built');
+  assert.match(text, /function renderContextRow\(/, 'the project/designs context row is built');
+  assert.match(text, /function renderStarters\(/, 'the starter cards are built');
   assert.match(
     text,
-    /renderHero\(\), renderComposer\(\), renderWorkspaceRow\(\), renderIdeas\(\), renderCanvasSection\(\), renderFooter\(\)/,
-    'the one list mounts below the idea cards, closed by the footer',
+    /renderHeader\(\), \.\.\.\(firstRun \? \[firstRun\] : \[\]\), renderComposer\(\), renderContextRow\(\), renderStarters\(\), renderCanvasSection\(\), renderFooter\(\)/,
+    'the one list mounts below the starters, closed by the footer',
   );
   assert.doesNotMatch(text, /function renderDirRow\(/, 'the registered working-directory selector is gone');
   assert.doesNotMatch(text, /NEEDS_PROJECT_MESSAGE/, 'no needs-project refusal remains');
   assert.doesNotMatch(text, /function buildDialog\(/, 'the wizard is gone');
   assert.match(text, /plus\.disabled = state\.pageBusy \|\| referencePending/, 'the + gate is busy-state only — no project target');
-  assert.match(text, /'Design Canvas'/, 'the footer names the canvas');
+  assert.match(text, /q\('div', 'ds-eyebrow', 'Design Canvas'\)/, 'the eyebrow names the canvas');
+  assert.match(text, /in any chat opens the canvas there/, 'the footer points at /canvas');
+});
+
+test('P4: the old creation-page remnants are gone from the page and its styles', async () => {
+  const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
+  const css = await readFile(new URL('../panel/styles.css', import.meta.url), 'utf8');
+  for (const gone of [/Let's create /, /Good work starts here/, /function renderHero\(/, /function renderIdeas\(/, /function ideaThumb\(/, /const IDEAS\b/, /function renderOptions\(/, /function field\(/, /ds-composer-accent/, /'\+ Create'/, /function renderWorkspaceRow\(/]) {
+    assert.doesNotMatch(text, gone, `main.ts no longer has ${gone}`);
+  }
+  for (const gone of [/\.ds-hero/, /\.ds-composer-accent/, /\.ds-options\b/, /\.ds-field\b/, /\.ds-ds-create/, /\.ds-ideas?\b/, /\.ds-thumb-/]) {
+    assert.doesNotMatch(css, gone, `styles.css no longer has ${gone}`);
+  }
+  for (const added of ['.ds-header', '.ds-eyebrow', '.ds-title', '.ds-lede', '.ds-toggles', '.ds-switch[role="switch"][aria-checked="true"]', '.ds-seg', '.ds-counter', '.ds-context', '.ds-look-tabs', '.ds-device-list', '.ds-starters', '.ds-starter', '.ds-glyph', '.ds-hints kbd']) {
+    assert.ok(css.includes(added), `styles.css styles ${added}`);
+  }
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[^}]*\.ds-starter/, 'the starter hover lift honours reduced motion');
+});
+
+test('P4: the composer wires the Look/Devices chips, toggles, Structure brief and the brief limit', async () => {
+  const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
+  assert.match(text, /export type OverlayId = 'type' \| 'look' \| 'devices' \| 'attach';/, 'the overlay contract: look + devices replace ds');
+  assert.match(text, /setAttribute\('role', 'tablist'\)/, 'the Look popover has tabs');
+  assert.match(text, /'Match this project'/);
+  assert.match(text, /'Open a project in OpenChamber to use this'/, 'the Project look is gated on an open project');
+  assert.match(text, /q<HTMLButtonElement>\('button', 'ds-ds-clear', 'No preset'\)/, 'Clear reads "No preset"');
+  assert.match(text, /setAttribute\('role', 'switch'\)/, 'Questions first is a real switch');
+  assert.match(text, /setAttribute\('role', 'radiogroup'\)/, 'Options is a segmented radio group');
+  assert.match(text, /structureBrief\(state\.prompt, \{ devices: state\.pageDevices \}\)/, 'Structure brief applies the mode.ts skeleton');
+  assert.match(text, /const tooLong = briefLimitError\(spec\.brief\)/, 'the brief limit uses the shared refusal');
+  assert.match(text, /fidelity: FIDELITY_FOR_TYPE\[state\.pageType\]/, 'fidelity follows the type');
+  assert.match(text, /projectDir: state\.directory/, 'the open project rides on the spec');
+  assert.match(text, /const PAGE_PREFS_KEY = 'prefs\/page'/);
+  assert.match(text, /const WORK_LIST_CAP = 5;/, 'the work list caps at five rows');
+  assert.match(text, /`Show all \(\$\{view\.rows\.length\}\)`/);
+  assert.match(text, /renderLocationRow\(pageLocationEl\)/, 'the context row reuses the R5 designs-location line');
+});
+
+test('P4: briefTitle takes the first clause, drops a Goal: label and caps at 40', () => {
+  assert.equal(main.briefTitle('Budget app onboarding — 3 screens, phone first'), 'Budget app onboarding');
+  assert.equal(main.briefTitle('Goal: a short pitch deck.\nSlides: problem'), 'A short pitch deck');
+  assert.equal(main.briefTitle('x'.repeat(80)).length, 40);
+  assert.equal(main.briefTitle('   '), '');
 });
 
 test('startDesignSession is canvas-branded and starts WITHOUT projectId by default (decision 2)', async () => {
@@ -652,8 +710,11 @@ test('the /canvas resolver ensures the workspace, switches modes via POST /mode 
   assert.match(resolver, /const parsed = parseDesignArgs\(args\)/);
   assert.match(resolver, /await toggleMode\(false\)/, 'off turns the mode off');
   assert.match(resolver, /await setMode\(parsed\.mode\)/, 'play/edit posts POST /mode');
-  assert.match(resolver, /const ws = await ensureCanvasWorkspace\(parsed\.brief\)/, 'a brief ensures (creates) the workspace');
-  assert.match(resolver, /return buildModeChip\(state\.sessionId, state\.mode, state\.workspace, currentScreens\(\), state\.config\?\.url\)/, 'the chip carries the workspace and screens');
+  assert.match(resolver, /const ws = await prepareCanvasWorkspace\(parsed\.brief, state\.sessionId, modeScaffoldChoice\(parsed\.type\), \{ notify: false \}\)/, 'F3: the resolve awaits only the FAST half (files + ws/), with the parsed type (F8)');
+  assert.match(resolver, /if \(!state\.sessionId\) throw new Error\(NO_SESSION_MESSAGE\)/, 'F2: no session → a thrown, user-actionable message');
+  assert.match(resolver, /await armDesignModeForRow\(ws, parsed\.type, parsed\.brief \|\| undefined\)/, 'F3: install/boot/open are handed to the status row');
+  assert.doesNotMatch(resolver.slice(0, resolver.indexOf('async function readWorkspaceUrl(')), /toggleMode\(true|runScaffoldJob|openCanvasWindow/, 'F3: nothing long-lived runs inside the resolve');
+  assert.match(resolver, /return buildModeChip\(state\.sessionId, state\.mode, state\.workspace, currentScreens\(\), url\)/, 'the chip carries the workspace and screens');
 });
 
 test('the workspace scaffold creates under the SERVICE root via a unique slug (decision 3)', async () => {
@@ -672,7 +733,8 @@ test('the first scaffold toasts the one-time permission heads-up (decision 4b)',
   const text = await readFile(new URL('../panel/main.ts', import.meta.url), 'utf8');
   assert.match(text, /const PERMISSION_TOAST_KEY = 'ws-permission-notified'/, 'the one-time flag key');
   assert.match(text, /async function maybeShowPermissionToast\(dir: string\)/, 'the heads-up lives once');
-  assert.match(text, /approve its file-edit permission prompts/, 'the copy says to approve the prompts');
+  const copySource = await readFile(new URL('../panel/copy.ts', import.meta.url), 'utf8');
+  assert.match(copySource, /approve its file-edit permission prompts/i, 'the copy says to approve the prompts');
   assert.match(text, /await maybeShowPermissionToast\(dir\)/, 'it fires from the scaffold');
 });
 
@@ -691,7 +753,9 @@ test('config and dev-server reads resolve against the workspace dir', async () =
   const missing = source.slice(source.indexOf('async function handleMissingWorkspace('), source.indexOf('/**\n * Raise the workspace of a workspaces-list row'));
   assert.match(missing, /host\.storage\.delete\(key\)/, 'the ws/ record is deleted, not shadowed');
   assert.match(missing, /state\.workspace = null/, 'the session unbinds so Start re-offers "Create canvas"');
-  assert.match(missing, /Start creates a new canvas\./, 'the toast offers the next action');
+  const copySource = await readFile(new URL('../panel/copy.ts', import.meta.url), 'utf8');
+  assert.match(missing, /copy\.missingWorkspace\(/, 'the toast goes through the shared wording');
+  assert.match(copySource, /Start creates a new canvas\./, 'the toast offers the next action');
   assert.match(source, /await openWorkspace\(\{ dir: row\.dir, focus: true \}\)/, 'the page Preview row is user-initiated too');
   assert.match(source, /await openWorkspace\(\{ dir: ws\.dir, screen: id, focus: false \}\)/, 'the screen dropdown never raises the window (V4-8)');
   assert.doesNotMatch(source, /FORK-MERGE:?\s*panel\/styles\.css/, 'no unfilled style notes left for the row');
@@ -713,9 +777,12 @@ test('the pick pipeline is the V4-5 queue: long-poll, ordered attach, ack after 
   assert.match(queue, /export const PICK_SHORT_POLL_BUDGET_MS = 30_000/, '…for a 30 s budget, then the long-poll retries');
   assert.match(queue, /\[...picks\]\.sort\(\(a, b\) => a\.seq - b\.seq\)/, 'batches deliver in SEQ ORDER');
   assert.match(queue, /if \(!\(await addToChat\(entry\)\)\) break/, 'a failed attach stops the batch — no ack past it, the queue retries it');
-  assert.match(queue, /pickCursor = lastDelivered\.seq/, 'the cursor moves only past delivered chips');
-  assert.match(queue, /await ackPicks\(lastDelivered\.seq, pickAckLabel\(lastDelivered\)\)/, 'ONE ack with the last delivered seq + label');
-  assert.match(queue, /if \(!state\.mode\.on \|\| state\.bridgeActive\) break/, 'mode-off and bridgeActive both HOLD delivery (semantics unchanged, fence §5)');
+  assert.match(queue, /advanceTo = entry\.seq;\s*\}\s*if \(advanceTo === pickCursor\) return false;\s*pickCursor = advanceTo;/, 'the cursor moves only past delivered (or foreign, passed-over) picks');
+  assert.match(queue, /await ackPicks\(lastDelivered\.seq, batchAckLabel\(delivered, lastDelivered\), state\.workspace\?\.dir \?\? ''\)/, 'ONE ack with the last delivered seq + label + the row\'s bound dir');
+  assert.match(queue, /export const PICK_IDLE_POLL_MS = 150;/, 'R5: the idle pace is 150 ms');
+  assert.match(queue, /if \(!pickBelongsHere\(entry\)\) \{\s*advanceTo = entry\.seq;\s*continue;\s*\}/, 'R5: a foreign-dir pick is passed over without attach or ack');
+  assert.match(queue, /if \(!state\.mode\.on\) break/, 'mode-off HOLDS delivery (fence §5)');
+  assert.doesNotMatch(queue, /bridgeActive/, 'the removed /bridge claim no longer gates delivery');
   assert.doesNotMatch(queue, /document\.visibilityState/, 'the queue loop has NO visibility guard — hidden windows lose nothing');
   assert.match(queue, /void runPickLoop\(\(\) => !pickLoopActive\)/, 'startPickLoop runs exactly one loop — single in-flight request');
   // The old snapshot path is really gone from the state reader:
@@ -723,7 +790,6 @@ test('the pick pipeline is the V4-5 queue: long-poll, ordered attach, ack after 
   const apply = source.slice(applyStart, source.indexOf('/** The user closed the live window.'));
   assert.doesNotMatch(apply, /lastPick|pickSeq|state\.lastSeq/, 'applyState no longer consumes lastPick/pickSeq');
   assert.match(apply, /shouldToastRegistryError\(state\.registryErrorNotified, stateData\.registryError \?\? null\)/, 'V4-4: /state.registryError feeds the once-per-message toast rule');
-  assert.match(apply, /state\.bridgeActive = stateData\.bridgeActive === true/, 'the bridge claim is tracked for the queue loop');
 });
 
 test('loadStudioConfig reads the config for display but never opens a window', async () => {
@@ -740,15 +806,18 @@ test('loadStudioConfig reads the config for display but never opens a window', a
 });
 
 test('nextOverlayState toggles, opens and switches with one overlay open at a time', () => {
-  assert.equal(nextOverlayState(null, 'ds'), 'ds');
+  assert.equal(nextOverlayState(null, 'look'), 'look');
+  assert.equal(nextOverlayState(null, 'devices'), 'devices');
   assert.equal(nextOverlayState(null, 'type'), 'type');
   assert.equal(nextOverlayState(null, 'attach'), 'attach');
-  assert.equal(nextOverlayState('ds', 'ds'), null);
+  assert.equal(nextOverlayState('look', 'look'), null);
+  assert.equal(nextOverlayState('devices', 'devices'), null);
   assert.equal(nextOverlayState('type', 'type'), null);
   assert.equal(nextOverlayState('attach', 'attach'), null);
-  assert.equal(nextOverlayState('ds', 'type'), 'type');
+  assert.equal(nextOverlayState('look', 'devices'), 'devices');
+  assert.equal(nextOverlayState('devices', 'type'), 'type');
   assert.equal(nextOverlayState('type', 'attach'), 'attach');
-  assert.equal(nextOverlayState('attach', 'ds'), 'ds');
+  assert.equal(nextOverlayState('attach', 'look'), 'look');
 });
 
 test('a directory switch keeps the last config until the fresh read resolves', async () => {

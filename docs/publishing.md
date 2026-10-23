@@ -1,6 +1,6 @@
 # Publishing and getting listed
 
-Runbook for shipping OpenChamber Design Studio and getting it into the OpenChamber
+Runbook for shipping OpenChamber Design Canvas and getting it into the OpenChamber
 extension directory.
 
 **Data as of 2026-10-14.** Sources: <https://docs.openchamber.dev/sdk/>,

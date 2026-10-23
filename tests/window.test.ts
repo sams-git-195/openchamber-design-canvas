@@ -202,6 +202,27 @@ test('closing the window by hand quits Chrome, removes the profile and relaunche
     assert.equal(fresh.settled, true, 'a fresh window opened after the close');
     assert.equal((await browser.state()).windowOpen, true, 'windowOpen is true again');
     assert.ok(browser.profilePath() && browser.profilePath() !== profile, 'a new throwaway profile is used');
+
+    // B1: the relaunched shell boots every board 'loading'; each must be told
+    // 'ready' again (the dead window's state never carries over).
+    const internal = browser as unknown as {
+      cdp: { send: (method: string, params: object, session: string) => Promise<any> };
+      sessionId: string;
+    };
+    const boards = async (): Promise<Array<{ id: string; state: string }>> => {
+      const reply = await internal.cdp.send('Runtime.evaluate', { expression: 'JSON.stringify(__dsCanvas.getScreens().map(s=>({id:s.id,state:s.state})))', returnByValue: true }, internal.sessionId);
+      return JSON.parse(String(reply.result.value)) as Array<{ id: string; state: string }>;
+    };
+    let last: Array<{ id: string; state: string }> = [];
+    const readyDeadline = Date.now() + 10_000;
+    while (Date.now() < readyDeadline) {
+      try {
+        last = await boards();
+        if (last.length && last.every((board) => board.state === 'ready')) break;
+      } catch { /* shell still booting */ }
+      await delay(100);
+    }
+    assert.ok(last.length && last.every((board) => board.state === 'ready'), `every relaunched board reports ready (B1): ${JSON.stringify(last)}`);
   } finally {
     await browser.stop();
     await new Promise<void>((resolve) => server.close(() => resolve()));

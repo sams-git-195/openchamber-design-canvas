@@ -13,14 +13,14 @@ Please do not open a public issue for a suspected vulnerability. Include:
 - what you were doing and what you observed,
 - the affected component (see "In scope" below),
 - reproduction steps or a proof of concept,
-- the Design Studio version, your OpenChamber version, and your OS.
+- the Design Canvas version, your OpenChamber version, and your OS.
 
 We will acknowledge your report, investigate, and coordinate a fix and
 disclosure with you.
 
 ## Security-relevant surface
 
-Design Studio is an OpenChamber extension, and it asks for trust. Stated plainly:
+Design Canvas is an OpenChamber extension, and it asks for trust. Stated plainly:
 
 - It declares the **`prompt`** and **`sessions`** capabilities in its manifest.
   `prompt` can send messages into your session (which costs tokens and can run
@@ -49,4 +49,4 @@ from a source you trust.
 
 - **OpenChamber itself** (the host application, the SDK, the extension runtime).
   Report those to the OpenChamber project at <https://openchamber.dev>.
-- Issues in Google Chrome or the pages you ask Design Studio to open.
+- Issues in Google Chrome or the pages you ask Design Canvas to open.

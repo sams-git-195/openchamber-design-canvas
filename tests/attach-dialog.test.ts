@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 };
 
 const attachDialog = await import('../panel/attach-dialog.ts');
+const { workspacePathRule } = await import('../panel/mode.ts');
 import type { QueuedElementPick, QueuedScreenPick } from '../panel/api.ts';
 
 /** A queued ELEMENT pick, exactly as `GET /picks` delivers it (V4-5 shape). */
@@ -124,4 +125,53 @@ test('a malformed element entry degrades to empty fields, never a thrown chip bu
 test('an at that is not a timestamp omits the moment line instead of stamping Invalid Date', () => {
   const chip = attachDialog.buildAttachPayload(screenPick(14, { at: Number.NaN }));
   assert.doesNotMatch(chip.text!, /Picked at/);
+});
+
+// ---- F6: every pick chip names the workspace and the file the model edits ----
+
+/** A win32 workspace dir, as the service hands it (native `\` separators). */
+const WIN_WS = ['C:', 'Users', 'me', 'Documents', 'Design Canvas', 'site'].join('\\');
+const winFile = (...parts: string[]): string => [WIN_WS, ...parts].join('\\');
+const lines = (text: string | undefined): string[] => (text ?? '').split('\n');
+
+test('F6: an element chip with a workspace context carries Workspace:, File: (screen id → file) and the path rule', () => {
+  const chip = attachDialog.buildAttachPayload(elementPick(20), {
+    workspaceDir: WIN_WS,
+    screens: [{ id: 'checkout', url: 'http://127.0.0.1:5173/pages/checkout.html' }],
+  });
+  assert.ok(lines(chip.text).includes(`Workspace: ${WIN_WS}`), chip.text);
+  assert.ok(lines(chip.text).includes(`File: ${winFile('pages', 'checkout.html')}`), 'the live screen url maps to the file, in the workspace separator style');
+  assert.ok(lines(chip.text).includes(workspacePathRule(WIN_WS)), 'the exact workspacePathRule the mode chip uses');
+  assert.ok(chip.text!.indexOf('File:') < chip.text!.indexOf('Selector:'), 'the location sits above the selector/markup, so trimming never drops it');
+  const data = chip.data as { workspace?: string; filePath?: string };
+  assert.equal(data.workspace, WIN_WS);
+  assert.equal(data.filePath, winFile('pages', 'checkout.html'));
+});
+
+test('F6: with no live screen entry the element chip falls back to its own screen URL path (POSIX dir)', () => {
+  const chip = attachDialog.buildAttachPayload(elementPick(21), { workspaceDir: '/home/me/Design Canvas/site' });
+  assert.match(chip.text!, /^File: \/home\/me\/Design Canvas\/site\/checkout\.html$/m);
+});
+
+test('F6: a screen chip keeps its V4-10 lines and adds Workspace:/File: — an absolute registry file passes through', () => {
+  const chip = attachDialog.buildAttachPayload(screenPick(22), { workspaceDir: WIN_WS });
+  assert.match(chip.text!, /^Screen: home \(1280×800\) — /m);
+  assert.ok(lines(chip.text).includes(`Workspace: ${WIN_WS}`));
+  assert.ok(lines(chip.text).includes(`File: ${winFile('home.html')}`), 'the registry file (already absolute) passes through');
+  const relative = attachDialog.buildAttachPayload(screenPick(23, { file: 'home.html' }), { workspaceDir: '/ws/site' });
+  assert.match(relative.text!, /^File: \/ws\/site\/home\.html$/m, 'a relative registry file is joined onto the workspace');
+});
+
+test('F6: without a workspace context the chips are unchanged (no Workspace:/File: lines)', () => {
+  assert.doesNotMatch(attachDialog.buildAttachPayload(elementPick(24)).text!, /^(Workspace|File):/m);
+  assert.doesNotMatch(attachDialog.buildAttachPayload(screenPick(25), null).text!, /^(Workspace|File):/m);
+});
+
+test('F6: an oversized element chip stays under the host cap by trimming markup first — the path lines survive', () => {
+  const huge = elementPick(26, { outerHTML: `<div>${'x'.repeat(40_000)}</div>` });
+  const chip = attachDialog.buildAttachPayload(huge, { workspaceDir: '/ws/site' });
+  assert.ok(chip.text!.length <= 16_000, `capped (got ${chip.text!.length})`);
+  assert.match(chip.text!, /^File: \/ws\/site\/checkout\.html$/m);
+  assert.match(chip.text!, /markup truncated/);
+  assert.match(chip.text!, /Current styles:/, 'styles survive when trimming the markup was enough');
 });

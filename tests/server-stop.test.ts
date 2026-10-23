@@ -333,7 +333,7 @@ test('the automatic stop still refuses when the ownership set is empty', async (
 
 // A manual stop the service answered stopped:false is a truthful no-op: the
 // service only kills a group recorded for the dir, so stopped:false means the
-// server was not started by Design Studio. Never a fake success.
+// server was not started by Design Canvas. Never a fake success.
 test('a manual stop the service refuses announces the truthful no-op message', async () => {
   resetStopState();
   stubToast();

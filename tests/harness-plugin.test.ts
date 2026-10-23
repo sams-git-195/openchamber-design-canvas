@@ -186,7 +186,7 @@ test('root workspace: stale isolation request cannot mkdir or move a session', a
   assert.equal(moves.length, 0, 'a stale request must not relocate the selected root');
   assert.equal(existsSync(path.join(dir, 'designs')), false, 'no empty child workspace is created');
   assert.equal(await readFile(path.join(requests, 'ses_abc123.json'), 'utf8'), '{"sessionId":"ses_abc123"}', 'stale files are ignored, not deleted');
-  assert.ok(event.system.some((entry) => /Design Studio harness/.test(entry.text)), 'the harness still applies');
+  assert.ok(event.system.some((entry) => /Design Canvas harness/.test(entry.text)), 'the harness still applies');
   assert.ok(!event.system.some((entry) => /workspace is EMPTY|scaffold the project HERE/.test(entry.text)), 'existing root app must not be treated as empty');
 
   // A SECOND context call for the same session never moves again (the Set guard).

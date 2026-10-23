@@ -140,6 +140,71 @@ test('pick queue ack toasts once and the unacked watchdog fires after 2.5s', asy
   await pause(2800);
 });
 
+test('ack watermark floors reads: an acked pick never replays at since=0, held (unacked) picks still read', async () => {
+  const queue = new PickQueue(() => undefined);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 1, additive: false, ...fakePicked(), selector: '#a' });
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 2, additive: false, ...fakePicked(), selector: '#b' });
+  queue.ack(2, '2 elements');
+  // Everything consumed: a remounted panel whose cursor restarted at 0 sees nothing.
+  assert.equal((await queue.read(0, 0)).picks.length, 0, 'no pick replay when an acked watermark floors since=0');
+  // A held (unacked) pick still reads, from any lower since.
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 3, additive: false, ...fakePicked(), selector: '#c' });
+  const held = await queue.read(0, 0);
+  assert.equal(held.picks.length, 1, 'the held (unacked) pick still reads');
+  assert.equal(held.picks[0]?.selector, '#c');
+  assert.equal((await queue.read(2, 0)).picks.length, 1, 'it reads at the ack watermark too');
+});
+
+test('per-dir ack watermark: a foreign chat ack never floors another dir held picks', async () => {
+  const dirA = path.resolve(tmpdir(), 'canvas-a');
+  const dirB = path.resolve(tmpdir(), 'canvas-b');
+  const queue = new PickQueue(() => undefined);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 1, additive: false, ...fakePicked(), selector: '#b1', dir: dirB });
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 2, additive: false, ...fakePicked(), selector: '#a2', dir: dirA });
+  // Chat A delivered A@2 (and skipped B@1) — its cumulative ack covers seq 1.
+  queue.ack(2, '#a2', dirA);
+  const afterA = await queue.read(0, 0);
+  assert.deepEqual(afterA.picks.map((pick) => pick.selector), ['#b1'], "B's held pick survives A's ack (the row of its own chat still delivers it)");
+  assert.deepEqual((await queue.read(2, 0)).picks, [], 'a cursor already past it does not see it');
+  // Separator/drive-case variants of B's dir land on B's key.
+  queue.ack(1, '#b1', dirB.replace(/\\/g, '/').replace(/^([A-Z]):/, (_m, d: string) => `${d.toLowerCase()}:`) + '/');
+  assert.deepEqual((await queue.read(0, 0)).picks, [], "B's own ack floors it: nothing replays at since=0");
+  queue.close();
+});
+
+test('per-dir ack watermark: own-dir held picks read while mode is off; legacy no-dir picks floor at the empty-dir watermark', async () => {
+  const dirA = path.resolve(tmpdir(), 'canvas-a');
+  const queue = new PickQueue(() => undefined);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 1, additive: false, ...fakePicked(), selector: '#a1', dir: dirA });
+  // Mode OFF: the row holds (never acks) — a remounted panel still reads it.
+  assert.deepEqual((await queue.read(0, 0)).picks.map((pick) => pick.selector), ['#a1'], 'the held own-dir pick reads at since=0');
+  queue.ack(1, '#a1', dirA);
+  assert.deepEqual((await queue.read(0, 0)).picks, [], 'once acked it never replays');
+  // Legacy (no-dir) picks key '' — an ack without dir (old panel) floors them.
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 2, additive: false, ...fakePicked(), selector: '#l2' });
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 3, additive: false, ...fakePicked(), selector: '#a3', dir: dirA });
+  queue.ack(2, '#l2');
+  assert.deepEqual((await queue.read(0, 0)).picks.map((pick) => pick.selector), ['#a3'], "the '' ack floors the legacy pick only");
+  // A dir row delivers no-dir picks in seq order, so its ack covers them too.
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 4, additive: false, ...fakePicked(), selector: '#l4' });
+  queue.ack(4, '2 elements', dirA);
+  assert.deepEqual((await queue.read(0, 0)).picks, [], "a dir ack also floors the legacy picks it delivered");
+  queue.close();
+});
+
+test('per-dir ack watermark: a long-poll waiter wakes for a held foreign pick a sibling ack already covers', async () => {
+  const dirA = path.resolve(tmpdir(), 'canvas-a');
+  const dirB = path.resolve(tmpdir(), 'canvas-b');
+  const queue = new PickQueue(() => undefined);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 1, additive: false, ...fakePicked(), selector: '#a1', dir: dirA });
+  queue.ack(1, '#a1', dirA);
+  const waiting = queue.read(0, 2000);
+  queue.push({ kind: 'element', screen: 'home', screenUrl: 'u', at: 2, additive: false, ...fakePicked(), selector: '#b2', dir: dirB });
+  const got = await waiting;
+  assert.deepEqual(got.picks.map((pick) => pick.selector), ['#b2'], 'the waiter gets the new pick, never the acked one');
+  queue.close();
+});
+
 // ---- V4-4/V4-17: loud registry reads + rename ---------------------------------
 
 test('readScreensStrict answers drops with reasons, clamps silently, and names parse errors', async () => {
@@ -472,6 +537,7 @@ test('V4-10: menu send-to-chat rides the queue as kind:screen; copy-path toasts 
   assert.equal(pick.height, 844);
   assert.equal(pick.file, 'phone.html');
   assert.equal(pick.selector, undefined, 'screen picks carry NO element payload');
+  assert.equal(pick.dir, dir, 'screen picks carry the workspace dir, so a foreign send is skippable');
 
   await canvasCommand({ type: 'screen-menu', screen: 'phone', action: 'copy-path' }, {});
   const expect = path.join(dir, 'phone.html');
@@ -567,6 +633,82 @@ test('F13: a play-mode `changed` from artboard B setActive(B) with NO window rai
   assert.equal(internal.activeScreenId, 'home', 'a non-ready board never steals activation');
 });
 
+// ---- F13 boot-grace (gate finding #2): a boot IN play mode never moves the
+// restored activeScreen. ARTIFACT_BRIDGE emits 'changed' on BOTH
+// DOMContentLoaded and window load, so the old ready-only guard let the last
+// board to settle steal active from the /open-restored screen. The bridge now
+// tags each 'changed' with a reason ('dom'/'load'/'nav') and tagged events
+// only follow AFTER the board's first 'load' armed it (ScreenRecord.
+// bootSettled); the arming 'load' itself never follows.
+
+test('F13 boot-grace: a staggered play-mode boot (dom→ready→load per board) NEVER moves the restored activeScreen', async () => {
+  const { browser, internal, shellCalls } = stubbedBrowser();
+  openFakeWorkspace(internal);
+  const raised: string[] = [];
+  internal.bringToFront = async () => { raised.push('raise'); };
+  internal.mode = 'play';
+  // The /open {screen} restored value the whole boot must preserve.
+  internal.activeScreenId = 'phone';
+  const screens = internal.screens as Map<string, { state: string; bootSettled?: boolean }>;
+  const homeArtifact = { session: 'oopif-home', frame: 'f-home', id: 6, unique: 'u6', origin: 'http://localhost:9' };
+  const phoneArtifact = { session: 'oopif-phone', frame: 'f-phone', id: 7, unique: 'u7', origin: 'http://localhost:9' };
+  const contexts = {
+    screenForContext: (session: string | undefined) => (session === 'oopif-home' ? 'home' : session === 'oopif-phone' ? 'phone' : null),
+    matches: (_c: unknown, session: string | undefined, id: unknown) =>
+      (session === 'oopif-home' && id === 6) || (session === 'oopif-phone' && id === 7),
+    artifact: (id?: string) => (id === 'home' ? homeArtifact : id === 'phone' ? phoneArtifact : null),
+    shellAuthorityCurrent: () => true,
+    shell: () => null,
+  };
+  internal.contexts = contexts;
+  const dispatch = (browser as unknown as {
+    dispatchBinding: (c: unknown, name: string, value: unknown, session: string | undefined, id: unknown) => boolean;
+  }).dispatchBinding.bind(browser);
+
+  // Staggered, INTERLEAVED boot: phone (the restored active) doms first, home
+  // SETTLES LAST — the exact ordering that used to flip active to home.
+  assert.equal(dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'dom' }, 'oopif-phone', 7), true);
+  await pause(10);
+  screens.get('phone')!.state = 'ready'; // the dom-refresh marks ready (interactive passes the gate)
+  assert.equal(dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'dom' }, 'oopif-home', 6), true);
+  await pause(10);
+  screens.get('home')!.state = 'ready';
+  assert.equal(internal.activeScreenId, 'phone', 'no dom-changed moved active');
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'load' }, 'oopif-phone', 7);
+  await pause(20);
+  assert.equal(internal.activeScreenId, 'phone', 'the active board\'s own load never flips');
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'load' }, 'oopif-home', 6);
+  await pause(20);
+  assert.equal(internal.activeScreenId, 'phone', 'F13 boot-grace: the LAST board to settle did not steal the restored activeScreen');
+  assert.equal(shellCalls.includes('SETACTIVE'), false, 'no setActive push during the boot');
+  assert.equal(raised.length, 0, 'V4-8: and no window raise');
+  assert.equal(screens.get('home')!.bootSettled, true, "the boot's own load armed the follow");
+  assert.equal(screens.get('phone')!.bootSettled, true);
+
+  // Post-grace the F13 follow is fully alive: a same-document user nav
+  // ('nav') follows, and a later FULL-document user navigation (a link click:
+  // the new document's 'dom', then its arming-exempt 'load') follows too.
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'nav' }, 'oopif-home', 6);
+  await pause(30);
+  assert.equal(internal.activeScreenId, 'home', 'after boot, a same-document nav follows (F13 kept)');
+  assert.ok(shellCalls.includes('SETACTIVE'), 'the follow pushed setActive');
+  internal.activeScreenId = 'phone';
+  shellCalls.length = 0;
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'dom' }, 'oopif-home', 6);
+  await pause(30);
+  assert.equal(internal.activeScreenId, 'home', 'after boot, a full-document user navigation follows on its dom event');
+
+  // A still-unarmed board (fresh record, boot not settled) ignores even a
+  // 'nav' — an SPA router's pre-load replaceState is boot noise, not a click.
+  internal.activeScreenId = 'phone';
+  screens.get('home')!.bootSettled = false;
+  shellCalls.length = 0;
+  dispatch(contexts, '__dsArtifactEvent', { type: 'changed', reason: 'nav' }, 'oopif-home', 6);
+  await pause(30);
+  assert.equal(internal.activeScreenId, 'phone', 'a tagged event from an un-booted board never follows');
+  assert.equal(shellCalls.includes('SETACTIVE'), false);
+});
+
 // ---- FIX-3 (F17): stop-server context-menu action --------------------------------
 
 test('F17: screen-menu stop-server runs the injected stopper and confirms via showToast', async () => {
@@ -597,16 +739,25 @@ test('F17: screen-menu stop-server runs the injected stopper and confirms via sh
   assert.ok(toasts.some((t) => t.kind === 'warn' && /Stop failed: process escaped/.test(t.text)), 'a failed kill surfaces, never silent');
 });
 
-test('V4-5: an honoured in-frame pick lands in the queue; ack toasts through showToast', async () => {
+test('V4-5 + R2: a referenced selection lands in the queue (selection-send pull); ack toasts through showToast', async () => {
   const { browser, internal, toasts } = stubbedBrowser();
   openFakeWorkspace(internal);
-  // Route a binding payload exactly as the bindingCalled authority does.
-  const internal2 = browser as unknown as { enqueueElementPick: (screen: string, picked: PickedElement & { additive?: boolean }) => void };
-  internal2.enqueueElementPick('home', { ...fakePicked(), additive: true });
+  // R2 (B4): the queue is fed by the explicit selection-send pull — select
+  // two elements, then reference them.
+  internal.evalIn = async (expr: string) => {
+    if (expr.includes('__dsSelectAt')) return { ok: true, count: expr.includes(',true)') ? 2 : 1, label: 'button#b' };
+    if (expr.includes('__dsSelectionTake')) return [{ ...fakePicked(), additive: false, scrollX: 0, scrollY: 0 }, { ...fakePicked(), selector: '#c', additive: true, scrollX: 0, scrollY: 0 }];
+    return true;
+  };
+  const canvasCommand = (browser as unknown as { canvasCommand: (c: unknown, a: unknown) => Promise<void> }).canvasCommand.bind(browser);
+  await canvasCommand({ type: 'screen-pick', screen: 'home', x: 10, y: 10 }, {});
+  await canvasCommand({ type: 'screen-pick', screen: 'home', x: 20, y: 20, additive: true }, {});
+  await canvasCommand({ type: 'selection-send' }, {});
   const page = await browser.getPicks(0, 0);
-  assert.equal(page.picks.length, 1);
+  assert.equal(page.picks.length, 2);
   assert.equal(page.picks[0]!.kind, 'element');
-  assert.equal(page.picks[0]!.additive, true);
+  assert.equal(page.picks[0]!.additive, false);
+  assert.equal(page.picks[1]!.additive, true, 'later batch members read as "also"');
   assert.equal(page.picks[0]!.selector, '#b');
   assert.equal(page.picks[0]!.screenUrl, 'http://localhost:9/home.html');
   // ack → the §3 showToast expression reaches the shell.
@@ -615,16 +766,18 @@ test('V4-5: an honoured in-frame pick lands in the queue; ack toasts through sho
   assert.ok(toasts.some((t) => t.kind === 'ok' && t.text === 'Added to chat · Button #b'));
 });
 
-test('V4-5: screen-pick inbound relays additive into the frame __dsPickAt', async () => {
+test('V4-5 + R2: screen-pick inbound SELECTS in the frame (__dsSelectAt, additive relayed) and queues nothing', async () => {
   const { browser, internal, evalCalls } = stubbedBrowser();
   openFakeWorkspace(internal);
   const canvasCommand = (browser as unknown as { canvasCommand: (c: unknown, a: unknown) => Promise<void> }).canvasCommand.bind(browser);
   await canvasCommand({ type: 'screen-pick', screen: 'home', x: 80, y: 60, additive: true }, {});
   await pause(20);
-  assert.ok(evalCalls.some((c) => c.expr === 'window.__dsPickAt(80,60,true)' && c.screen === 'home'));
+  assert.ok(evalCalls.some((c) => c.expr === 'window.__dsSelectAt?window.__dsSelectAt(80,60,true):false' && c.screen === 'home'));
   await canvasCommand({ type: 'screen-pick', screen: 'home', x: 81, y: 61 }, {});
   await pause(20);
-  assert.ok(evalCalls.some((c) => c.expr === 'window.__dsPickAt(81,61,false)'));
+  assert.ok(evalCalls.some((c) => c.expr === 'window.__dsSelectAt?window.__dsSelectAt(81,61,false):false'));
+  assert.equal(evalCalls.some((c) => c.expr.includes('__dsPickAt')), false, 'the click no longer fires the legacy pick');
+  assert.equal((await browser.getPicks(0, 0)).picks.length, 0, 'a click alone never reaches the queue');
 });
 
 test('V4-17: screen-rename inbound rewrites screens.json', async () => {
@@ -705,6 +858,12 @@ test('v4 routes: malformed → 400, workspace-marker guards → 400, business fa
     const ack = await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 3, label: 'Home (1280×800)' }) });
     assert.equal(ack.status, 200);
     assert.deepEqual(await ack.json(), { ok: true });
+    // Per-dir watermark: `dir` is optional — absolute or '' — anything else is a 400.
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: 42 }) })).status, 400, 'non-string dir → 400');
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: 'relative/site' }) })).status, 400, 'relative dir → 400');
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: null }) })).status, 400, 'null dir → 400');
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: '' }) })).status, 200, "'' (unbound row) is accepted");
+    assert.equal((await api('/picks/ack', { method: 'POST', body: JSON.stringify({ seq: 1, label: 'a', dir: path.resolve(tmpdir(), 'site') }) })).status, 200, 'an absolute dir is accepted');
 
     // POST /agent-status: {busy:boolean,label?≤60}.
     assert.equal((await api('/agent-status', { method: 'POST', body: JSON.stringify({ busy: 'yes' }) })).status, 400);
@@ -782,6 +941,81 @@ test('v4 routes: malformed → 400, workspace-marker guards → 400, business fa
     assert.deepEqual(stateRes, { url: '', title: '', lastPick: null, pickSeq: 0, windowOpen: false, bridgeActive: false });
   } finally {
     child.kill('SIGKILL');
+  }
+});
+
+// ---- #9: a slow dev-server boot answers "starting" inside the host's 20 s cap ----
+
+test('#9: /server/start and /open answer early on a slow boot; /server/status settles it', { timeout: 90_000 }, async () => {
+  const port = await pickFreePort(44000, 1500);
+  const wsRoot = await mkdtemp(path.join(tmpdir(), 'v4-slowboot-root-'));
+  const makeSlowWorkspace = async (name: string): Promise<{ dir: string; url: string }> => {
+    const devPort = await pickFreePort(46000, 1500);
+    const dir = await mkdtemp(path.join(tmpdir(), `v4-slowboot-${name}-`));
+    const url = `http://127.0.0.1:${devPort}/`;
+    // Answers only after 6 s — well past the 2 s answer clamp below (2 s, not less:
+    // the fast path's win32 identity check alone may take ~1 s).
+    await writeFile(path.join(dir, 'boot.cjs'), `setTimeout(() => require('http').createServer((q, r) => r.end('ok')).listen(${devPort}, '127.0.0.1'), 6000);\n`, 'utf8');
+    await writeFile(path.join(dir, '.design-studio.json'), JSON.stringify({ version: 1, name, type: 'hi-fi', url, command: 'node boot.cjs', entry: 'index.html' }), 'utf8');
+    await writeFile(path.join(dir, 'screens.json'), JSON.stringify({ version: 1, screens: [{ id: 'home', file: 'index.html', title: 'Home', width: 1280, height: 800 }] }), 'utf8');
+    return { dir, url };
+  };
+  const manual = await makeSlowWorkspace('manual');
+  const opened = await makeSlowWorkspace('open');
+  const child = spawn(process.execPath, [path.join(root, 'service', 'main.ts')], {
+    env: {
+      ...process.env,
+      DS_DEV_SERVER_ANSWER_MS: '2000',
+      // The background window launch must not start a real Chrome here.
+      DS_CHROME_PATH: path.join(wsRoot, 'no-such-chrome.exe'),
+      DS_WORKSPACE_ROOT: wsRoot,
+      OPENCHAMBER_SERVICE_PORT: String(port),
+      OPENCHAMBER_SERVICE_TOKEN: TOKEN,
+    },
+    stdio: 'ignore',
+  });
+  const api = (p: string, init?: RequestInit) => fetch(`http://127.0.0.1:${port}${p}`, {
+    ...init,
+    headers: { authorization: `Bearer ${TOKEN}`, ...(init?.body ? { 'content-type': 'application/json' } : {}) },
+  });
+  const status = async (dir: string) => await (await api(`/server/status?dir=${encodeURIComponent(dir)}`)).json() as { up: boolean; starting?: boolean; error?: string };
+  const waitUp = async (dir: string): Promise<boolean> => {
+    for (let i = 0; i < 100; i += 1) {
+      if ((await status(dir)).up) return true;
+      await pause(150);
+    }
+    return false;
+  };
+  try {
+    await waitForHealth(port, child);
+
+    // /server/start: the boot outlives the clamp → an immediate "starting" answer.
+    const t0 = Date.now();
+    const start = await (await api('/server/start', { method: 'POST', body: JSON.stringify({ dir: manual.dir, url: manual.url }) })).json() as Record<string, unknown>;
+    assert.ok(Date.now() - t0 < 5000, 'answered before the server came up');
+    assert.deepEqual(start, { ok: true, started: true, up: false, starting: true });
+    const mid = await status(manual.dir);
+    assert.equal(mid.up, false);
+    assert.equal(mid.starting, true, 'the status poll reports the boot in flight (not an error, not stopped)');
+    assert.equal(mid.error, undefined);
+    assert.equal(await waitUp(manual.dir), true, 'the background boot settles up');
+    assert.equal((await status(manual.dir)).starting, undefined, 'starting clears once up');
+    // Fast path stays synchronous: an up server answers at once with up:true.
+    const again = await (await api('/server/start', { method: 'POST', body: JSON.stringify({ dir: manual.dir, url: manual.url }) })).json() as Record<string, unknown>;
+    assert.deepEqual([again.ok, again.up, again.starting], [true, true, undefined]);
+
+    // /open {dir}: the clamped wait runs out → the window launches in the background.
+    const open = await (await api('/open', { method: 'POST', body: JSON.stringify({ dir: opened.dir, focus: false }) })).json() as Record<string, unknown>;
+    assert.equal(open.ok, true, 'a still-booting server does not fail the open');
+    assert.equal(open.opening, true);
+    assert.equal(open.serverStarting, true);
+    assert.equal(open.started, true);
+    assert.equal(await waitUp(opened.dir), true, 'the boot /open kicked still settles up');
+  } finally {
+    await api('/server/stop', { method: 'POST', body: JSON.stringify({ dir: manual.dir }) }).catch(() => undefined);
+    await api('/server/stop', { method: 'POST', body: JSON.stringify({ dir: opened.dir }) }).catch(() => undefined);
+    child.kill('SIGKILL');
+    for (const dir of [manual.dir, opened.dir, wsRoot]) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
 });
 
